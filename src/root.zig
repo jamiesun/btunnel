@@ -9,6 +9,7 @@ pub const config = @import("config.zig");
 pub const policy = @import("policy.zig");
 pub const crypto = @import("crypto.zig");
 pub const tun = @import("tun.zig");
+pub const peer = @import("peer.zig");
 pub const reactor = @import("reactor.zig");
 pub const uds = @import("uds.zig");
 

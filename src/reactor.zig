@@ -1,27 +1,38 @@
-//! Task 6: Core reactor (data-plane reactor).
+//! Task 6 (issue #5): Core reactor (data-plane reactor).
 //!
-//! Single-threaded epoll edge-triggered loop: non-blocking blind forwarding
-//! between TUN_FD and UDP_FD. Egress is dispatched uniformly via
-//! `egress(mode, pkt)`; adding a mode only adds a branch, never touches the main
-//! loop. v1 ships raw_direct only; kcp_arq / fec_xor are v2 roadmap and return
-//! NotImplemented for now.
+//! Single-threaded epoll edge-triggered loop: non-blocking forwarding between
+//! TUN_FD and UDP_FD across a multi-peer hub-and-spoke mesh. Routing is driven
+//! by the policy tree's `target` (Model A): a matched entry names either the
+//! local TUN (`target == LOCAL_TARGET`) or a peer id to forward/relay to. Egress
+//! is dispatched uniformly via `egress(mode, pkt)`; adding a mode only adds a
+//! branch, never touches the main loop. v1 ships raw_direct only; kcp_arq /
+//! fec_xor are v2 roadmap and return NotImplemented for now.
 //!
 //! Iron laws honoured here:
-//! - Zero data-plane allocation: every packet buffer is resident in `Reactor`.
+//! - Zero data-plane allocation: every packet buffer is resident in `Reactor`
+//!   (rx, tx, and a third `relay` buffer for hub forwarding).
 //! - Single-threaded, lock-free, epoll edge-triggered (EPOLLET); fds are forced
 //!   non-blocking and each readable fd is drained until EAGAIN.
 //! - Crypto auth failure / replay / malformed input are dropped silently.
 //!
-//! Scope boundary: this is the single-peer point-to-point path. The multi-peer
-//! endpoint table and relay target routing is issue #5; the AF_UNIX control
-//! listener (accept/parse) is issue #7, so `uds_fd` is intentionally NOT
-//! registered with epoll here.
+//! Security model (issue #5):
+//! - Each peer has its own directional keys (`crypto.deriveLinkKey`), so per-peer
+//!   nonce counters can never collide under the shared PSK.
+//! - Inbound datagrams are filtered by source endpoint; the decoded inner IPv4
+//!   source must fall inside the source peer's `allowed_src` prefix, defeating
+//!   inner-source spoofing by an authenticated spoke.
+//! - The hub never reflects a packet back to its source peer (no-reflect guard).
+//!   Topology is single-hub hub-and-spoke; spokes do not relay.
+//!
+//! Scope boundary: the AF_UNIX control listener (accept/parse) is issue #7, so
+//! `uds_fd` is intentionally NOT registered with epoll here.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 const policy = @import("policy.zig");
 const crypto = @import("crypto.zig");
+const peer = @import("peer.zig");
 
 /// Private wire header (packed struct, physically aligned): 1B version + 1B
 /// flags + 2B reserved negotiation field + 8B monotonic sequence number (doubles
@@ -125,19 +136,15 @@ fn ipv4Dst(pkt: []const u8) ?u32 {
     return std.mem.readInt(u32, pkt[16..][0..4], .big);
 }
 
-fn nonblockBit() usize {
-    return @as(u32, @bitCast(linux.O{ .NONBLOCK = true }));
+/// Extract the IPv4 source address (host byte order). Assumes the packet has
+/// already passed `ipv4Dst` validation (same header length guarantees).
+fn ipv4Src(pkt: []const u8) ?u32 {
+    if (pkt.len < 20) return null;
+    return std.mem.readInt(u32, pkt[12..][0..4], .big);
 }
 
-/// Random high word for the transmit nonce counter, sourced from getrandom so
-/// that nonces do not repeat across a restart with the same key. Falls back to
-/// 0 only if the syscall is unavailable (counter low bits still avoid same-run
-/// reuse).
-fn randomHigh() u32 {
-    var b: [4]u8 = undefined;
-    const rc = linux.getrandom(&b, b.len, 0);
-    if (linux.errno(rc) != .SUCCESS or rc != b.len) return 0;
-    return std.mem.readInt(u32, &b, .little);
+fn nonblockBit() usize {
+    return @as(u32, @bitCast(linux.O{ .NONBLOCK = true }));
 }
 
 fn setNonblock(fd: linux.fd_t) !void {
@@ -155,36 +162,29 @@ pub const Reactor = struct {
     uds_fd: linux.fd_t,
     active: *policy.ActiveTree,
     mode: EgressMode = .raw_direct,
-    /// 32-byte pre-shared key for the AEAD seal/open.
-    key: crypto.Key,
-    /// The single remote endpoint (network byte order). Multi-peer is issue #5.
-    peer: linux.sockaddr.in,
-    tx_counter: crypto.NonceCounter = .{},
-    rx_window: crypto.ReplayWindow = .{},
+    /// Multi-peer endpoint + crypto registry (per-peer keys, counters, windows).
+    registry: *peer.PeerRegistry,
     rx: [BUF_LEN]u8 = undefined,
     tx: [BUF_LEN]u8 = undefined,
+    /// Third resident buffer for hub relay: an inbound datagram decoded into
+    /// `tx` is re-sealed into `relay` before forwarding to another peer, so the
+    /// two operations never alias.
+    relay: [BUF_LEN]u8 = undefined,
 
-    /// Build a reactor and reseed the transmit nonce counter from a random high
-    /// word so that, after a restart with the same PSK, sequence numbers (and
-    /// therefore AEAD nonces) do not repeat.
     pub fn init(
         tun_fd: linux.fd_t,
         udp_fd: linux.fd_t,
         uds_fd: linux.fd_t,
         active: *policy.ActiveTree,
-        key: crypto.Key,
-        peer: linux.sockaddr.in,
+        registry: *peer.PeerRegistry,
     ) Reactor {
-        var r = Reactor{
+        return .{
             .tun_fd = tun_fd,
             .udp_fd = udp_fd,
             .uds_fd = uds_fd,
             .active = active,
-            .key = key,
-            .peer = peer,
+            .registry = registry,
         };
-        r.tx_counter.reseedHigh(randomHigh());
-        return r;
     }
 
     fn epollAdd(epfd: i32, fd: linux.fd_t) !void {
@@ -226,14 +226,17 @@ pub const Reactor = struct {
                 if (fd == self.tun_fd) {
                     self.pumpTunToUdp();
                 } else if (fd == self.udp_fd) {
-                    self.pumpUdpToTun();
+                    self.pumpUdpIngress();
                 }
             }
         }
     }
 
-    /// Drain the TUN fd: read each IP packet, apply the policy DROP decision,
-    /// seal it, and blind-forward to the configured peer. Loops until EAGAIN.
+    /// Drain the TUN fd (locally-originated traffic): read each IP packet, look
+    /// up its destination in the policy tree to find the target peer, seal it
+    /// with that peer's key, and forward. Packets with no route, a DROP rule, a
+    /// LOCAL target (would loop to self), or an unknown target are dropped.
+    /// Loops until EAGAIN.
     pub fn pumpTunToUdp(self: *Reactor) void {
         while (true) {
             const rc = linux.read(self.tun_fd, &self.rx, self.rx.len);
@@ -245,20 +248,23 @@ pub const Reactor = struct {
             const pkt = self.rx[0..rc];
 
             const dst = ipv4Dst(pkt) orelse continue; // non-IPv4/malformed -> drop
-            if (self.active.load().match(dst)) |entry| {
-                if (entry.action == .drop) continue;
-            }
+            const entry = self.active.load().match(dst) orelse continue; // no route -> drop
+            if (entry.action == .drop) continue;
+            if (entry.target == peer.LOCAL_TARGET) continue; // local-origin to local -> drop
+            const dst_peer = self.registry.findById(entry.target) orelse continue; // unknown target
             if (pkt.len > MAX_PLAINTEXT) continue; // oversized -> drop
             egress(self.mode, pkt) catch continue; // v2 modes not yet shipped -> drop
 
-            const wire_len = encodeEgress(self.key, &self.tx_counter, pkt, &self.tx);
-            self.sendToPeer(self.tx[0..wire_len]);
+            const wire_len = encodeEgress(dst_peer.tx_key, &dst_peer.tx, pkt, &self.tx);
+            self.sendTo(dst_peer.endpoint, self.tx[0..wire_len]);
         }
     }
 
-    /// Drain the UDP fd: filter by source endpoint, authenticate + anti-replay,
-    /// and write the recovered IP packet to the TUN. Loops until EAGAIN.
-    pub fn pumpUdpToTun(self: *Reactor) void {
+    /// Drain the UDP fd: filter by source endpoint, authenticate + anti-replay
+    /// with the source peer's key, enforce inner-source binding, then route by
+    /// the policy `target` — deliver to the local TUN, or relay to another peer
+    /// (hub behaviour). Loops until EAGAIN.
+    pub fn pumpUdpIngress(self: *Reactor) void {
         while (true) {
             var src: linux.sockaddr.in = undefined;
             var slen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
@@ -269,22 +275,44 @@ pub const Reactor = struct {
             if (e != .SUCCESS) return;
             const dgram = self.rx[0..rc];
 
-            // Source-endpoint filter: only the configured peer is admitted.
-            if (src.addr != self.peer.addr or src.port != self.peer.port) continue;
+            // Source-endpoint filter: only a configured peer is admitted.
+            const src_peer = self.registry.findByAddr(src.addr, src.port) orelse continue;
 
-            const plen = decodeIngress(self.key, &self.rx_window, dgram, &self.tx) orelse continue;
-            self.writeTun(self.tx[0..plen]);
+            const plen = decodeIngress(src_peer.rx_key, &src_peer.rx, dgram, &self.tx) orelse continue;
+            const pkt = self.tx[0..plen];
+
+            // Inner-source binding: the decoded source IP must belong to the
+            // source peer's allowed prefix (anti-spoofing).
+            const isrc = ipv4Src(pkt) orelse continue;
+            if (!src_peer.allowed_src.contains(isrc)) continue;
+
+            const dst = ipv4Dst(pkt) orelse continue;
+            const entry = self.active.load().match(dst) orelse continue; // no route -> drop
+            if (entry.action == .drop) continue;
+
+            if (entry.target == peer.LOCAL_TARGET) {
+                self.writeTun(pkt);
+                continue;
+            }
+
+            // Relay to another peer (hub forwarding).
+            const dst_peer = self.registry.findById(entry.target) orelse continue; // unknown target
+            if (dst_peer.id == src_peer.id) continue; // no-reflect guard
+            if (pkt.len > MAX_PLAINTEXT) continue;
+            const wire_len = encodeEgress(dst_peer.tx_key, &dst_peer.tx, pkt, &self.relay);
+            self.sendTo(dst_peer.endpoint, self.relay[0..wire_len]);
         }
     }
 
-    fn sendToPeer(self: *Reactor, buf: []const u8) void {
+    fn sendTo(self: *Reactor, endpoint: linux.sockaddr.in, buf: []const u8) void {
+        var ep = endpoint;
         while (true) {
             const rc = linux.sendto(
                 self.udp_fd,
                 buf.ptr,
                 buf.len,
                 0,
-                @ptrCast(&self.peer),
+                @ptrCast(&ep),
                 @sizeOf(linux.sockaddr.in),
             );
             if (linux.errno(rc) == .INTR) continue;
@@ -383,12 +411,22 @@ fn addrOf(fd: linux.fd_t) !linux.sockaddr.in {
     return a;
 }
 
-test "pump: TUN->UDP seals and forwards to the peer" {
+fn ipPkt(src: [4]u8, dst: [4]u8) [28]u8 {
+    var p = [_]u8{0} ** 28;
+    p[0] = 0x45; // IPv4, IHL=5
+    p[3] = 28; // total length
+    p[8] = 64; // TTL
+    @memcpy(p[12..16], &src);
+    @memcpy(p[16..20], &dst);
+    return p;
+}
+
+const ANY_SRC = policy.Cidr{ .network = 0, .prefix = 0 };
+
+test "pump: TUN->UDP seals to the policy-selected peer" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
-    const key: crypto.Key = [_]u8{0x33} ** crypto.KEY_LEN;
-    var empty = policy.PolicyTree{ .entries = &.{} };
-    var active = policy.ActiveTree.init(&empty);
+    const psk: crypto.Key = [_]u8{0x33} ** crypto.KEY_LEN;
 
     // tun side: a pipe whose read end the reactor drains.
     var pipe_fds: [2]i32 = undefined;
@@ -396,81 +434,178 @@ test "pump: TUN->UDP seals and forwards to the peer" {
     defer _ = linux.close(pipe_fds[0]);
     defer _ = linux.close(pipe_fds[1]);
 
-    const udp_a = try makeUdpLoopback(); // reactor's udp_fd
+    const udp_hub = try makeUdpLoopback(); // reactor's udp_fd (local id 1)
+    defer _ = linux.close(udp_hub);
+    const udp_a = try makeUdpLoopback(); // peer A (id 2)
     defer _ = linux.close(udp_a);
-    const udp_b = try makeUdpLoopback(); // the remote peer
-    defer _ = linux.close(udp_b);
-    const peer = try addrOf(udp_b);
 
-    var r = Reactor.init(pipe_fds[0], udp_a, -1, &active, key, peer);
+    var reg = peer.PeerRegistry.init(1);
+    _ = try reg.add(psk, 2, try addrOf(udp_a), ANY_SRC);
 
-    const ip_pkt = [_]u8{ 0x45, 0, 0, 28 } ++ [_]u8{0} ** 12 ++ [_]u8{ 10, 0, 0, 9 } ++ [_]u8{0} ** 8;
+    // Route 10.0.0.2 -> peer 2.
+    const entries = [_]policy.PolicyEntry{.{
+        .src = try policy.parseCidr("0.0.0.0/0"),
+        .dst = try policy.parseCidr("10.0.0.2/32"),
+        .action = .forward,
+        .target = 2,
+    }};
+    var tree = policy.PolicyTree{ .entries = &entries };
+    var active = policy.ActiveTree.init(&tree);
+
+    var r = Reactor.init(pipe_fds[0], udp_hub, -1, &active, &reg);
+
+    const ip_pkt = ipPkt(.{ 10, 0, 0, 1 }, .{ 10, 0, 0, 2 });
     _ = linux.write(pipe_fds[1], &ip_pkt, ip_pkt.len);
 
     r.pumpTunToUdp();
 
     var buf: [MAX_WIRE]u8 = undefined;
-    const rc = linux.recvfrom(udp_b, &buf, buf.len, 0, null, null);
+    const rc = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
     try std.testing.expect(linux.errno(rc) == .SUCCESS);
 
+    // Peer A decodes with its rx key for traffic from the hub: derive(psk, 1, 2).
+    const a_rx = crypto.deriveLinkKey(psk, 1, 2);
     var window = crypto.ReplayWindow{};
     var out: [MAX_PLAINTEXT]u8 = undefined;
-    const plen = decodeIngress(key, &window, buf[0..rc], &out) orelse return error.UnexpectedDrop;
+    const plen = decodeIngress(a_rx, &window, buf[0..rc], &out) orelse return error.UnexpectedDrop;
     try std.testing.expectEqualSlices(u8, &ip_pkt, out[0..plen]);
+
+    // A packet whose destination has no route is dropped (no default peer).
+    const no_route = ipPkt(.{ 10, 0, 0, 1 }, .{ 10, 0, 0, 9 });
+    _ = linux.write(pipe_fds[1], &no_route, no_route.len);
+    r.pumpTunToUdp();
+    const rc2 = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
+    try std.testing.expect(linux.errno(rc2) == .AGAIN);
 }
 
-test "pump: UDP->TUN authenticates, filters source, and writes to TUN" {
+test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
-    const key: crypto.Key = [_]u8{0x44} ** crypto.KEY_LEN;
-    var empty = policy.PolicyTree{ .entries = &.{} };
-    var active = policy.ActiveTree.init(&empty);
+    const psk: crypto.Key = [_]u8{0x44} ** crypto.KEY_LEN;
+
+    const udp_hub = try makeUdpLoopback(); // reactor (local id 1)
+    defer _ = linux.close(udp_hub);
+    const udp_a = try makeUdpLoopback(); // spoke A (id 2)
+    defer _ = linux.close(udp_a);
+    const udp_b = try makeUdpLoopback(); // spoke B (id 3)
+    defer _ = linux.close(udp_b);
+
+    const hub_addr = try addrOf(udp_hub);
+
+    var reg = peer.PeerRegistry.init(1);
+    _ = try reg.add(psk, 2, try addrOf(udp_a), try policy.parseCidr("10.0.0.2/32"));
+    _ = try reg.add(psk, 3, try addrOf(udp_b), try policy.parseCidr("10.0.0.3/32"));
+
+    // 10.0.0.3 relays to peer 3; 10.0.0.2 would reflect back to the source.
+    const entries = [_]policy.PolicyEntry{
+        .{ .src = try policy.parseCidr("0.0.0.0/0"), .dst = try policy.parseCidr("10.0.0.3/32"), .action = .forward, .target = 3 },
+        .{ .src = try policy.parseCidr("0.0.0.0/0"), .dst = try policy.parseCidr("10.0.0.2/32"), .action = .forward, .target = 2 },
+    };
+    var tree = policy.PolicyTree{ .entries = &entries };
+    var active = policy.ActiveTree.init(&tree);
+
+    // tun fd unused on the relay path; a throwaway pipe write end keeps it valid.
+    var pipe_fds: [2]i32 = undefined;
+    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    var r = Reactor.init(pipe_fds[1], udp_hub, -1, &active, &reg);
+
+    // A seals with its tx key to the hub: derive(psk, 2, 1).
+    const a_tx = crypto.deriveLinkKey(psk, 2, 1);
+    var a_counter = crypto.NonceCounter{};
+    const to_b = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 3 });
+    var wire: [MAX_WIRE]u8 = undefined;
+    const wlen = encodeEgress(a_tx, &a_counter, &to_b, &wire);
+    _ = linux.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+
+    r.pumpUdpIngress();
+
+    // B receives the relayed packet, decodes with derive(psk, 1, 3).
+    var buf: [MAX_WIRE]u8 = undefined;
+    const rcb = linux.recvfrom(udp_b, &buf, buf.len, 0, null, null);
+    try std.testing.expect(linux.errno(rcb) == .SUCCESS);
+    const b_rx = crypto.deriveLinkKey(psk, 1, 3);
+    var window = crypto.ReplayWindow{};
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    const plen = decodeIngress(b_rx, &window, buf[0..rcb], &out) orelse return error.UnexpectedDrop;
+    try std.testing.expectEqualSlices(u8, &to_b, out[0..plen]);
+
+    // No-reflect: A sends a packet destined to itself (target 2). The hub must
+    // not bounce it back to A.
+    const to_self = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 2 });
+    var c2 = crypto.NonceCounter{};
+    const wlen2 = encodeEgress(a_tx, &c2, &to_self, &wire);
+    _ = linux.sendto(udp_a, &wire, wlen2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    r.pumpUdpIngress();
+    const rca = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
+    try std.testing.expect(linux.errno(rca) == .AGAIN);
+}
+
+test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoofs" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
 
     var pipe_fds: [2]i32 = undefined;
     if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
     defer _ = linux.close(pipe_fds[0]);
     defer _ = linux.close(pipe_fds[1]);
 
-    const udp_a = try makeUdpLoopback(); // reactor's udp_fd
+    const udp_hub = try makeUdpLoopback(); // reactor (local id 1)
+    defer _ = linux.close(udp_hub);
+    const udp_a = try makeUdpLoopback(); // spoke A (id 2), bound to 10.0.0.2/32
     defer _ = linux.close(udp_a);
-    const udp_b = try makeUdpLoopback(); // the trusted peer
-    defer _ = linux.close(udp_b);
-    const udp_c = try makeUdpLoopback(); // an untrusted stranger
+    const udp_c = try makeUdpLoopback(); // an unregistered stranger
     defer _ = linux.close(udp_c);
 
-    const peer = try addrOf(udp_b);
-    const a_addr = try addrOf(udp_a);
+    const hub_addr = try addrOf(udp_hub);
 
-    var r = Reactor.init(pipe_fds[1], udp_a, -1, &active, key, peer);
+    var reg = peer.PeerRegistry.init(1);
+    _ = try reg.add(psk, 2, try addrOf(udp_a), try policy.parseCidr("10.0.0.2/32"));
 
-    const ip_pkt = [_]u8{ 0x45, 0, 0, 24 } ++ [_]u8{0} ** 12 ++ [_]u8{ 10, 0, 0, 5 } ++ [_]u8{0} ** 4;
+    // 10.0.0.1 is the hub's own TUN address (LOCAL delivery).
+    const entries = [_]policy.PolicyEntry{.{
+        .src = try policy.parseCidr("0.0.0.0/0"),
+        .dst = try policy.parseCidr("10.0.0.1/32"),
+        .action = .forward,
+        .target = peer.LOCAL_TARGET,
+    }};
+    var tree = policy.PolicyTree{ .entries = &entries };
+    var active = policy.ActiveTree.init(&tree);
 
-    // Encode on the peer side with an independent counter.
-    var counter = crypto.NonceCounter{};
+    var r = Reactor.init(pipe_fds[1], udp_hub, -1, &active, &reg);
+
+    const a_tx = crypto.deriveLinkKey(psk, 2, 1);
+    // A single monotonic counter for everything peer A sends (mirrors reality:
+    // one counter per peer, so sequence numbers never repeat against the hub's
+    // per-peer replay window).
+    var a_counter = crypto.NonceCounter{};
+
+    // Stranger (not in the registry) -> dropped by the source filter, even with
+    // a correctly-sealed packet (the source filter fires before decode).
+    const legit = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 1 });
+    var c0 = crypto.NonceCounter{};
     var wire: [MAX_WIRE]u8 = undefined;
-    const wlen = encodeEgress(key, &counter, &ip_pkt, &wire);
-
-    // Stranger (udp_c) -> dropped by the source filter.
-    _ = linux.sendto(udp_c, &wire, wlen, 0, @ptrCast(&a_addr), @sizeOf(linux.sockaddr.in));
-    // Trusted peer (udp_b) -> accepted.
-    _ = linux.sendto(udp_b, &wire, wlen, 0, @ptrCast(&a_addr), @sizeOf(linux.sockaddr.in));
-
-    r.pumpUdpToTun();
-
+    const wl0 = encodeEgress(a_tx, &c0, &legit, &wire);
+    _ = linux.sendto(udp_c, &wire, wl0, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    r.pumpUdpIngress();
     var buf: [MAX_PLAINTEXT]u8 = undefined;
+    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+
+    // Inner-source spoof: A is bound to 10.0.0.2/32 but claims source 10.0.0.99.
+    const spoof = ipPkt(.{ 10, 0, 0, 99 }, .{ 10, 0, 0, 1 });
+    const wl1 = encodeEgress(a_tx, &a_counter, &spoof, &wire);
+    _ = linux.sendto(udp_a, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    r.pumpUdpIngress();
+    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+
+    // Legitimate packet from A to the LOCAL target -> written to the TUN.
+    const wl2 = encodeEgress(a_tx, &a_counter, &legit, &wire);
+    _ = linux.sendto(udp_a, &wire, wl2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    r.pumpUdpIngress();
     const rc = linux.read(pipe_fds[0], &buf, buf.len);
     try std.testing.expect(linux.errno(rc) == .SUCCESS);
-    try std.testing.expectEqualSlices(u8, &ip_pkt, buf[0..rc]);
-
-    // Exactly one packet should have been delivered; the next read is empty.
-    const rc2 = linux.read(pipe_fds[0], &buf, buf.len);
-    try std.testing.expect(linux.errno(rc2) == .AGAIN);
-
-    // A tampered datagram from the trusted peer is silently dropped.
-    var tampered = wire;
-    tampered[wlen - 1] ^= 0xFF;
-    _ = linux.sendto(udp_b, &tampered, wlen, 0, @ptrCast(&a_addr), @sizeOf(linux.sockaddr.in));
-    r.pumpUdpToTun();
-    const rc3 = linux.read(pipe_fds[0], &buf, buf.len);
-    try std.testing.expect(linux.errno(rc3) == .AGAIN);
+    try std.testing.expectEqualSlices(u8, &legit, buf[0..rc]);
 }
