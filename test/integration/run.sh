@@ -80,11 +80,12 @@ nsize=$(assert_size zig-out/bin/btunnel)
 ok "native binary is static and ${nsize} bytes (<= ${SIZE_BUDGET})"
 
 log "smoke-running the daemon ..."
-# v1 mandates a non-zero PSK (iron law #5): the all-zero default is
-# non-runnable, so the smoke run provisions a throwaway PSK via config.json.
+# v1 mandates a non-zero per-peer PSK (iron law #5, issue #13): the zero-peer
+# default is non-runnable, so the smoke run provisions one throwaway peer with a
+# private PSK via config.json.
 smoke_dir=$(mktemp -d)
 cp zig-out/bin/btunnel "$smoke_dir/btunnel"
-printf '{ "psk": "%s" }' \
+printf '{ "local_id": 1, "peers": [ { "id": 2, "endpoint": "203.0.113.2:51820", "psk": "%s" } ] }' \
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
   > "$smoke_dir/config.json"
 if ! out=$(cd "$smoke_dir" && ./btunnel --check 2>&1); then
@@ -120,9 +121,13 @@ ok "unit tests green"
 #   bt_a  10.100.1.2 <--veth--> 10.100.1.1  bt_hub  10.100.2.1 <--veth--> 10.100.2.2  bt_b
 #   overlay btun0:  a = 10.0.0.2/24   hub = (relay, no overlay IP)   b = 10.0.0.3/24
 #
-# Mesh ids: hub=1, a=2, b=3. Routing/key trace:
-#   a->b: a seals derive(psk,2,1) -> hub; hub rx derive(psk,2,1), relays
-#         derive(psk,1,3) -> b; b rx derive(psk,1,3) -> LOCAL. Reply mirrors.
+# Mesh ids: hub=1, a=2, b=3. Per-link private PSKs (issue #13):
+#   PSK_A is shared ONLY by the hub<->a link; PSK_B ONLY by the hub<->b link.
+# Routing/key trace:
+#   a->b: a seals derive(PSK_A,2,1) -> hub; hub rx derive(PSK_A,2,1), relays
+#         derive(PSK_B,1,3) -> b; b rx derive(PSK_B,1,3) -> LOCAL. Reply mirrors.
+#   Spokes a and b never share a key, so neither can read or forge the other's
+#   hub link — the per-peer isolation #13 establishes.
 #
 # Policy match is destination-only in v1 (PolicyEntry.src is parsed but unused),
 # so every rule uses --src 0.0.0.0/0; the Hub's per-spoke /32 allowed_src in the
@@ -136,7 +141,10 @@ ok "unit tests green"
 #   3. Hot-update: an RCU `ptctl policy add` injected mid-stream does not stall
 #      a backgrounded ping (anti-replay drops are covered by unit tests).
 
-PSK="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# Distinct private PSK per hub link (issue #13): sharing one across links would
+# be rejected by validate (DuplicatePsk) and defeat per-peer isolation.
+PSK_A="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+PSK_B="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 E2E_NS=(bt_hub bt_a bt_b)
 declare -a E2E_PIDS=()
 E2E_TMP=""
@@ -179,7 +187,7 @@ ptctl_in() { # ptctl_in <ns> <sock> <args...>
 
 write_config() { # write_config <dir> <local_id> <peers-json>
   cat > "$1/config.json" <<EOF
-{ "psk": "$PSK", "local_id": $2, "peers": $3 }
+{ "local_id": $2, "peers": $3 }
 EOF
 }
 
@@ -237,13 +245,15 @@ e2e_netns() {
   for ns in "${E2E_NS[@]}"; do ip netns exec "$ns" ip link set lo up; done
 
   # --- per-node config (endpoints are the directly-connected veth addresses) ---
+  # Each link carries its OWN private PSK (issue #13): hub<->a uses PSK_A on
+  # both ends, hub<->b uses PSK_B; the two differ so spokes share no key.
   write_config "$E2E_TMP/hub" 1 \
-    '[ {"id":2,"endpoint":"10.100.1.2:51820","allowed_src":"10.0.0.2/32"},
-       {"id":3,"endpoint":"10.100.2.2:51820","allowed_src":"10.0.0.3/32"} ]'
+    "[ {\"id\":2,\"endpoint\":\"10.100.1.2:51820\",\"allowed_src\":\"10.0.0.2/32\",\"psk\":\"$PSK_A\"},
+       {\"id\":3,\"endpoint\":\"10.100.2.2:51820\",\"allowed_src\":\"10.0.0.3/32\",\"psk\":\"$PSK_B\"} ]"
   write_config "$E2E_TMP/a" 2 \
-    '[ {"id":1,"endpoint":"10.100.1.1:51820","allowed_src":"10.0.0.0/24"} ]'
+    "[ {\"id\":1,\"endpoint\":\"10.100.1.1:51820\",\"allowed_src\":\"10.0.0.0/24\",\"psk\":\"$PSK_A\"} ]"
   write_config "$E2E_TMP/b" 3 \
-    '[ {"id":1,"endpoint":"10.100.2.1:51820","allowed_src":"10.0.0.0/24"} ]'
+    "[ {\"id\":1,\"endpoint\":\"10.100.2.1:51820\",\"allowed_src\":\"10.0.0.0/24\",\"psk\":\"$PSK_B\"} ]"
 
   local hub_sock="$E2E_TMP/hub.sock" a_sock="$E2E_TMP/a.sock" b_sock="$E2E_TMP/b.sock"
   start_daemon bt_hub "$E2E_TMP/hub" "$hub_sock"

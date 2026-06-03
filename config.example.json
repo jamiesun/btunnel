@@ -1,12 +1,11 @@
 {
   "negotiation_version": 1,
-  "psk": "REPLACE_WITH_64_HEX_CHARS_E_G_FROM_openssl_rand_hex_32_COMMAND",
   "local_tun_mtu": 1452,
   "listen_port": 51820,
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 1,
   "peers": [
-    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32" },
-    { "id": 3, "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32" }
+    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "REPLACE_LINK_1_2_64_HEX_CHARS_openssl_rand_hex_32_UNIQUE_PER_LINK" },
+    { "id": 3, "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32", "psk": "REPLACE_LINK_1_3_64_HEX_CHARS_openssl_rand_hex_32_UNIQUE_PER_LINK" }
   ]
 }

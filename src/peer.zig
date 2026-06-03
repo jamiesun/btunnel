@@ -156,7 +156,7 @@ pub const PeerRegistry = struct {
         var i: usize = 0;
         while (i < cfg.peer_count) : (i += 1) {
             const spec = cfg.peers[i];
-            _ = try reg.add(cfg.psk, spec.id, spec.endpoint, spec.allowed_src, boot_epoch);
+            _ = try reg.add(spec.psk, spec.id, spec.endpoint, spec.allowed_src, boot_epoch);
         }
         return reg;
     }
@@ -218,9 +218,8 @@ test "registry: rejects reserved id, self-reference, duplicates, and overflow" {
 
 test "registry: fromConfig requires a local_id when peers are present" {
     var cfg = config.Config.default();
-    cfg.psk = [_]u8{0x5a} ** 32;
     cfg.peer_count = 1;
-    cfg.peers[0] = .{ .id = 2, .endpoint = testEndpoint("10.0.0.2:51820"), .allowed_src = .{ .network = 0, .prefix = 0 } };
+    cfg.peers[0] = .{ .id = 2, .endpoint = testEndpoint("10.0.0.2:51820"), .allowed_src = .{ .network = 0, .prefix = 0 }, .psk = [_]u8{0x5a} ** 32 };
     const epoch: u64 = 1_700_000_000_000_000_000;
 
     cfg.local_id = 0;

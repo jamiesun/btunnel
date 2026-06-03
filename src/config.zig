@@ -23,6 +23,7 @@ pub const SanityError = error{
     MtuOutOfRange,
     SubnetOverlap,
     InvalidPsk,
+    DuplicatePsk,
 };
 
 /// CIDR string parse errors (canonical home; re-exported by `policy.zig`).
@@ -79,6 +80,11 @@ pub const PeerSpec = struct {
     id: u32,
     endpoint: linux.sockaddr.in,
     allowed_src: Cidr = .{ .network = 0, .prefix = 0 },
+    /// Private per-link pre-shared key (issue #13). Each peer link has its OWN
+    /// secret, so compromising one spoke's PSK cannot derive any other link's
+    /// keys. Both ends of a link must configure the SAME value for that link;
+    /// distinct links must use DISTINCT keys (enforced by `validate`).
+    psk: Psk = [_]u8{0} ** 32,
 };
 
 /// Parse "A.B.C.D/P" into a Cidr (network in host byte order).
@@ -135,8 +141,6 @@ pub const Config = struct {
     /// v1 header/config negotiation version (fixed to 1 in v1, reserved for the
     /// v2 handshake).
     negotiation_version: u8 = 1,
-    /// Pre-shared key.
-    psk: Psk = [_]u8{0} ** 32,
     /// Tunnel MTU.
     local_tun_mtu: u16 = 1452,
     /// Local UDP listen port.
@@ -148,28 +152,40 @@ pub const Config = struct {
     /// (issue #5). Zero means "single-node / no mesh configured".
     local_id: u32 = 0,
     /// Configured mesh peers (fixed-capacity, zero-allocation). Only the first
-    /// `peer_count` entries are valid.
+    /// `peer_count` entries are valid. Each peer carries its own private PSK
+    /// (issue #13); there is no mesh-wide shared key.
     peers: [MAX_PEERS]PeerSpec = undefined,
     peer_count: usize = 0,
 
     /// Compile-time hardcoded fallback config (used when config.json is
-    /// missing). Note: the fallback PSK is all-zero, which `validate()`
-    /// deliberately rejects — the default config is intentionally NON-RUNNABLE
-    /// until a real PSK is provisioned via config.json (iron law #5).
+    /// missing). Note: it has zero peers, which `validate()` deliberately
+    /// rejects — the default config is intentionally NON-RUNNABLE until real
+    /// peers with private PSKs are provisioned via config.json (iron law #5).
     pub fn default() Config {
         return .{};
     }
 
-    /// Whether the PSK is unset (all-zero). v1 mandates a real PSK.
-    pub fn pskIsZero(self: Config) bool {
-        return std.mem.allEqual(u8, &self.psk, 0);
-    }
-
-    /// Foolproof boundary checks: mandatory non-zero PSK + MTU range +
-    /// virtual/host subnet overlap. A missing/all-zero PSK is rejected so the
+    /// Foolproof boundary checks: at least one authenticated peer link with a
+    /// non-zero, per-link-unique PSK (issue #13) + MTU range + virtual/host
+    /// subnet overlap. A config without a usable per-peer PSK is rejected so the
     /// daemon can never start unauthenticated.
     pub fn validate(self: Config, host_subnets: []const Cidr) SanityError!void {
-        if (self.pskIsZero()) return SanityError.InvalidPsk;
+        // A runnable node must have at least one peer link, each with a real
+        // (non-zero) private key. Zero peers keeps the compile-time default
+        // non-runnable (iron law #5).
+        if (self.peer_count == 0) return SanityError.InvalidPsk;
+        var i: usize = 0;
+        while (i < self.peer_count) : (i += 1) {
+            if (std.mem.allEqual(u8, &self.peers[i].psk, 0)) return SanityError.InvalidPsk;
+            // Reusing one PSK across links would let a single compromised peer
+            // derive every other link's keys, defeating the per-peer model.
+            var j: usize = i + 1;
+            while (j < self.peer_count) : (j += 1) {
+                if (std.mem.eql(u8, &self.peers[i].psk, &self.peers[j].psk)) {
+                    return SanityError.DuplicatePsk;
+                }
+            }
+        }
         if (self.local_tun_mtu < MTU_MIN or self.local_tun_mtu > MTU_MAX) {
             return SanityError.MtuOutOfRange;
         }
@@ -179,8 +195,10 @@ pub const Config = struct {
     }
 
     /// On-wire JSON schema. Defaults mirror `Config` so a partial document is
-    /// valid; `psk` is a 64-char hex string and `virtual_subnet` a CIDR string.
-    /// Unknown fields are ignored so forward-compatible keys do not break
+    /// valid; `virtual_subnet` is a CIDR string. The mesh-wide top-level `psk`
+    /// was removed in issue #13 — it is kept here only as a tripwire so an old
+    /// config that still carries it is loudly rejected (see `fromJson`). Unknown
+    /// fields are otherwise ignored so forward-compatible keys do not break
     /// parsing.
     const Wire = struct {
         negotiation_version: u8 = 1,
@@ -192,11 +210,13 @@ pub const Config = struct {
         peers: []const WirePeer = &.{},
     };
 
-    /// On-wire schema for a single mesh peer.
+    /// On-wire schema for a single mesh peer. `psk` is this link's private
+    /// pre-shared key, a required 64-char hex string (issue #13).
     const WirePeer = struct {
         id: u32 = 0,
         endpoint: []const u8 = "",
         allowed_src: []const u8 = "0.0.0.0/0",
+        psk: []const u8 = "",
     };
 
     /// Parse a config.json document. Returns a fully-owned `Config` (no slices
@@ -210,6 +230,11 @@ pub const Config = struct {
         defer parsed.deinit();
         const w = parsed.value;
 
+        // The mesh-wide top-level PSK was removed in issue #13. Reject it loudly
+        // rather than silently ignoring it, so operators migrate to per-peer
+        // `peers[].psk` instead of believing a shared key is still in force.
+        if (w.psk.len != 0) return error.InvalidPsk;
+
         var cfg = Config{
             .negotiation_version = w.negotiation_version,
             .local_tun_mtu = w.local_tun_mtu,
@@ -218,18 +243,19 @@ pub const Config = struct {
             .local_id = w.local_id,
         };
 
-        if (w.psk.len != 0) {
-            if (w.psk.len != 64) return error.InvalidPsk;
-            _ = std.fmt.hexToBytes(cfg.psk[0..], w.psk) catch return error.InvalidPsk;
-        }
-
         if (w.peers.len > MAX_PEERS) return error.TooManyPeers;
         for (w.peers, 0..) |wp, i| {
+            // Every peer must carry a private 64-hex PSK; missing (empty) and
+            // wrong-length both fail the length gate, malformed hex fails decode.
+            if (wp.psk.len != 64) return error.InvalidPsk;
+            var pk: Psk = undefined;
+            _ = std.fmt.hexToBytes(pk[0..], wp.psk) catch return error.InvalidPsk;
             // Copy every field out by value so nothing borrows the parse arena.
             cfg.peers[i] = .{
                 .id = wp.id,
                 .endpoint = parseEndpoint(wp.endpoint) catch return error.InvalidEndpoint,
                 .allowed_src = parseCidr(wp.allowed_src) catch return error.InvalidCidr,
+                .psk = pk,
             };
         }
         cfg.peer_count = w.peers.len;
@@ -240,7 +266,9 @@ pub const Config = struct {
 
 test "validate: MTU out of range is rejected" {
     var cfg = Config.default();
-    cfg.psk = [_]u8{0x5a} ** 32; // provision a PSK so the MTU fuse is what fires
+    // provision a peer with a non-zero PSK so the MTU fuse is what fires
+    cfg.peer_count = 1;
+    cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
     cfg.local_tun_mtu = 9000;
     try std.testing.expectError(SanityError.MtuOutOfRange, cfg.validate(&.{}));
 
@@ -250,7 +278,8 @@ test "validate: MTU out of range is rejected" {
 
 test "validate: virtual/host subnet overlap is rejected" {
     var cfg = Config.default(); // 10.0.0.0/24
-    cfg.psk = [_]u8{0x5a} ** 32;
+    cfg.peer_count = 1;
+    cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
     const overlap = Cidr{ .network = 0x0A00_0000, .prefix = 16 }; // 10.0.0.0/16
     try std.testing.expectError(SanityError.SubnetOverlap, cfg.validate(&.{overlap}));
 
@@ -258,57 +287,105 @@ test "validate: virtual/host subnet overlap is rejected" {
     try cfg.validate(&.{disjoint});
 }
 
-test "validate: a missing/all-zero PSK is rejected (mandatory PSK, iron law #5)" {
-    // The compile-time default ships an all-zero PSK and must be non-runnable.
+test "validate: a missing/all-zero per-peer PSK is rejected (mandatory PSK, iron law #5)" {
+    // The compile-time default ships zero peers and must be non-runnable.
     const def = Config.default();
-    try std.testing.expect(def.pskIsZero());
+    try std.testing.expectEqual(@as(usize, 0), def.peer_count);
     try std.testing.expectError(SanityError.InvalidPsk, def.validate(&.{}));
 
-    // A provisioned PSK clears the gate.
+    // A peer with an all-zero PSK is still rejected.
+    var zero = Config.default();
+    zero.peer_count = 1;
+    zero.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0} ** 32 };
+    try std.testing.expectError(SanityError.InvalidPsk, zero.validate(&.{}));
+
+    // A provisioned per-peer PSK clears the gate.
     var cfg = Config.default();
-    cfg.psk = [_]u8{0x01} ** 32;
-    try std.testing.expect(!cfg.pskIsZero());
+    cfg.peer_count = 1;
+    cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x01} ** 32 };
+    try cfg.validate(&.{});
+}
+
+test "validate: reusing one PSK across peers is rejected (per-peer isolation, issue #13)" {
+    var cfg = Config.default();
+    cfg.peer_count = 2;
+    cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
+    cfg.peers[1] = .{ .id = 3, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
+    try std.testing.expectError(SanityError.DuplicatePsk, cfg.validate(&.{}));
+
+    // Distinct per-link PSKs are accepted.
+    cfg.peers[1].psk = [_]u8{0x6b} ** 32;
     try cfg.validate(&.{});
 }
 
 test "JSON Parser & Sanity Check" {
     const a = std.testing.allocator;
-
-    // A full document maps every field and decodes the hex PSK.
     const psk_hex = "0123456789abcdef" ** 4; // 64 hex chars
+
+    // A document with a peer maps every field and decodes the hex PSK.
     const ok =
-        "{ \"negotiation_version\": 1, \"psk\": \"" ++ psk_hex ++
-        "\", \"local_tun_mtu\": 1400, \"listen_port\": 4000, \"virtual_subnet\": \"10.9.0.0/24\" }";
+        "{ \"negotiation_version\": 1, \"local_tun_mtu\": 1400, \"listen_port\": 4000," ++
+        " \"virtual_subnet\": \"10.9.0.0/24\", \"local_id\": 1, \"peers\": [" ++
+        "{ \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"" ++ psk_hex ++ "\" } ] }";
     const cfg = try Config.fromJson(a, ok);
     try cfg.validate(&.{});
     try std.testing.expectEqual(@as(u16, 1400), cfg.local_tun_mtu);
     try std.testing.expectEqual(@as(u16, 4000), cfg.listen_port);
     try std.testing.expectEqual(@as(u32, 0x0A09_0000), cfg.virtual_subnet.network);
     try std.testing.expectEqual(@as(u6, 24), cfg.virtual_subnet.prefix);
-    try std.testing.expectEqual(@as(u8, 0x01), cfg.psk[0]);
-    try std.testing.expectEqual(@as(u8, 0xef), cfg.psk[7]);
+    try std.testing.expectEqual(@as(u8, 0x01), cfg.peers[0].psk[0]);
+    try std.testing.expectEqual(@as(u8, 0xef), cfg.peers[0].psk[7]);
 
-    // A partial document falls back to per-field defaults (and a zero PSK).
+    // A partial document falls back to per-field defaults (and zero peers).
     const partial = "{ \"local_tun_mtu\": 1300 }";
     const cfg2 = try Config.fromJson(a, partial);
     try std.testing.expectEqual(@as(u16, 1300), cfg2.local_tun_mtu);
     try std.testing.expectEqual(@as(u16, 51820), cfg2.listen_port);
-    try std.testing.expectEqual([_]u8{0} ** 32, cfg2.psk);
+    try std.testing.expectEqual(@as(usize, 0), cfg2.peer_count);
 
     // An out-of-range MTU parses but is rejected by the sanity check (fuse).
-    // (PSK provided so the MTU check is what fires, not the PSK gate.)
-    const bad_mtu = "{ \"psk\": \"" ++ psk_hex ++ "\", \"local_tun_mtu\": 9000 }";
+    const bad_mtu =
+        "{ \"local_tun_mtu\": 9000, \"local_id\": 1, \"peers\": [" ++
+        "{ \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"" ++ psk_hex ++ "\" } ] }";
     const cfg3 = try Config.fromJson(a, bad_mtu);
     try std.testing.expectError(SanityError.MtuOutOfRange, cfg3.validate(&.{}));
 
     // Malformed JSON aborts parsing (no silent default fallback).
     try std.testing.expect(std.meta.isError(Config.fromJson(a, "{ not valid json")));
 
-    // A non-64-char PSK is rejected.
-    try std.testing.expectError(error.InvalidPsk, Config.fromJson(a, "{ \"psk\": \"abcd\" }"));
-
     // A malformed virtual subnet is rejected.
     try std.testing.expectError(error.InvalidCidr, Config.fromJson(a, "{ \"virtual_subnet\": \"10.0.0.0\" }"));
+}
+
+test "fromJson: a top-level mesh-wide psk is loudly rejected (issue #13 tripwire)" {
+    const a = std.testing.allocator;
+    const psk_hex = "0123456789abcdef" ** 4;
+    // The mesh-wide top-level PSK was removed in #13; an old config carrying it
+    // must fail rather than be silently ignored.
+    const old = "{ \"psk\": \"" ++ psk_hex ++ "\" }";
+    try std.testing.expectError(error.InvalidPsk, Config.fromJson(a, old));
+}
+
+test "fromJson: a missing or malformed per-peer psk is rejected (issue #13)" {
+    const a = std.testing.allocator;
+    const psk_hex = "0123456789abcdef" ** 4;
+
+    // Missing peer psk.
+    const missing = "{ \"local_id\": 1, \"peers\": [ { \"id\": 2, \"endpoint\": \"10.0.0.2:51820\" } ] }";
+    try std.testing.expectError(error.InvalidPsk, Config.fromJson(a, missing));
+
+    // Wrong-length peer psk.
+    const short =
+        "{ \"local_id\": 1, \"peers\": [ { \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"abcd\" } ] }";
+    try std.testing.expectError(error.InvalidPsk, Config.fromJson(a, short));
+
+    // Malformed (non-hex) peer psk of the right length.
+    const non_hex = "zz" ++ ("0123456789abcdef" ** 3) ++ "abcdefabcdefabcd"; // 64 chars, leading non-hex
+    const bad_hex =
+        "{ \"local_id\": 1, \"peers\": [ { \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"" ++
+        non_hex ++ "\" } ] }";
+    try std.testing.expectError(error.InvalidPsk, Config.fromJson(a, bad_hex));
+    _ = psk_hex;
 }
 
 test "parseCidr" {
@@ -349,21 +426,46 @@ test "Cidr.contains: /0 is permissive, /32 is exact" {
 
 test "fromJson: peers array is parsed into the registry spec" {
     const a = std.testing.allocator;
-    const psk_hex = "0123456789abcdef" ** 4;
+    const psk2 = "0123456789abcdef" ** 4;
+    const psk3 = "fedcba9876543210" ** 4;
     const doc =
-        "{ \"psk\": \"" ++ psk_hex ++ "\", \"local_id\": 1, \"peers\": [" ++
-        "{ \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"allowed_src\": \"10.0.0.2/32\" }," ++
-        "{ \"id\": 3, \"endpoint\": \"10.0.0.3:51820\" }" ++
+        "{ \"local_id\": 1, \"peers\": [" ++
+        "{ \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"allowed_src\": \"10.0.0.2/32\", \"psk\": \"" ++ psk2 ++ "\" }," ++
+        "{ \"id\": 3, \"endpoint\": \"10.0.0.3:51820\", \"psk\": \"" ++ psk3 ++ "\" }" ++
         "] }";
     const cfg = try Config.fromJson(a, doc);
+    try cfg.validate(&.{});
     try std.testing.expectEqual(@as(u32, 1), cfg.local_id);
     try std.testing.expectEqual(@as(usize, 2), cfg.peer_count);
     try std.testing.expectEqual(@as(u32, 2), cfg.peers[0].id);
     try std.testing.expectEqual(@as(u6, 32), cfg.peers[0].allowed_src.prefix);
     // An omitted allowed_src defaults to the permissive 0.0.0.0/0.
     try std.testing.expectEqual(@as(u6, 0), cfg.peers[1].allowed_src.prefix);
+    // Each peer carries its own distinct private PSK.
+    try std.testing.expectEqual(@as(u8, 0x01), cfg.peers[0].psk[0]);
+    try std.testing.expectEqual(@as(u8, 0xfe), cfg.peers[1].psk[0]);
 
     // A malformed endpoint aborts parsing.
-    const bad = "{ \"peers\": [ { \"id\": 2, \"endpoint\": \"nope\" } ] }";
+    const bad = "{ \"peers\": [ { \"id\": 2, \"endpoint\": \"nope\", \"psk\": \"" ++ psk2 ++ "\" } ] }";
     try std.testing.expectError(error.InvalidEndpoint, Config.fromJson(a, bad));
+}
+
+test "per-peer PSKs derive different link keys (issue #13 AC)" {
+    const a = std.testing.allocator;
+    const crypto = @import("crypto.zig");
+    const psk2 = "0123456789abcdef" ** 4;
+    const psk3 = "fedcba9876543210" ** 4;
+    const doc =
+        "{ \"local_id\": 1, \"peers\": [" ++
+        "{ \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"" ++ psk2 ++ "\" }," ++
+        "{ \"id\": 3, \"endpoint\": \"10.0.0.3:51820\", \"psk\": \"" ++ psk3 ++ "\" }" ++
+        "] }";
+    const cfg = try Config.fromJson(a, doc);
+
+    // The hub (local_id 1) derives a TX key per link from each peer's private
+    // PSK. Different PSKs ⇒ different link keys, so compromising peer 2's PSK
+    // cannot forge or read peer 3's link.
+    const k2 = crypto.deriveLinkKey(cfg.peers[0].psk, cfg.local_id, cfg.peers[0].id);
+    const k3 = crypto.deriveLinkKey(cfg.peers[1].psk, cfg.local_id, cfg.peers[1].id);
+    try std.testing.expect(!std.mem.eql(u8, &k2, &k3));
 }
