@@ -1,7 +1,7 @@
 # BTunnel
 
 > 用**纯 Zig**（锁定 2026 最新标准库 `std.posix`）编写的虚拟三层（Layer 3）自适应组网工具。
-> 面向海内外专线与 **RouterOS Container（BusyBox 环境）**，零依赖、零动态分配、强隐蔽。
+> 面向通用 Linux 环境（含轻量级容器如 BusyBox / RouterOS Container），零依赖、零动态分配、强隐蔽。
 
 BTunnel 在物理专线之上构建虚拟子网，采用**星型拓扑（Hub-and-Spoke）**，通过私有 UDP 隧道
 转发裸 IP 包。它**不依赖 WireGuard 或任何第三方网络框架**——TUN 网卡、加密、防重放、
