@@ -20,33 +20,10 @@ pub const PolicyEntry = struct {
     target: u32 = 0,
 };
 
-pub const ParseError = error{
-    MissingSlash,
-    InvalidOctet,
-    InvalidPrefix,
-};
-
-/// Parse "A.B.C.D/P" into a Cidr (network in host byte order).
-pub fn parseCidr(text: []const u8) ParseError!Cidr {
-    const slash = std.mem.indexOfScalar(u8, text, '/') orelse return ParseError.MissingSlash;
-    const addr_str = text[0..slash];
-    const prefix_str = text[slash + 1 ..];
-
-    var octets: [4]u8 = undefined;
-    var it = std.mem.splitScalar(u8, addr_str, '.');
-    var i: usize = 0;
-    while (it.next()) |part| : (i += 1) {
-        if (i >= 4) return ParseError.InvalidOctet;
-        octets[i] = std.fmt.parseInt(u8, part, 10) catch return ParseError.InvalidOctet;
-    }
-    if (i != 4) return ParseError.InvalidOctet;
-
-    const prefix = std.fmt.parseInt(u8, prefix_str, 10) catch return ParseError.InvalidPrefix;
-    if (prefix > 32) return ParseError.InvalidPrefix;
-
-    const network = std.mem.readInt(u32, &octets, .big);
-    return .{ .network = network, .prefix = @intCast(prefix) };
-}
+/// CIDR parsing lives in `config.zig` (single source of truth); re-exported
+/// here for callers that already speak `policy`.
+pub const ParseError = config.CidrError;
+pub const parseCidr = config.parseCidr;
 
 fn cidrContains(c: Cidr, ip: u32) bool {
     const m = c.mask();
