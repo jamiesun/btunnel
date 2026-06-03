@@ -27,7 +27,8 @@ producing a single, fully statically linked binary.
 - **Stateless obfuscation**: ChaCha20-Poly1305 full encryption; ciphertext has no
   fixed magic number; authentication failures are silently dropped — physically
   invisible to probing.
-- **Transport security**: PSK pre-shared key + per-link directional keys +
+- **Transport security**: private per-peer pre-shared keys (one secret per hub
+  link, never mesh-wide) + per-link directional keys +
   per-restart session epoch (fresh key each daemon lifetime) + 64-bit monotonic
   nonce (never reused) + per-session sliding-window anti-replay.
 - **Lock-free RCU hot updates**: the policy tree is replaced wholesale via an atomic
@@ -108,11 +109,14 @@ policy hot-update under load. It needs `--privileged` + `--device=/dev/net/tun`.
 ## 🚀 Usage
 
 ```bash
-# v1 mandates a non-zero PSK (iron law #5). Generate one and drop it into config.json:
+# v1 mandates a private, non-zero PSK per peer link (iron law #5, issue #13).
 cp config.example.json config.json
-# then set "psk" to 32 random bytes as 64 hex chars, e.g.:
+# then set each peers[].psk to 32 random bytes as 64 hex chars, e.g.:
 #   openssl rand -hex 32
-# Without a valid PSK the daemon refuses to start (config sanity: InvalidPsk).
+# Use a DISTINCT key for every link (sharing one across peers is rejected with
+# DuplicatePsk). There is no mesh-wide top-level "psk" any more; an old config
+# that still carries one is rejected (InvalidPsk). Without a valid per-peer PSK
+# the daemon refuses to start (config sanity: InvalidPsk).
 
 # Start the daemon (reads config.json from the working directory)
 ./zig-out/bin/btunnel
@@ -134,7 +138,7 @@ and exercised end-to-end in the dev container.
 | Task | Module | Status |
 |---|---|---|
 | 1 Build config | `build.zig` | ✅ Done (static musl, ReleaseSmall, dual binaries) |
-| 2 Config sanity | `config.zig` | ✅ Done (std.json parse + hex PSK + CIDR; boundary fuse) |
+| 2 Config sanity | `config.zig` | ✅ Done (std.json parse + private per-peer hex PSK + CIDR; boundary fuse) |
 | 3 Policy match | `policy.zig` | ✅ Done (CIDR / longest-prefix / RCU) |
 | 4 System driver | `tun.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd) |
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / per-link keys / session epoch / anti-replay) |
@@ -143,8 +147,8 @@ and exercised end-to-end in the dev container.
 | 8 Control tool | `ptctl.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
 | 9 Daemon main loop + e2e | `main.zig`, `test/integration/run.sh` | ✅ Done (wires TUN + UDP + UDS + reactor; live multi-point + relay netns end-to-end test) |
 
-> **Currently verifiable**: `zig build test` is all green (46/46 in the Linux
-> dev container; 35 pass + 11 Linux-only skips on a macOS host); produces a
+> **Currently verifiable**: `zig build test` is all green (48/48 in the Linux
+> dev container; 37 pass + 11 Linux-only skips on a macOS host); produces a
 > < 512KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
