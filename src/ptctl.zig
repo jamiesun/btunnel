@@ -52,22 +52,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.process.exit(2);
     };
 
-    const path = bt.uds.SOCKET_PATH;
+    const path: []const u8 = if (std.process.Environ.getPosix(init.environ, "BTUNNEL_SOCK")) |s|
+        s
+    else
+        bt.uds.SOCKET_PATH;
     switch (cmd) {
         .policy_add => {
-            bt.uds.send(path, line) catch |err| failRequest(err);
+            bt.uds.send(path, line) catch |err| failRequest(err, path);
         },
         .policy_show, .save => {
             var out: [4096]u8 = undefined;
-            const reply = bt.uds.request(path, line, &out, REQUEST_TIMEOUT_MS) catch |err| failRequest(err);
+            const reply = bt.uds.request(path, line, &out, REQUEST_TIMEOUT_MS) catch |err| failRequest(err, path);
             writeStdout(reply);
         },
     }
 }
 
-fn failRequest(err: bt.uds.ClientError) noreturn {
+fn failRequest(err: bt.uds.ClientError, path: []const u8) noreturn {
     switch (err) {
-        error.DaemonUnavailable => std.debug.print("ptctl: daemon not running (socket {s})\n", .{bt.uds.SOCKET_PATH}),
+        error.DaemonUnavailable => std.debug.print("ptctl: daemon not running (socket {s})\n", .{path}),
         error.NoResponse => std.debug.print("ptctl: no response from daemon (timed out)\n", .{}),
         else => std.debug.print("ptctl: control request failed ({s})\n", .{@errorName(err)}),
     }
