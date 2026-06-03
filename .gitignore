@@ -1,0 +1,10 @@
+# Zig build artifacts
+.zig-cache/
+zig-cache/
+zig-out/
+
+# Local runtime config (copy from config.example.json)
+config.json
+
+# OS noise
+.DS_Store
