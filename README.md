@@ -1,5 +1,7 @@
 # BTunnel
 
+**A pure-Zig, zero-dependency Layer-3 UDP tunnel that ships as a single static binary under 200KB.**
+
 **English** · [简体中文](README.zh-CN.md)
 
 > A virtual Layer-3 adaptive networking tool written in **pure Zig** (pinned to the
