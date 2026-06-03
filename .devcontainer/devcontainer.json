@@ -1,0 +1,16 @@
+{
+  "name": "BTunnel (Linux dev & integration test)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "//": "Privileged + /dev/net/tun are required so the syscall-heavy data path (TUN device, network namespaces) can run once Tasks 4/6/7 land.",
+  "privileged": true,
+  "runArgs": [
+    "--device=/dev/net/tun"
+  ],
+  "remoteUser": "root",
+  "postCreateCommand": "zig version"
+}

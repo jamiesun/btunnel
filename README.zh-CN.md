@@ -62,6 +62,30 @@ zig build run
 
 产物位于 `zig-out/bin/`：`btunnel`（守护进程）与 `ptctl`（控制工具）。
 
+## 🧪 本地集成测试（开发容器）
+
+系统调用密集的数据通路（TUN 设备、epoll 反应堆、AF_UNIX 控制套接字）只能在
+Linux 上运行，因此在 [`.devcontainer/`](.devcontainer/) 下提供了一个可复现的
+Linux 容器。它**仅用于开发/测试**——最终交付物依然是单个零三方依赖的静态
+musl 二进制。
+
+可在支持开发容器的编辑器中直接打开该目录，或以无界面方式运行预检脚本：
+
+```bash
+# 构建 Linux 工具链镜像（Debian-slim + 锁定版 Zig 0.16.0）
+docker build -t btunnel-dev -f .devcontainer/Dockerfile .
+
+# 在容器内运行集成/预检脚本
+docker run --rm --privileged --device=/dev/net/tun \
+    -v "$PWD":/workspace btunnel-dev test/integration/run.sh
+```
+
+[`test/integration/run.sh`](test/integration/run.sh) 会在容器原生架构上构建
+二进制，强制校验静态链接与 ≤ 200KB 约束，冒烟运行守护进程，交叉编译另一个
+musl 架构，并运行单元测试。双节点 TUN + 网络命名空间隧道测试在数据通路仍为
+占位期间会被**跳过**；同时设有“防遗忘”守卫：一旦占位被移除却未启用该测试，
+脚本即判定失败，确保此预检永不悄悄停止覆盖真实通路。
+
 ## 🚀 使用
 
 ```bash
@@ -92,6 +116,9 @@ zig build run
 | 8 控制工具 | `ptctl.zig` | 🟡 部分（参数校验完成；UDS 投递待实现） |
 
 > **当前可验证**：`zig build test` 全绿（19/19），可产出 < 200KB 静态二进制。
+> Linux 开发容器（[`.devcontainer/`](.devcontainer/)）提供集成/预检脚本
+> （[`test/integration/run.sh`](test/integration/run.sh)），在两个 musl 目标上
+> 强制校验静态链接与体积约束。
 > **联网端到端**待补齐：TUN ioctl（任务 4）、epoll 收发主循环（任务 6）、UDS 通信（任务 7/8）。
 
 详细架构、内存模型与验收清单见 [`docs/btunnel-develop.md`](docs/btunnel-develop.md)。

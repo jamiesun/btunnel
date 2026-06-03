@@ -75,6 +75,34 @@ zig build run
 
 Artifacts are placed in `zig-out/bin/`: `btunnel` (daemon) and `ptctl` (control tool).
 
+## 🧪 Local integration testing (dev container)
+
+The syscall-heavy data path (TUN device, epoll reactor, AF_UNIX control socket)
+can only run on Linux, so a reproducible Linux container is provided under
+[`.devcontainer/`](.devcontainer/). It is a **development/test aid only** — the
+shipped artifact is still a single static musl binary with zero third-party
+dependencies.
+
+Open the folder in any dev-container-aware editor, or run the preflight harness
+headless:
+
+```bash
+# Build the Linux toolchain image (Debian-slim + pinned Zig 0.16.0)
+docker build -t btunnel-dev -f .devcontainer/Dockerfile .
+
+# Run the integration / preflight harness inside it
+docker run --rm --privileged --device=/dev/net/tun \
+    -v "$PWD":/workspace btunnel-dev test/integration/run.sh
+```
+
+[`test/integration/run.sh`](test/integration/run.sh) builds the binary on the
+container's native arch, enforces the static-link and ≤ 200 KB constraints,
+smoke-runs the daemon, cross-builds the other musl arch, and runs the unit
+tests. The two-node TUN + network-namespace tunnel test is intentionally
+**skipped** while the data path is stubbed; an anti-forgetting guard fails the
+run if the stubs are removed without enabling that test, so the harness can
+never silently stop testing the real path.
+
 ## 🚀 Usage
 
 ```bash
@@ -106,7 +134,10 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
 
 > **Currently verifiable**: `zig build test` is all green (19/19); produces a
-> < 200KB static binary.
+> < 200KB static binary. A Linux dev container
+> ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
+> ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
+> static-link and size constraints across both musl targets.
 > **End-to-end networking** still pending: TUN ioctl (Task 4), epoll send/recv loop
 > (Task 6), UDS communication (Tasks 7/8).
 
