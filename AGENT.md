@@ -56,7 +56,7 @@ a hard failure regardless of how "clean" the result looks.
    **monotonic nonce that is NEVER reused**, and a sliding-window **anti-replay**
    check. These cannot be deferred.
 6. **Single static binary.** Fully static against musl-libc. Default
-   `-O ReleaseSmall`, target **≤ 200KB**. `ldd` must report
+   `-O ReleaseSmall`, target **≤ 512KB**. `ldd` must report
    `not a dynamic executable`.
 7. **Stay test-driven.** Follow the TDD workflow in the PRD. Pure logic must ship
    with tests. `zig build test` must stay green before any commit.

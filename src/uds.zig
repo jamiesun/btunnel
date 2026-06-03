@@ -18,6 +18,13 @@ const policy = @import("policy.zig");
 
 pub const SOCKET_PATH = "/var/run/btunnel.sock";
 
+/// Default snapshot file `save` serializes the live policy tree to (as replayable
+/// `policy add` command lines). Deliberately NOT config.json: the config schema
+/// carries no policy section in v1, so the operator-driven policy state is
+/// persisted as a separate, replayable command snapshot instead of being merged
+/// back into the daemon's startup config.
+pub const SAVE_PATH = "/var/run/btunnel.policy";
+
 /// Upper bound on installed policy rules. The control plane keeps two fixed
 /// buffers of this size (double-buffered RCU), so memory is allocation-free and
 /// bounded. Generous for a hub-and-spoke mesh (peers cap at config.MAX_PEERS).
@@ -30,12 +37,40 @@ const MAX_CMDS_PER_TICK = 64;
 
 const RX_BUF = 4096;
 
+/// Worst-case length of one serialized `policy add` line, e.g.
+/// `policy add --src 255.255.255.255/32 --dst 255.255.255.255/32 --action forward --target 4294967295\n`.
+const MAX_RULE_LINE = 112;
+
+/// Size of the reply/snapshot buffer. Large enough to serialize a full policy
+/// table (`MAX_POLICY_ENTRIES` rules) without ever truncating, so `policy show`
+/// and `save` are always complete and the `save` ack count is always accurate.
+pub const MAX_REPLY = MAX_POLICY_ENTRIES * MAX_RULE_LINE;
+
+/// Header bytes of `sockaddr_un` preceding `path` (i.e. `@sizeOf(sa_family_t)`).
+/// Used both as the bind addrlen for Linux abstract autobind and as the
+/// threshold that distinguishes an addressable (bound) client from an anonymous
+/// one in `recvfrom`'s returned source length.
+const ADDR_HDR = @offsetOf(linux.sockaddr.un, "path");
+
 pub const ControlError = error{
     Unsupported,
     SocketFailed,
     BindFailed,
     PathTooLong,
     TooManyEntries,
+};
+
+/// Errors surfaced to the ptctl client.
+pub const ClientError = error{
+    Unsupported,
+    SocketFailed,
+    BindFailed,
+    PathTooLong,
+    /// The daemon socket is absent or not listening (operator-facing: daemon down).
+    DaemonUnavailable,
+    SendFailed,
+    /// The daemon accepted the request but sent no reply within the timeout.
+    NoResponse,
 };
 
 pub const ParseError = error{
@@ -103,11 +138,23 @@ pub fn parseCommand(line: []const u8) ParseError!Command {
     return .{ .policy_add = entry };
 }
 
+/// Fill a filesystem `sockaddr_un` from `path`, returning the address and the
+/// exact addrlen (`offsetof(path) + len + NUL`). Errors if the path cannot fit.
+fn fillUnixAddr(path: []const u8) ControlError!struct { addr: linux.sockaddr.un, alen: linux.socklen_t } {
+    if (path.len + 1 > 108) return error.PathTooLong; // sockaddr_un.path is 108 bytes incl. NUL
+    var addr = linux.sockaddr.un{ .path = undefined };
+    @memset(&addr.path, 0);
+    @memcpy(addr.path[0..path.len], path);
+    addr.path[path.len] = 0;
+    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    return .{ .addr = addr, .alen = alen };
+}
+
 /// Open a non-blocking AF_UNIX datagram socket bound to `path`. A stale socket
 /// file at `path` is unlinked first (filesystem sockets only). On any failure
 /// after the socket is created, the fd is closed (no leak).
 fn openDgramSocket(path: []const u8) ControlError!linux.fd_t {
-    if (path.len + 1 > 108) return error.PathTooLong; // sockaddr_un.path is 108 bytes incl. NUL
+    const a = try fillUnixAddr(path);
 
     const src = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(src) != .SUCCESS) return error.SocketFailed;
@@ -115,22 +162,130 @@ fn openDgramSocket(path: []const u8) ControlError!linux.fd_t {
     errdefer _ = linux.close(fd);
 
     // Best-effort removal of a stale socket from a previous run.
-    var pathz: [108]u8 = undefined;
-    @memcpy(pathz[0..path.len], path);
-    pathz[path.len] = 0;
-    _ = linux.unlink(@ptrCast(&pathz));
+    _ = linux.unlink(@ptrCast(&a.addr.path));
 
-    var addr = linux.sockaddr.un{ .path = undefined };
-    @memset(&addr.path, 0);
-    @memcpy(addr.path[0..path.len], path);
-    addr.path[path.len] = 0;
-    const alen: linux.socklen_t = @intCast(@offsetOf(linux.sockaddr.un, "path") + path.len + 1);
-
-    const brc = linux.bind(fd, @ptrCast(&addr), alen);
+    const brc = linux.bind(fd, @ptrCast(&a.addr), a.alen);
     if (linux.errno(brc) != .SUCCESS) return error.BindFailed;
 
     return fd;
 }
+
+// --- ptctl client -----------------------------------------------------------
+
+/// Fire-and-forget delivery of one command line to the daemon socket at `path`.
+/// Used for `policy add`, which expects no reply. A missing/closed socket maps
+/// to `DaemonUnavailable` so the operator sees a clear "daemon down" signal.
+pub fn send(path: []const u8, line: []const u8) ClientError!void {
+    if (builtin.os.tag != .linux) return error.Unsupported;
+    const a = fillUnixAddr(path) catch |e| return switch (e) {
+        error.PathTooLong => error.PathTooLong,
+        else => error.SocketFailed,
+    };
+
+    const src = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(src) != .SUCCESS) return error.SocketFailed;
+    const fd: linux.fd_t = @intCast(src);
+    defer _ = linux.close(fd);
+
+    const rc = linux.sendto(fd, line.ptr, line.len, 0, @ptrCast(&a.addr), a.alen);
+    return switch (linux.errno(rc)) {
+        .SUCCESS => {},
+        .NOENT, .CONNREFUSED, .CONNRESET => error.DaemonUnavailable,
+        else => error.SendFailed,
+    };
+}
+
+/// Send one command and wait up to `timeout_ms` for the daemon's reply,
+/// returning the reply bytes written into `out`. Used for `policy show` / `save`.
+///
+/// The client socket is given a unique source address via Linux abstract
+/// autobind (`bind` with only the family set, addrlen == `ADDR_HDR`), so the
+/// daemon's `recvfrom` captures a routable return address and `sendto`s the
+/// reply back to exactly this socket. A timeout (no datagram) maps to
+/// `NoResponse`.
+pub fn request(path: []const u8, line: []const u8, out: []u8, timeout_ms: i32) ClientError![]u8 {
+    if (builtin.os.tag != .linux) return error.Unsupported;
+    const a = fillUnixAddr(path) catch |e| return switch (e) {
+        error.PathTooLong => error.PathTooLong,
+        else => error.SocketFailed,
+    };
+
+    const src = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(src) != .SUCCESS) return error.SocketFailed;
+    const fd: linux.fd_t = @intCast(src);
+    defer _ = linux.close(fd);
+
+    // Abstract autobind: a zero-length path with addrlen == family size makes the
+    // kernel assign a unique anonymous address so the daemon can reply to us.
+    var bind_addr = linux.sockaddr.un{ .path = undefined };
+    bind_addr.family = linux.AF.UNIX;
+    const brc = linux.bind(fd, @ptrCast(&bind_addr), ADDR_HDR);
+    if (linux.errno(brc) != .SUCCESS) return error.BindFailed;
+
+    const wrc = linux.sendto(fd, line.ptr, line.len, 0, @ptrCast(&a.addr), a.alen);
+    switch (linux.errno(wrc)) {
+        .SUCCESS => {},
+        .NOENT, .CONNREFUSED, .CONNRESET => return error.DaemonUnavailable,
+        else => return error.SendFailed,
+    }
+
+    // Bounded wait: track an absolute monotonic deadline so EINTR retries cannot
+    // extend the timeout, and require POLLIN (an ERR/HUP/NVAL-only wake is not a
+    // reply). The socket is non-blocking, so recvfrom never stalls past poll.
+    const deadline = monotonicMillis() +| timeout_ms;
+    var pfd = linux.pollfd{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
+    while (true) {
+        const remaining = deadline -| monotonicMillis();
+        const prc = linux.poll(@ptrCast(&pfd), 1, @intCast(remaining));
+        switch (linux.errno(prc)) {
+            .SUCCESS => {},
+            .INTR => {
+                if (monotonicMillis() >= deadline) return error.NoResponse;
+                continue;
+            },
+            else => return error.NoResponse,
+        }
+        if (prc == 0) return error.NoResponse; // timed out
+        if (pfd.revents & linux.POLL.IN == 0) return error.NoResponse; // ERR/HUP/NVAL: no reply
+        break;
+    }
+
+    const rrc = linux.recvfrom(fd, out.ptr, out.len, 0, null, null);
+    if (linux.errno(rrc) != .SUCCESS) return error.NoResponse;
+    return out[0..rrc];
+}
+
+/// Monotonic clock in milliseconds; saturates to 0 on the (practically
+/// impossible) clock_gettime failure so callers still make forward progress.
+fn monotonicMillis() i64 {
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(linux.CLOCK.MONOTONIC, &ts)) != .SUCCESS) return 0;
+    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
+}
+
+// --- policy serialization (control-plane reply / snapshot) ------------------
+
+/// Format a host-order CIDR as `a.b.c.d/prefix` into `buf`.
+fn formatCidr(c: policy.Cidr, buf: []u8) []const u8 {
+    const n = c.network;
+    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}/{d}", .{
+        (n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff, c.prefix,
+    }) catch buf[0..0];
+}
+
+/// Format one policy entry as a replayable `policy add ...` command line
+/// (newline-terminated) into `buf`.
+fn formatEntry(e: policy.PolicyEntry, buf: []u8) []const u8 {
+    var sb: [20]u8 = undefined;
+    var db: [20]u8 = undefined;
+    const s = formatCidr(e.src, &sb);
+    const d = formatCidr(e.dst, &db);
+    return switch (e.action) {
+        .forward => std.fmt.bufPrint(buf, "policy add --src {s} --dst {s} --action forward --target {d}\n", .{ s, d, e.target }) catch buf[0..0],
+        .drop => std.fmt.bufPrint(buf, "policy add --src {s} --dst {s} --action drop\n", .{ s, d }) catch buf[0..0],
+    };
+}
+
 
 /// Control-plane listener. Owns the AF_UNIX datagram socket and the live policy
 /// tree storage.
@@ -157,22 +312,35 @@ pub const Control = struct {
     cur: usize = 0,
     count: usize = 0,
     rxbuf: [RX_BUF]u8 = undefined,
+    /// Reply/snapshot scratch (control plane only): `policy show` dumps here and
+    /// `save` serializes here before the atomic file write. Sized to hold a full
+    /// policy table so output is never silently truncated.
+    txbuf: [MAX_REPLY]u8 = undefined,
+    /// Filesystem path `save` persists the snapshot to (copied in at bind time).
+    save_path_buf: [108]u8 = undefined,
+    save_path_len: usize = 0,
 
     /// Bind the control socket and install `initial` as the starting policy
-    /// tree (swapped into `active`). See the struct-level LIFETIME note: `self`
-    /// must not be moved after this returns.
+    /// tree (swapped into `active`). `save_path` is the file `save` snapshots to.
+    /// See the struct-level LIFETIME note: `self` must not be moved after this
+    /// returns.
     pub fn bindInPlace(
         self: *Control,
         path: []const u8,
+        save_path: []const u8,
         active: *policy.ActiveTree,
         initial: []const policy.PolicyEntry,
     ) ControlError!void {
         if (builtin.os.tag != .linux) return error.Unsupported;
         if (initial.len > MAX_POLICY_ENTRIES) return error.TooManyEntries;
+        if (save_path.len > self.save_path_buf.len) return error.PathTooLong; // 108-byte sockaddr_un budget
 
         // Bind the socket first: if it fails we must not have published `active`
         // into this (now-discarded) Control's storage.
         self.fd = try openDgramSocket(path);
+
+        @memcpy(self.save_path_buf[0..save_path.len], save_path);
+        self.save_path_len = save_path.len;
 
         self.cur = 0;
         self.count = initial.len;
@@ -202,14 +370,107 @@ pub const Control = struct {
         self.count = new_count;
     }
 
-    /// Apply a single command line. Malformed commands and a full policy table
-    /// are silently ignored (fire-and-forget control protocol; no reply channel
-    /// yet). `policy show` / `save` are accepted but currently no-ops.
-    fn applyLine(self: *Control, line: []const u8) void {
+    /// Serialize the live policy tree into `txbuf` as replayable `policy add`
+    /// lines. Stops at a line boundary if `txbuf` would overflow (never emits a
+    /// partial line); an empty tree yields a single comment line.
+    fn dumpRules(self: *Control) []const u8 {
+        var len: usize = 0;
+        for (self.bufs[self.cur][0..self.count]) |e| {
+            var line: [128]u8 = undefined;
+            const s = formatEntry(e, &line);
+            if (len + s.len > self.txbuf.len) break; // bounded: drop the overflow tail
+            @memcpy(self.txbuf[len..][0..s.len], s);
+            len += s.len;
+        }
+        if (len == 0) {
+            const empty = "# no policy rules\n";
+            @memcpy(self.txbuf[0..empty.len], empty);
+            return self.txbuf[0..empty.len];
+        }
+        return self.txbuf[0..len];
+    }
+
+    /// Atomically write `data` to the snapshot path via a sibling temp file +
+    /// fsync + rename. Returns false on any syscall failure or short write (the
+    /// old snapshot, if any, is left intact). On success the snapshot is durable:
+    /// the temp file is fsync'd before rename so a crash cannot leave a truncated
+    /// snapshot under the final name.
+    fn writeSnapshot(self: *Control, data: []const u8) bool {
+        const sp = self.save_path_buf[0..self.save_path_len];
+        var finalz: [113]u8 = undefined;
+        var tmpz: [113]u8 = undefined;
+        @memcpy(finalz[0..sp.len], sp);
+        finalz[sp.len] = 0;
+        @memcpy(tmpz[0..sp.len], sp);
+        @memcpy(tmpz[sp.len..][0..4], ".tmp");
+        tmpz[sp.len + 4] = 0;
+
+        const orc = linux.open(@ptrCast(&tmpz), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600);
+        if (linux.errno(orc) != .SUCCESS) return false;
+        const wfd: linux.fd_t = @intCast(orc);
+
+        var off: usize = 0;
+        while (off < data.len) {
+            const rc = linux.write(wfd, data[off..].ptr, data.len - off);
+            const e = linux.errno(rc);
+            if (e == .INTR) continue;
+            // A short write (rc == 0) before completion is a failure, not EOF:
+            // never publish a partial snapshot.
+            if (e != .SUCCESS or rc == 0) {
+                _ = linux.close(wfd);
+                _ = linux.unlink(@ptrCast(&tmpz));
+                return false;
+            }
+            off += rc;
+        }
+
+        // Durability: flush file contents before the rename publishes the name.
+        if (linux.errno(linux.fsync(wfd)) != .SUCCESS) {
+            _ = linux.close(wfd);
+            _ = linux.unlink(@ptrCast(&tmpz));
+            return false;
+        }
+        if (linux.errno(linux.close(wfd)) != .SUCCESS) {
+            _ = linux.unlink(@ptrCast(&tmpz));
+            return false;
+        }
+
+        if (linux.errno(linux.rename(@ptrCast(&tmpz), @ptrCast(&finalz))) != .SUCCESS) {
+            _ = linux.unlink(@ptrCast(&tmpz));
+            return false;
+        }
+        return true;
+    }
+
+    /// Best-effort reply to an addressable client. Non-blocking; a full client
+    /// buffer or vanished client just drops the reply (never stalls the loop).
+    fn reply(self: *Control, src: *const linux.sockaddr.un, slen: linux.socklen_t, msg: []const u8) void {
+        _ = linux.sendto(self.fd, msg.ptr, msg.len, linux.MSG.DONTWAIT, @ptrCast(src), slen);
+    }
+
+    /// Apply one command line; reply to `src` for query/persist commands when the
+    /// client is addressable (bound source). `policy add` never replies.
+    fn applyLine(self: *Control, line: []const u8, src: *const linux.sockaddr.un, slen: linux.socklen_t) void {
         const cmd = parseCommand(line) catch return;
+        const addressable = slen > ADDR_HDR;
         switch (cmd) {
             .policy_add => |e| self.applyAdd(e) catch return,
-            .policy_show, .save => {},
+            .policy_show => {
+                const dump = self.dumpRules();
+                if (addressable) self.reply(src, slen, dump);
+            },
+            .save => {
+                const dump = self.dumpRules();
+                const ok = self.writeSnapshot(dump);
+                if (addressable) {
+                    var ack: [160]u8 = undefined;
+                    const msg = if (ok)
+                        std.fmt.bufPrint(&ack, "saved {d} rule(s) to {s}\n", .{ self.count, self.save_path_buf[0..self.save_path_len] }) catch "saved\n"
+                    else
+                        "save failed\n";
+                    self.reply(src, slen, msg);
+                }
+            },
         }
     }
 
@@ -217,11 +478,14 @@ pub const Control = struct {
     /// Each datagram is one or more newline-separated command lines. Bounds the
     /// work per call (the loop counter also caps EINTR retries, so a signal storm
     /// cannot livelock). Oversized datagrams are dropped whole via MSG_TRUNC so a
-    /// truncated stream can never apply a valid-looking prefix.
+    /// truncated stream can never apply a valid-looking prefix. `policy show` /
+    /// `save` reply to the datagram's source via the same socket.
     pub fn handle(self: *Control) void {
         var iters: usize = 0;
         while (iters < MAX_CMDS_PER_TICK) : (iters += 1) {
-            const rc = linux.recvfrom(self.fd, &self.rxbuf, self.rxbuf.len, linux.MSG.TRUNC, null, null);
+            var src: linux.sockaddr.un = undefined;
+            var slen: linux.socklen_t = @sizeOf(linux.sockaddr.un);
+            const rc = linux.recvfrom(self.fd, &self.rxbuf, self.rxbuf.len, linux.MSG.TRUNC, @ptrCast(&src), &slen);
             const e = linux.errno(rc);
             if (e == .INTR) continue; // counter-bounded retry
             if (e == .AGAIN) return; // no more datagrams queued
@@ -233,7 +497,7 @@ pub const Control = struct {
             while (it.next()) |raw| {
                 const line = std.mem.trim(u8, raw, " \t\r");
                 if (line.len == 0) continue;
-                self.applyLine(line);
+                self.applyLine(line, &src, slen);
             }
         }
     }
@@ -287,7 +551,7 @@ test "control: policy add datagram hot-swaps the active tree" {
     var active = policy.ActiveTree.init(&empty);
 
     var ctl: Control = undefined;
-    try ctl.bindInPlace(path, &active, &.{});
+    try ctl.bindInPlace(path, "/tmp/btunnel-add.policy", &active, &.{});
     defer ctl.deinit();
     defer unlinkPath(path);
 
@@ -320,7 +584,7 @@ test "control: malformed datagram leaves the tree unchanged" {
     var active = policy.ActiveTree.init(&empty);
 
     var ctl: Control = undefined;
-    try ctl.bindInPlace(path, &active, &.{});
+    try ctl.bindInPlace(path, "/tmp/btunnel-bad.policy", &active, &.{});
     defer ctl.deinit();
     defer unlinkPath(path);
 
@@ -330,3 +594,174 @@ test "control: malformed datagram leaves the tree unchanged" {
     try std.testing.expectEqual(@as(usize, 0), ctl.count);
     try std.testing.expect(active.load().match(0xC0A8_0905) == null);
 }
+
+test "control: policy show replies with replayable rules to an addressable client" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-show-{d}.sock", .{linux.getpid()});
+
+    var empty = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&empty);
+
+    var ctl: Control = undefined;
+    try ctl.bindInPlace(path, "/tmp/btunnel-show.policy", &active, &.{});
+    defer ctl.deinit();
+    defer unlinkPath(path);
+
+    try sendCommand(path, "policy add --src 0.0.0.0/0 --dst 192.168.9.0/24 --action forward --target 5\n");
+    ctl.handle();
+
+    // Addressable client: abstract autobind gives the daemon a return address.
+    const cs = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    try std.testing.expect(linux.errno(cs) == .SUCCESS);
+    const cfd: linux.fd_t = @intCast(cs);
+    defer _ = linux.close(cfd);
+    var ba = linux.sockaddr.un{ .path = undefined };
+    ba.family = linux.AF.UNIX;
+    try std.testing.expect(linux.errno(linux.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
+
+    var sa = linux.sockaddr.un{ .path = undefined };
+    @memset(&sa.path, 0);
+    @memcpy(sa.path[0..path.len], path);
+    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    const wrc = linux.sendto(cfd, "policy show\n", 12, 0, @ptrCast(&sa), alen);
+    try std.testing.expect(linux.errno(wrc) == .SUCCESS);
+
+    ctl.handle(); // serves the reply
+
+    var out: [512]u8 = undefined;
+    const rrc = linux.recvfrom(cfd, &out, out.len, 0, null, null);
+    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
+    const reply = out[0..rrc];
+    try std.testing.expect(std.mem.indexOf(u8, reply, "policy add --src 0.0.0.0/0 --dst 192.168.9.0/24 --action forward --target 5") != null);
+}
+
+test "control: save persists a replayable snapshot and acks" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-save-{d}.sock", .{linux.getpid()});
+    var snap_buf: [64]u8 = undefined;
+    const snap = try std.fmt.bufPrint(&snap_buf, "/tmp/btunnel-save-{d}.policy", .{linux.getpid()});
+
+    var empty = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&empty);
+
+    var ctl: Control = undefined;
+    try ctl.bindInPlace(path, snap, &active, &.{});
+    defer ctl.deinit();
+    defer unlinkPath(path);
+    defer unlinkPath(snap);
+
+    try sendCommand(path, "policy add --src 10.1.0.0/16 --dst 10.2.0.0/16 --action drop\n");
+    ctl.handle();
+
+    const cs = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    try std.testing.expect(linux.errno(cs) == .SUCCESS);
+    const cfd: linux.fd_t = @intCast(cs);
+    defer _ = linux.close(cfd);
+    var ba = linux.sockaddr.un{ .path = undefined };
+    ba.family = linux.AF.UNIX;
+    try std.testing.expect(linux.errno(linux.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
+
+    var sa = linux.sockaddr.un{ .path = undefined };
+    @memset(&sa.path, 0);
+    @memcpy(sa.path[0..path.len], path);
+    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    try std.testing.expect(linux.errno(linux.sendto(cfd, "save\n", 5, 0, @ptrCast(&sa), alen)) == .SUCCESS);
+
+    ctl.handle();
+
+    var ack: [256]u8 = undefined;
+    const rrc = linux.recvfrom(cfd, &ack, ack.len, 0, null, null);
+    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, ack[0..rrc], "saved 1 rule") != null);
+
+    // Snapshot file holds the replayable command.
+    var snapz: [108]u8 = undefined;
+    @memcpy(snapz[0..snap.len], snap);
+    snapz[snap.len] = 0;
+    const ofd = linux.open(@ptrCast(&snapz), .{ .ACCMODE = .RDONLY }, 0);
+    try std.testing.expect(linux.errno(ofd) == .SUCCESS);
+    const rfd: linux.fd_t = @intCast(ofd);
+    defer _ = linux.close(rfd);
+    var fbuf: [256]u8 = undefined;
+    const frc = linux.read(rfd, &fbuf, fbuf.len);
+    try std.testing.expect(linux.errno(frc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, fbuf[0..frc], "policy add --src 10.1.0.0/16 --dst 10.2.0.0/16 --action drop") != null);
+}
+
+test "client: send/request to an absent daemon report DaemonUnavailable" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-absent-{d}.sock", .{linux.getpid()});
+    unlinkPath(path); // ensure nothing is bound there
+
+    try std.testing.expectError(error.DaemonUnavailable, send(path, "policy add --src 0.0.0.0/0 --dst 10.0.0.0/8 --action drop\n"));
+
+    var out: [64]u8 = undefined;
+    try std.testing.expectError(error.DaemonUnavailable, request(path, "policy show\n", &out, 200));
+}
+
+test "client: request times out as NoResponse when the daemon never replies" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-silent-{d}.sock", .{linux.getpid()});
+
+    // A bound socket that accepts the datagram but never replies.
+    const ss = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    try std.testing.expect(linux.errno(ss) == .SUCCESS);
+    const sfd: linux.fd_t = @intCast(ss);
+    defer _ = linux.close(sfd);
+    defer unlinkPath(path);
+    var sa = linux.sockaddr.un{ .path = undefined };
+    @memset(&sa.path, 0);
+    @memcpy(sa.path[0..path.len], path);
+    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    try std.testing.expect(linux.errno(linux.bind(sfd, @ptrCast(&sa), alen)) == .SUCCESS);
+
+    var out: [64]u8 = undefined;
+    try std.testing.expectError(error.NoResponse, request(path, "policy show\n", &out, 150));
+}
+
+test "client: round-trips a real request() against a served control socket" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-rt-{d}.sock", .{linux.getpid()});
+
+    var empty = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&empty);
+
+    var ctl: Control = undefined;
+    try ctl.bindInPlace(path, "/tmp/btunnel-rt.policy", &active, &.{});
+    defer ctl.deinit();
+    defer unlinkPath(path);
+
+    try send(path, "policy add --src 0.0.0.0/0 --dst 172.16.0.0/12 --action forward --target 7\n");
+    ctl.handle();
+
+    const Server = struct {
+        fn loop(c: *Control, stop: *std.atomic.Value(bool)) void {
+            const ts = linux.timespec{ .sec = 0, .nsec = 1 * std.time.ns_per_ms };
+            while (!stop.load(.acquire)) {
+                c.handle();
+                _ = linux.nanosleep(&ts, null);
+            }
+        }
+    };
+    var stop = std.atomic.Value(bool).init(false);
+    var th = try std.Thread.spawn(.{}, Server.loop, .{ &ctl, &stop });
+    defer {
+        stop.store(true, .release);
+        th.join();
+    }
+
+    var out: [512]u8 = undefined;
+    const reply = try request(path, "policy show\n", &out, 2000);
+    try std.testing.expect(std.mem.indexOf(u8, reply, "--dst 172.16.0.0/12 --action forward --target 7") != null);
+}
+

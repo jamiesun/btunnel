@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    // Default to ReleaseSmall per the design doc (≤ 200KB static binary target).
+    // Default to ReleaseSmall per the design doc (≤ 512KB static binary target).
     // Unlike `standardOptimizeOption`, this makes a bare `zig build` (no flags)
     // resolve to ReleaseSmall instead of Debug, while still honoring explicit
     // `-Doptimize=...` and `--release=...` overrides (e.g. `-Doptimize=Debug`

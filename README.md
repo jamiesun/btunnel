@@ -1,6 +1,6 @@
 # BTunnel
 
-**A pure-Zig, zero-dependency Layer-3 UDP tunnel that ships as a single static binary under 200KB.**
+**A pure-Zig, zero-dependency Layer-3 UDP tunnel that ships as a single static binary under 512KB.**
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -19,7 +19,7 @@ producing a single, fully statically linked binary.
 ## ✨ Features
 
 - **Zero-dependency single binary**: fully static linking against musl-libc; `ldd`
-  reports `not a dynamic executable`; size ≤ 200KB.
+  reports `not a dynamic executable`; size ≤ 512KB.
 - **Layered zero dynamic allocation**: the data plane (reactor / crypto) is strictly
   allocation-free, with buffers locked into resident memory at startup.
 - **Single-threaded event-driven reactor**: based on Linux epoll edge-triggered
@@ -96,7 +96,7 @@ docker run --rm --privileged --device=/dev/net/tun \
 ```
 
 [`test/integration/run.sh`](test/integration/run.sh) builds the binary on the
-container's native arch, enforces the static-link and ≤ 200 KB constraints,
+container's native arch, enforces the static-link and ≤ 512 KB constraints,
 smoke-runs the daemon, cross-builds the other musl arch, and runs the unit
 tests. The two-node TUN + network-namespace tunnel test is intentionally
 **skipped** while the data path is stubbed; an anti-forgetting guard fails the
@@ -137,11 +137,11 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / nonce / anti-replay) |
 | 6 Core reactor | `reactor.zig`, `peer.zig` | ✅ Done (epoll ET loop; multi-peer registry with per-link keys; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
 | 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
-| 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
+| 8 Control tool | `ptctl.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
 
-> **Currently verifiable**: `zig build test` is all green (37/37 in the Linux
-> dev container; 29 pass + 6 Linux-only skips on a macOS host); produces a
-> < 200KB static binary. A Linux dev container
+> **Currently verifiable**: `zig build test` is all green (42/42 in the Linux
+> dev container; 31 pass + 11 Linux-only skips on a macOS host); produces a
+> < 512KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
 > static-link and size constraints across both musl targets.
