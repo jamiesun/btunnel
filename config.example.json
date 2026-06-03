@@ -1,6 +1,6 @@
 {
   "negotiation_version": 1,
-  "psk": "0000000000000000000000000000000000000000000000000000000000000000",
+  "psk": "REPLACE_WITH_64_HEX_CHARS_E_G_FROM_openssl_rand_hex_32_COMMAND",
   "local_tun_mtu": 1452,
   "listen_port": 51820,
   "virtual_subnet": "10.0.0.0/24"

@@ -80,13 +80,24 @@ pub const Config = struct {
     /// Virtual subnet (default 10.0.0.0/24).
     virtual_subnet: Cidr = .{ .network = 0x0A00_0000, .prefix = 24 },
 
-    /// Compile-time hardcoded fallback config (used when config.json is missing).
+    /// Compile-time hardcoded fallback config (used when config.json is
+    /// missing). Note: the fallback PSK is all-zero, which `validate()`
+    /// deliberately rejects — the default config is intentionally NON-RUNNABLE
+    /// until a real PSK is provisioned via config.json (iron law #5).
     pub fn default() Config {
         return .{};
     }
 
-    /// Foolproof boundary checks: MTU range + virtual/host subnet overlap.
+    /// Whether the PSK is unset (all-zero). v1 mandates a real PSK.
+    pub fn pskIsZero(self: Config) bool {
+        return std.mem.allEqual(u8, &self.psk, 0);
+    }
+
+    /// Foolproof boundary checks: mandatory non-zero PSK + MTU range +
+    /// virtual/host subnet overlap. A missing/all-zero PSK is rejected so the
+    /// daemon can never start unauthenticated.
     pub fn validate(self: Config, host_subnets: []const Cidr) SanityError!void {
+        if (self.pskIsZero()) return SanityError.InvalidPsk;
         if (self.local_tun_mtu < MTU_MIN or self.local_tun_mtu > MTU_MAX) {
             return SanityError.MtuOutOfRange;
         }
@@ -136,6 +147,7 @@ pub const Config = struct {
 
 test "validate: MTU out of range is rejected" {
     var cfg = Config.default();
+    cfg.psk = [_]u8{0x5a} ** 32; // provision a PSK so the MTU fuse is what fires
     cfg.local_tun_mtu = 9000;
     try std.testing.expectError(SanityError.MtuOutOfRange, cfg.validate(&.{}));
 
@@ -144,12 +156,26 @@ test "validate: MTU out of range is rejected" {
 }
 
 test "validate: virtual/host subnet overlap is rejected" {
-    const cfg = Config.default(); // 10.0.0.0/24
+    var cfg = Config.default(); // 10.0.0.0/24
+    cfg.psk = [_]u8{0x5a} ** 32;
     const overlap = Cidr{ .network = 0x0A00_0000, .prefix = 16 }; // 10.0.0.0/16
     try std.testing.expectError(SanityError.SubnetOverlap, cfg.validate(&.{overlap}));
 
     const disjoint = Cidr{ .network = 0xC0A8_0100, .prefix = 24 }; // 192.168.1.0/24
     try cfg.validate(&.{disjoint});
+}
+
+test "validate: a missing/all-zero PSK is rejected (mandatory PSK, iron law #5)" {
+    // The compile-time default ships an all-zero PSK and must be non-runnable.
+    const def = Config.default();
+    try std.testing.expect(def.pskIsZero());
+    try std.testing.expectError(SanityError.InvalidPsk, def.validate(&.{}));
+
+    // A provisioned PSK clears the gate.
+    var cfg = Config.default();
+    cfg.psk = [_]u8{0x01} ** 32;
+    try std.testing.expect(!cfg.pskIsZero());
+    try cfg.validate(&.{});
 }
 
 test "JSON Parser & Sanity Check" {
@@ -177,7 +203,8 @@ test "JSON Parser & Sanity Check" {
     try std.testing.expectEqual([_]u8{0} ** 32, cfg2.psk);
 
     // An out-of-range MTU parses but is rejected by the sanity check (fuse).
-    const bad_mtu = "{ \"local_tun_mtu\": 9000 }";
+    // (PSK provided so the MTU check is what fires, not the PSK gate.)
+    const bad_mtu = "{ \"psk\": \"" ++ psk_hex ++ "\", \"local_tun_mtu\": 9000 }";
     const cfg3 = try Config.fromJson(a, bad_mtu);
     try std.testing.expectError(SanityError.MtuOutOfRange, cfg3.validate(&.{}));
 
