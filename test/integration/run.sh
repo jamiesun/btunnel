@@ -112,9 +112,11 @@ ok "unit tests green"
 # magic on the wire, replayed datagrams are dropped by the sliding window, and
 # an RCU `ptctl policy add` hot-update does not stall in-flight traffic.
 data_path_stubbed() {
-  # Stable sentinels that vanish once Tasks 4/6 implement the data path.
-  grep -q "the real TUNSETIFF ioctl lands in Task 4" src/tun.zig &&
-    grep -q "skeleton pending" src/reactor.zig
+  # Stub sentinels per module; while ANY remains, the e2e path can't run.
+  grep -q "the real TUNSETIFF ioctl lands in Task 4" src/tun.zig && return 0  # Task 4
+  grep -q "skeleton pending" src/reactor.zig && return 0                      # Task 6
+  grep -q "TODO(Task 7)" src/uds.zig && return 0                              # Task 7
+  return 1
 }
 
 e2e_netns() {

@@ -127,19 +127,19 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 1 Build config | `build.zig` | ✅ Done (static musl, ReleaseSmall, dual binaries) |
 | 2 Config sanity | `config.zig` | 🟡 Partial (boundary checks done; JSON parsing stubbed) |
 | 3 Policy match | `policy.zig` | ✅ Done (CIDR / longest-prefix / RCU) |
-| 4 System driver | `tun.zig` | 🔴 Stub (TUNSETIFF ioctl pending) |
+| 4 System driver | `tun.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd) |
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / nonce / anti-replay) |
 | 6 Core reactor | `reactor.zig` | 🟡 Partial (header + egress done; epoll loop stubbed) |
 | 7 Control-plane UDS | `uds.zig` | 🟡 Partial (tokenizer done; socket listener stubbed) |
 | 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
 
-> **Currently verifiable**: `zig build test` is all green (19/19); produces a
+> **Currently verifiable**: `zig build test` is all green (20/20); produces a
 > < 200KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
 > static-link and size constraints across both musl targets.
-> **End-to-end networking** still pending: TUN ioctl (Task 4), epoll send/recv loop
-> (Task 6), UDS communication (Tasks 7/8).
+> **End-to-end networking** still pending: epoll send/recv loop (Task 6), UDS
+> communication (Tasks 7/8).
 
 See [`docs/btunnel-develop.md`](docs/btunnel-develop.md) for the detailed
 architecture, memory model, and acceptance checklist.
