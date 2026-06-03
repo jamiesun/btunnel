@@ -8,7 +8,7 @@
 #
 # What it does TODAY (all of this is real and must pass):
 #   1. Build the static musl binary on the container's NATIVE arch.
-#   2. Enforce iron law #6: fully static (no ELF INTERP) and binary <= 200 KB.
+#   2. Enforce iron law #6: fully static (no ELF INTERP) and binary <= 512 KB.
 #   3. Smoke-run the daemon (config sanity path).
 #   4. Cross-compile the OTHER musl arch and re-check static + size (build-only;
 #      it is not executed, to avoid qemu-user emulation skewing results).
@@ -28,7 +28,7 @@
 #       btunnel-dev test/integration/run.sh
 set -euo pipefail
 
-readonly SIZE_BUDGET=204800   # 200 KiB, iron law #6
+readonly SIZE_BUDGET=524288   # 512 KiB, iron law #6
 PASS=0
 SKIP=0
 

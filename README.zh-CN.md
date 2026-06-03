@@ -1,6 +1,6 @@
 # BTunnel
 
-**纯 Zig 编写、零依赖的三层 UDP 隧道，最终产出一个小于 200KB 的静态单二进制文件。**
+**纯 Zig 编写、零依赖的三层 UDP 隧道，最终产出一个小于 512KB 的静态单二进制文件。**
 
 [English](README.md) · **简体中文**
 
@@ -13,7 +13,7 @@ BTunnel 在物理专线之上构建虚拟子网，采用**星型拓扑（Hub-and
 
 ## ✨ 特性
 
-- **零依赖单二进制**：基于 musl-libc 全静态链接，`ldd` 显示 `not a dynamic executable`，体积 ≤ 200KB。
+- **零依赖单二进制**：基于 musl-libc 全静态链接，`ldd` 显示 `not a dynamic executable`，体积 ≤ 512KB。
 - **分层零动态内存分配**：数据面（reactor / crypto）严格零分配，缓冲区启动时锁死在常驻内存。
 - **单线程事件驱动反应堆**：基于 Linux epoll 边缘触发（`EPOLLET`），无锁、无并发竞争。
 - **无状态混淆**：ChaCha20-Poly1305 全加密，密文无固定魔数，认证失败静默 Drop，对探测物理隐形。
@@ -81,7 +81,7 @@ docker run --rm --privileged --device=/dev/net/tun \
 ```
 
 [`test/integration/run.sh`](test/integration/run.sh) 会在容器原生架构上构建
-二进制，强制校验静态链接与 ≤ 200KB 约束，冒烟运行守护进程，交叉编译另一个
+二进制，强制校验静态链接与 ≤ 512KB 约束，冒烟运行守护进程，交叉编译另一个
 musl 架构，并运行单元测试。双节点 TUN + 网络命名空间隧道测试在数据通路仍为
 占位期间会被**跳过**；同时设有“防遗忘”守卫：一旦占位被移除却未启用该测试，
 脚本即判定失败，确保此预检永不悄悄停止覆盖真实通路。
@@ -119,10 +119,10 @@ cp config.example.json config.json
 | 5 密码学管道 | `crypto.zig` | ✅ 完成（AEAD / nonce / 防重放） |
 | 6 核心反应堆 | `reactor.zig`、`peer.zig` | ✅ 完成（epoll ET 主循环；多对端注册表 + 每链路独立密钥；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
 | 7 控制面 UDS | `uds.zig` | ✅ 完成（分词器 + AF_UNIX 数据报监听；原子 RCU 策略热替换，双缓冲） |
-| 8 控制工具 | `ptctl.zig` | 🟡 部分（参数校验完成；UDS 投递待实现） |
+| 8 控制工具 | `ptctl.zig` | ✅ 完成（UDS 投递；`policy add` 即发即弃，`policy show`/`save` 读取守护进程回包；守护进程未运行时非零退出） |
 
-> **当前可验证**：`zig build test` 全绿（Linux 开发容器内 37/37；macOS 宿主
-> 29 通过 + 6 个仅 Linux 用例跳过），可产出 < 200KB 静态二进制。
+> **当前可验证**：`zig build test` 全绿（Linux 开发容器内 42/42；macOS 宿主
+> 31 通过 + 11 个仅 Linux 用例跳过），可产出 < 512KB 静态二进制。
 > Linux 开发容器（[`.devcontainer/`](.devcontainer/)）提供集成/预检脚本
 > （[`test/integration/run.sh`](test/integration/run.sh)），在两个 musl 目标上
 > 强制校验静态链接与体积约束。

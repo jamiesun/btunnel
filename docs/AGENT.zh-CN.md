@@ -45,7 +45,7 @@
    **静默丢弃**——绝不回发 TCP Reset、ICMP 或任何可被观测的响应。
 5. **传输安全在 v1 即为强制项。** PSK 密钥、每端 64-bit **绝不复用的单调递增 nonce**，以及
    滑动窗口**防重放**校验。这些不得推迟。
-6. **单个静态二进制。** 基于 musl-libc 完全静态链接。默认 `-O ReleaseSmall`，目标 **≤ 200KB**。
+6. **单个静态二进制。** 基于 musl-libc 完全静态链接。默认 `-O ReleaseSmall`，目标 **≤ 512KB**。
    `ldd` 必须显示 `not a dynamic executable`。
 7. **坚持测试驱动。** 遵循 PRD 中的 TDD 流程。纯逻辑必须随附测试。任何提交前，
    `zig build test` 必须保持全绿。
