@@ -1,5 +1,7 @@
 # BTunnel
 
+**English** · [简体中文](README.zh-CN.md)
+
 > A virtual Layer-3 adaptive networking tool written in **pure Zig** (pinned to the
 > 2026 latest standard library `std.posix`).
 > Targets general Linux environments (including lightweight containers such as
@@ -112,3 +114,8 @@ architecture, memory model, and acceptance checklist.
 ## 📄 License
 
 [MIT](LICENSE) © 2026 jettwang
+
+---
+
+> 🔁 A Chinese mirror of this README lives at [`README.zh-CN.md`](README.zh-CN.md).
+> **The two must be kept in sync: when you edit one, update the other in the same change.**
