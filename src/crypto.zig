@@ -14,6 +14,31 @@ pub const NONCE_LEN = Aead.nonce_length; // 12
 
 pub const Key = [KEY_LEN]u8;
 
+const LINK_LABEL = "btunnel-v1-link";
+
+/// Derive a directional per-link key from the shared PSK and the ordered pair
+/// of mesh node ids (`from_id` is the sender, `to_id` is the receiver).
+///
+/// This is the single most important defence for a shared-PSK mesh: without it,
+/// two independent per-peer nonce counters can emit the same `(key, nonce)` pair
+/// for different plaintexts, which catastrophically breaks ChaCha20-Poly1305.
+/// Giving every directional link its own key makes each link's nonce space
+/// disjoint, so a sequence number may safely repeat across links.
+///
+/// Both endpoints of a link agree on the key because they feed the identical
+/// ordered pair: the sender uses `(local_id, peer_id)` for its tx key while the
+/// receiver uses `(peer_id, local_id)` for the matching rx key.
+pub fn deriveLinkKey(psk: Key, from_id: u32, to_id: u32) Key {
+    const Blake2b256 = std.crypto.hash.blake2.Blake2b256;
+    var msg: [LINK_LABEL.len + 8]u8 = undefined;
+    @memcpy(msg[0..LINK_LABEL.len], LINK_LABEL);
+    std.mem.writeInt(u32, msg[LINK_LABEL.len..][0..4], from_id, .big);
+    std.mem.writeInt(u32, msg[LINK_LABEL.len + 4 ..][0..4], to_id, .big);
+    var out: Key = undefined;
+    Blake2b256.hash(&msg, &out, .{ .key = &psk });
+    return out;
+}
+
 /// Derive a 12-byte nonce from a 64-bit sequence number (low 8 bytes hold the
 /// sequence, the high bytes are reserved for continuation).
 pub fn nonceFromSeq(seq: u64) [NONCE_LEN]u8 {
@@ -189,5 +214,36 @@ test "Anti-Replay: forward shift preserves previously-seen bits" {
     // A fresh in-window seq between them is accepted exactly once.
     try std.testing.expect(w.accept(30));
     try std.testing.expect(!w.accept(30));
+}
+
+test "Link keys: directional pair agrees, namespace is disjoint" {
+    const psk: Key = [_]u8{0x5a} ** KEY_LEN;
+
+    // Sender (local=1) tx key for the link to peer 3 must equal the receiver's
+    // (local=3) rx key for traffic arriving from peer 1.
+    const hub_to_b_tx = deriveLinkKey(psk, 1, 3);
+    const b_from_hub_rx = deriveLinkKey(psk, 1, 3);
+    try std.testing.expectEqualSlices(u8, &hub_to_b_tx, &b_from_hub_rx);
+
+    // The opposite direction is a different key (no accidental symmetry).
+    const b_to_hub_tx = deriveLinkKey(psk, 3, 1);
+    try std.testing.expect(!std.mem.eql(u8, &hub_to_b_tx, &b_to_hub_tx));
+
+    // Two distinct destinations from the same sender get distinct keys, so an
+    // identical sequence number on each link cannot collide into nonce reuse.
+    const hub_to_a = deriveLinkKey(psk, 1, 2);
+    const hub_to_b = deriveLinkKey(psk, 1, 3);
+    try std.testing.expect(!std.mem.eql(u8, &hub_to_a, &hub_to_b));
+
+    // The same nonce/seq under two different link keys yields different
+    // ciphertext (and neither opens under the other key).
+    const plain = "shared-psk nonce reuse must not break confidentiality";
+    var ct_a: [plain.len + TAG_LEN]u8 = undefined;
+    var ct_b: [plain.len + TAG_LEN]u8 = undefined;
+    _ = seal(hub_to_a, 7, plain, &ct_a);
+    _ = seal(hub_to_b, 7, plain, &ct_b);
+    try std.testing.expect(!std.mem.eql(u8, &ct_a, &ct_b));
+    var opened: [plain.len]u8 = undefined;
+    try std.testing.expectError(error.AuthenticationFailed, open(hub_to_b, 7, &ct_a, &opened));
 }
 

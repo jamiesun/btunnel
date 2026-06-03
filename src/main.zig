@@ -49,11 +49,18 @@ pub fn main() !void {
         return err;
     };
 
+    // Build the peer registry so any malformed mesh configuration aborts startup
+    // (issue #5). The registry is unused until the reactor is wired (issue #7).
+    const registry = bt.peer.PeerRegistry.fromConfig(cfg) catch |err| {
+        std.debug.print("peer registry build failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
     std.debug.print(
-        "btunnel v0.1.0 (mtu={d}, udp_port={d}, mode={s})\n",
-        .{ cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct) },
+        "btunnel v0.1.0 (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d})\n",
+        .{ cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len },
     );
-    std.debug.print("scaffold: reactor not yet wired (see tasks 5/7)\n", .{});
+    std.debug.print("scaffold: reactor not yet wired (see task 7)\n", .{});
 }
 
 test "daemon module wiring" {

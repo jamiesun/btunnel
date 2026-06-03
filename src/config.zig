@@ -7,9 +7,14 @@
 //! and unit-testable on any host; the actual file read lives in `main.zig`.
 
 const std = @import("std");
+const linux = std.os.linux;
 
 pub const MTU_MIN: u16 = 68;
 pub const MTU_MAX: u16 = 1500;
+
+/// Maximum number of mesh peers a single node can be configured with. Fixed so
+/// the registry stays zero-allocation (issue #5).
+pub const MAX_PEERS: usize = 16;
 
 /// 32-byte pre-shared key (PSK).
 pub const Psk = [32]u8;
@@ -25,6 +30,13 @@ pub const CidrError = error{
     MissingSlash,
     InvalidOctet,
     InvalidPrefix,
+};
+
+/// "IP:port" endpoint parse errors.
+pub const EndpointError = error{
+    MissingColon,
+    InvalidOctet,
+    InvalidPort,
 };
 
 /// A CIDR subnet (network address + prefix length).
@@ -43,6 +55,30 @@ pub const Cidr = struct {
         const m = a.mask() & b.mask();
         return (a.network & m) == (b.network & m);
     }
+
+    /// Whether a host-byte-order address falls inside this subnet. A /0 subnet
+    /// (the permissive default) contains every address.
+    pub fn contains(self: Cidr, ip: u32) bool {
+        const m = self.mask();
+        return (ip & m) == (self.network & m);
+    }
+};
+
+/// A configured mesh peer: its mesh id, UDP endpoint (network byte order, ready
+/// for `sendto`), and the inner source prefix bound to that endpoint. Inbound
+/// packets whose inner IPv4 source falls outside `allowed_src` are dropped, so
+/// an authenticated spoke cannot spoof another node's address (issue #5).
+///
+/// SECURITY NOTE: when `allowed_src` is omitted in config.json it defaults to
+/// the permissive `0.0.0.0/0`, which accepts ANY inner source from that peer and
+/// therefore disables the anti-spoofing guarantee for it. Operators should set a
+/// tight prefix (typically the spoke's /32 or its assigned subnet) on every peer
+/// of a hub. The default stays permissive only so single-link / trusted setups
+/// keep working without extra configuration.
+pub const PeerSpec = struct {
+    id: u32,
+    endpoint: linux.sockaddr.in,
+    allowed_src: Cidr = .{ .network = 0, .prefix = 0 },
 };
 
 /// Parse "A.B.C.D/P" into a Cidr (network in host byte order).
@@ -67,6 +103,34 @@ pub fn parseCidr(text: []const u8) CidrError!Cidr {
     return .{ .network = network, .prefix = @intCast(prefix) };
 }
 
+/// Parse "A.B.C.D:port" into a `sockaddr.in` (address + port in network byte
+/// order, ready to hand to `sendto`).
+pub fn parseEndpoint(text: []const u8) EndpointError!linux.sockaddr.in {
+    const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse return EndpointError.MissingColon;
+    const ip_str = text[0..colon];
+    const port_str = text[colon + 1 ..];
+
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, ip_str, '.');
+    var i: usize = 0;
+    while (it.next()) |part| : (i += 1) {
+        if (i >= 4) return EndpointError.InvalidOctet;
+        octets[i] = std.fmt.parseInt(u8, part, 10) catch return EndpointError.InvalidOctet;
+    }
+    if (i != 4) return EndpointError.InvalidOctet;
+
+    const port = std.fmt.parseInt(u16, port_str, 10) catch return EndpointError.InvalidPort;
+    if (port == 0) return EndpointError.InvalidPort;
+
+    return .{
+        .family = linux.AF.INET,
+        .port = std.mem.nativeToBig(u16, port),
+        // `octets` already hold the address in network byte order; reinterpret
+        // their bytes as the u32 the kernel expects (memory layout preserved).
+        .addr = @bitCast(octets),
+    };
+}
+
 pub const Config = struct {
     /// v1 header/config negotiation version (fixed to 1 in v1, reserved for the
     /// v2 handshake).
@@ -79,6 +143,14 @@ pub const Config = struct {
     listen_port: u16 = 51820,
     /// Virtual subnet (default 10.0.0.0/24).
     virtual_subnet: Cidr = .{ .network = 0x0A00_0000, .prefix = 24 },
+    /// This node's own mesh id, used to derive directional per-link keys. Must
+    /// be non-zero and distinct from every peer id when `peers` is non-empty
+    /// (issue #5). Zero means "single-node / no mesh configured".
+    local_id: u32 = 0,
+    /// Configured mesh peers (fixed-capacity, zero-allocation). Only the first
+    /// `peer_count` entries are valid.
+    peers: [MAX_PEERS]PeerSpec = undefined,
+    peer_count: usize = 0,
 
     /// Compile-time hardcoded fallback config (used when config.json is
     /// missing). Note: the fallback PSK is all-zero, which `validate()`
@@ -108,14 +180,23 @@ pub const Config = struct {
 
     /// On-wire JSON schema. Defaults mirror `Config` so a partial document is
     /// valid; `psk` is a 64-char hex string and `virtual_subnet` a CIDR string.
-    /// Unknown fields are ignored so forward-compatible keys (e.g. the future
-    /// multi-peer `peers` array, issue #5) do not break v1 parsing.
+    /// Unknown fields are ignored so forward-compatible keys do not break
+    /// parsing.
     const Wire = struct {
         negotiation_version: u8 = 1,
         psk: []const u8 = "",
         local_tun_mtu: u16 = 1452,
         listen_port: u16 = 51820,
         virtual_subnet: []const u8 = "10.0.0.0/24",
+        local_id: u32 = 0,
+        peers: []const WirePeer = &.{},
+    };
+
+    /// On-wire schema for a single mesh peer.
+    const WirePeer = struct {
+        id: u32 = 0,
+        endpoint: []const u8 = "",
+        allowed_src: []const u8 = "0.0.0.0/0",
     };
 
     /// Parse a config.json document. Returns a fully-owned `Config` (no slices
@@ -134,12 +215,24 @@ pub const Config = struct {
             .local_tun_mtu = w.local_tun_mtu,
             .listen_port = w.listen_port,
             .virtual_subnet = parseCidr(w.virtual_subnet) catch return error.InvalidCidr,
+            .local_id = w.local_id,
         };
 
         if (w.psk.len != 0) {
             if (w.psk.len != 64) return error.InvalidPsk;
             _ = std.fmt.hexToBytes(cfg.psk[0..], w.psk) catch return error.InvalidPsk;
         }
+
+        if (w.peers.len > MAX_PEERS) return error.TooManyPeers;
+        for (w.peers, 0..) |wp, i| {
+            // Copy every field out by value so nothing borrows the parse arena.
+            cfg.peers[i] = .{
+                .id = wp.id,
+                .endpoint = parseEndpoint(wp.endpoint) catch return error.InvalidEndpoint,
+                .allowed_src = parseCidr(wp.allowed_src) catch return error.InvalidCidr,
+            };
+        }
+        cfg.peer_count = w.peers.len;
 
         return cfg;
     }
@@ -224,4 +317,53 @@ test "parseCidr" {
     try std.testing.expectEqual(@as(u6, 24), c.prefix);
     try std.testing.expectError(CidrError.MissingSlash, parseCidr("10.0.0.0"));
     try std.testing.expectError(CidrError.InvalidPrefix, parseCidr("10.0.0.0/33"));
+}
+
+test "parseEndpoint: address and port land in network byte order" {
+    const ep = try parseEndpoint("10.0.0.2:51820");
+    try std.testing.expectEqual(linux.AF.INET, ep.family);
+    // 10.0.0.2 in network byte order: bytes 0a 00 00 02.
+    var addr_bytes: [4]u8 = @bitCast(ep.addr);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, &addr_bytes);
+    // port 51820 = 0xCA6C; network order swaps to 0x6CCA.
+    try std.testing.expectEqual(std.mem.nativeToBig(u16, 51820), ep.port);
+
+    try std.testing.expectError(EndpointError.MissingColon, parseEndpoint("10.0.0.2"));
+    try std.testing.expectError(EndpointError.InvalidPort, parseEndpoint("10.0.0.2:0"));
+    try std.testing.expectError(EndpointError.InvalidOctet, parseEndpoint("10.0.0:51820"));
+}
+
+test "Cidr.contains: /0 is permissive, /32 is exact" {
+    const any = Cidr{ .network = 0, .prefix = 0 };
+    try std.testing.expect(any.contains(0x0A00_0002));
+    try std.testing.expect(any.contains(0xFFFF_FFFF));
+
+    const host = try parseCidr("10.0.0.2/32");
+    try std.testing.expect(host.contains(0x0A00_0002));
+    try std.testing.expect(!host.contains(0x0A00_0003));
+
+    const net = try parseCidr("10.0.0.0/24");
+    try std.testing.expect(net.contains(0x0A00_00FE));
+    try std.testing.expect(!net.contains(0x0A00_0100));
+}
+
+test "fromJson: peers array is parsed into the registry spec" {
+    const a = std.testing.allocator;
+    const psk_hex = "0123456789abcdef" ** 4;
+    const doc =
+        "{ \"psk\": \"" ++ psk_hex ++ "\", \"local_id\": 1, \"peers\": [" ++
+        "{ \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"allowed_src\": \"10.0.0.2/32\" }," ++
+        "{ \"id\": 3, \"endpoint\": \"10.0.0.3:51820\" }" ++
+        "] }";
+    const cfg = try Config.fromJson(a, doc);
+    try std.testing.expectEqual(@as(u32, 1), cfg.local_id);
+    try std.testing.expectEqual(@as(usize, 2), cfg.peer_count);
+    try std.testing.expectEqual(@as(u32, 2), cfg.peers[0].id);
+    try std.testing.expectEqual(@as(u6, 32), cfg.peers[0].allowed_src.prefix);
+    // An omitted allowed_src defaults to the permissive 0.0.0.0/0.
+    try std.testing.expectEqual(@as(u6, 0), cfg.peers[1].allowed_src.prefix);
+
+    // A malformed endpoint aborts parsing.
+    const bad = "{ \"peers\": [ { \"id\": 2, \"endpoint\": \"nope\" } ] }";
+    try std.testing.expectError(error.InvalidEndpoint, Config.fromJson(a, bad));
 }
