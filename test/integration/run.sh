@@ -83,7 +83,18 @@ nsize=$(assert_size zig-out/bin/btunnel)
 ok "native binary is static and ${nsize} bytes (<= ${SIZE_BUDGET})"
 
 log "smoke-running the daemon ..."
-out=$(zig-out/bin/btunnel 2>&1) || die "daemon exited non-zero:\n$out"
+# v1 mandates a non-zero PSK (iron law #5): the all-zero default is
+# non-runnable, so the smoke run provisions a throwaway PSK via config.json.
+smoke_dir=$(mktemp -d)
+cp zig-out/bin/btunnel "$smoke_dir/btunnel"
+printf '{ "psk": "%s" }' \
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
+  > "$smoke_dir/config.json"
+if ! out=$(cd "$smoke_dir" && ./btunnel 2>&1); then
+  rm -rf "$smoke_dir"
+  die "daemon exited non-zero:\n$out"
+fi
+rm -rf "$smoke_dir"
 grep -q "btunnel v" <<<"$out" || die "unexpected daemon output:\n$out"
 ok "daemon smoke run: $(head -n1 <<<"$out")"
 

@@ -106,7 +106,13 @@ never silently stop testing the real path.
 ## 🚀 Usage
 
 ```bash
-# Start the daemon (reads config.json, falls back to the compile-time default if missing)
+# v1 mandates a non-zero PSK (iron law #5). Generate one and drop it into config.json:
+cp config.example.json config.json
+# then set "psk" to 32 random bytes as 64 hex chars, e.g.:
+#   openssl rand -hex 32
+# Without a valid PSK the daemon refuses to start (config sanity: InvalidPsk).
+
+# Start the daemon (reads config.json from the working directory)
 ./zig-out/bin/btunnel
 
 # Inject a policy dynamically (hot-updated over the UDS, no restart needed)
@@ -133,8 +139,8 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 7 Control-plane UDS | `uds.zig` | 🟡 Partial (tokenizer done; socket listener stubbed) |
 | 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
 
-> **Currently verifiable**: `zig build test` is all green (26/26 in the Linux
-> dev container; 23 pass + 3 Linux-only skips on a macOS host); produces a
+> **Currently verifiable**: `zig build test` is all green (27/27 in the Linux
+> dev container; 24 pass + 3 Linux-only skips on a macOS host); produces a
 > < 200KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
