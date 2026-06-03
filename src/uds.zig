@@ -1,8 +1,10 @@
-//! 任务 7：控制面 Unix 域套接字（Control-Plane UDS）
+//! Task 7: Control-plane Unix domain socket.
 //!
-//! 守护进程监听 /var/run/btunnel.sock，接收 ptctl 的明文 Token 指令，
-//! 分词后在 arena 中重建策略树，再调用 policy 的原子 swap 接口（无锁注入）。
-//! 脚手架：分词器已落地并可测试；监听器骨架待任务 7 落地。
+//! The daemon listens on /var/run/btunnel.sock, receives plaintext token
+//! commands from ptctl, tokenizes them, rebuilds the policy tree in an arena,
+//! then calls policy's atomic swap interface (lock-free injection). Scaffold:
+//! the tokenizer is implemented and testable; the listener is a skeleton pending
+//! Task 7.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,7 +18,7 @@ pub const ParseError = error{
     InvalidValue,
 };
 
-/// 控制指令。
+/// Control command.
 pub const Command = union(enum) {
     policy_add: policy.PolicyEntry,
     policy_show,
@@ -27,8 +29,8 @@ fn nextValue(it: *std.mem.TokenIterator(u8, .scalar)) ParseError![]const u8 {
     return it.next() orelse ParseError.MissingArgument;
 }
 
-/// 将一行明文指令分词为 Command。
-/// 例：`policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3`
+/// Tokenize a line of plaintext command into a Command.
+/// e.g. `policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3`
 pub fn parseCommand(line: []const u8) ParseError!Command {
     var it = std.mem.tokenizeScalar(u8, line, ' ');
     const verb = it.next() orelse return ParseError.UnknownCommand;
@@ -75,11 +77,12 @@ pub fn parseCommand(line: []const u8) ParseError!Command {
     return .{ .policy_add = entry };
 }
 
-/// 守护进程监听器骨架。
+/// Daemon listener skeleton.
 pub const Listener = struct {
     fd: std.posix.fd_t,
 
-    /// TODO(任务 7)：bind/listen AF_UNIX，accept 后读取指令并热替换策略树。
+    /// TODO(Task 7): bind/listen on AF_UNIX, accept, read commands, hot-swap the
+    /// policy tree.
     pub fn listen(path: []const u8) !Listener {
         if (builtin.os.tag != .linux) return error.Unsupported;
         _ = path;
@@ -95,7 +98,7 @@ test "parseCommand: policy add" {
     try std.testing.expectEqual(@as(u32, 3), e.target);
 }
 
-test "parseCommand: show / save / 错误" {
+test "parseCommand: show / save / errors" {
     try std.testing.expect(try parseCommand("policy show") == .policy_show);
     try std.testing.expect(try parseCommand("save") == .save);
     try std.testing.expectError(ParseError.UnknownCommand, parseCommand("bogus"));

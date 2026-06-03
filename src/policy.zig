@@ -1,8 +1,9 @@
-//! 任务 3：多网段策略匹配引擎（Policy Engine）
+//! Task 3: Multi-subnet policy matching engine.
 //!
-//! - CIDR 解析（"192.168.1.0/24" -> 网络号 + 掩码）
-//! - 基于位运算的逆序最长前缀匹配
-//! - 无锁 RCU：策略树以 `*const PolicyTree` 原子只读 + 原子指针交换热替换
+//! - CIDR parsing ("192.168.1.0/24" -> network + mask)
+//! - Bitwise longest-prefix matching
+//! - Lock-free RCU: the policy tree is read atomically via `*const PolicyTree`
+//!   and hot-swapped via an atomic pointer exchange.
 
 const std = @import("std");
 const config = @import("config.zig");
@@ -15,7 +16,7 @@ pub const PolicyEntry = struct {
     src: Cidr,
     dst: Cidr,
     action: Action,
-    /// 转发目标对端 id（DROP 时忽略）。
+    /// Forwarding peer id (ignored when DROP).
     target: u32 = 0,
 };
 
@@ -25,7 +26,7 @@ pub const ParseError = error{
     InvalidPrefix,
 };
 
-/// 将 "A.B.C.D/P" 解析为 Cidr（主机字节序网络号）。
+/// Parse "A.B.C.D/P" into a Cidr (network in host byte order).
 pub fn parseCidr(text: []const u8) ParseError!Cidr {
     const slash = std.mem.indexOfScalar(u8, text, '/') orelse return ParseError.MissingSlash;
     const addr_str = text[0..slash];
@@ -52,11 +53,12 @@ fn cidrContains(c: Cidr, ip: u32) bool {
     return (ip & m) == (c.network & m);
 }
 
-/// 不可变策略树。由控制面在独立 arena 中整体构建，数据面只读。
+/// Immutable policy tree. Built as a whole by the control plane in a dedicated
+/// arena; read-only on the data plane.
 pub const PolicyTree = struct {
     entries: []const PolicyEntry,
 
-    /// 逆序最长前缀匹配：返回命中的 entry，未命中返回 null。
+    /// Longest-prefix match: returns the matched entry, or null if none.
     pub fn match(self: *const PolicyTree, dst_ip: u32) ?PolicyEntry {
         var best: ?PolicyEntry = null;
         var best_prefix: i16 = -1;
@@ -70,8 +72,10 @@ pub const PolicyTree = struct {
     }
 };
 
-/// RCU 持有者：数据面经 `load()` 原子读取当前树指针；控制面经 `swap()`
-/// 用一次原子写整体替换。全程无锁，旧指针在替换后仍可被持有方安全读取。
+/// RCU holder: the data plane reads the current tree pointer atomically via
+/// `load()`; the control plane replaces it wholesale via `swap()` with a single
+/// atomic write. Lock-free; the old pointer remains safe to read by holders
+/// after a swap.
 pub const ActiveTree = struct {
     ptr: *const PolicyTree,
 
@@ -83,7 +87,8 @@ pub const ActiveTree = struct {
         return @atomicLoad(*const PolicyTree, &self.ptr, .acquire);
     }
 
-    /// 原子指针交换，返回被替换下来的旧树（调用方在空闲轮回收）。
+    /// Atomic pointer swap; returns the replaced old tree (caller reclaims it on
+    /// an idle loop iteration).
     pub fn swap(self: *ActiveTree, new_tree: *const PolicyTree) *const PolicyTree {
         const old = self.ptr;
         @atomicStore(*const PolicyTree, &self.ptr, new_tree, .release);
@@ -99,7 +104,7 @@ test "parseCidr" {
     try std.testing.expectError(ParseError.InvalidPrefix, parseCidr("10.0.0.0/33"));
 }
 
-test "CIDR Overlap & Matching: 最长前缀优先" {
+test "CIDR Overlap & Matching: longest prefix wins" {
     const any = PolicyEntry{
         .src = try parseCidr("0.0.0.0/0"),
         .dst = try parseCidr("0.0.0.0/0"),
@@ -120,7 +125,7 @@ test "CIDR Overlap & Matching: 最长前缀优先" {
     try std.testing.expectEqual(Action.drop, hit_drop.action);
 }
 
-test "RCU Hot-Swap: 旧指针替换后仍可安全读取" {
+test "RCU Hot-Swap: old pointer stays readable after swap" {
     const old_tree = PolicyTree{ .entries = &.{.{
         .src = try parseCidr("0.0.0.0/0"),
         .dst = try parseCidr("10.0.0.0/24"),
@@ -134,13 +139,13 @@ test "RCU Hot-Swap: 旧指针替换后仍可安全读取" {
     }} };
 
     var active = ActiveTree.init(&old_tree);
-    const held = active.load(); // 数据面持有旧指针
+    const held = active.load(); // data plane holds the old pointer
 
     const swapped_out = active.swap(&new_tree);
     try std.testing.expectEqual(&old_tree, swapped_out);
 
-    // 旧指针仍可安全读出原规则。
+    // Old pointer still reads the original rule.
     try std.testing.expectEqual(Action.drop, held.match(0x0A00_0001).?.action);
-    // 新读取命中新规则。
+    // A fresh read hits the new rule.
     try std.testing.expectEqual(Action.forward, active.load().match(0x0A00_0001).?.action);
 }

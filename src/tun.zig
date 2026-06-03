@@ -1,8 +1,9 @@
-//! 任务 4：TUN 网卡系统驱动（Data-Plane Device）
+//! Task 4: TUN device system driver (data-plane device).
 //!
-//! 通过原生 std.posix 系统调用打开 /dev/net/tun，ioctl 实例化虚拟网卡，
-//! 设置 O_NONBLOCK。脚手架：保留无依赖初始化骨架，Linux 专属逻辑以
-//! `builtin.os` 守卫，非 Linux 平台编译通过但运行返回 Unsupported。
+//! Opens /dev/net/tun via native std.posix syscalls, instantiates the virtual
+//! NIC with ioctl, and sets O_NONBLOCK. Scaffold: keeps a dependency-free init
+//! skeleton; Linux-specific logic is guarded by `builtin.os`. On non-Linux
+//! platforms it compiles but returns Unsupported at runtime.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -25,8 +26,8 @@ pub const TunDevice = struct {
     fd: posix.fd_t,
     name: [IFNAMSIZ]u8,
 
-    /// 以非阻塞方式打开并配置一块 L3 TUN 网卡（IFF_TUN | IFF_NO_PI）。
-    /// TODO(任务 4)：补全 TUNSETIFF ioctl 与 ifreq 结构填充。
+    /// Open and configure an L3 TUN NIC in non-blocking mode (IFF_TUN | IFF_NO_PI).
+    /// TODO(Task 4): complete the TUNSETIFF ioctl and ifreq struct population.
     pub fn open(if_name: []const u8) TunError!TunDevice {
         if (builtin.os.tag != .linux) return TunError.Unsupported;
 
@@ -37,7 +38,7 @@ pub const TunDevice = struct {
         const n = @min(if_name.len, IFNAMSIZ - 1);
         @memcpy(name[0..n], if_name[0..n]);
 
-        // 占位：实际的 TUNSETIFF ioctl 在任务 4 落地。
+        // Placeholder: the real TUNSETIFF ioctl lands in Task 4.
         return TunError.Unsupported;
     }
 
@@ -46,7 +47,7 @@ pub const TunDevice = struct {
     }
 };
 
-test "TUN 常量与结构" {
+test "TUN constants and struct" {
     try std.testing.expectEqual(@as(u16, 0x0001), IFF_TUN);
     try std.testing.expectEqual(@as(usize, 16), IFNAMSIZ);
     try std.testing.expectEqual(IFNAMSIZ, @sizeOf([IFNAMSIZ]u8));

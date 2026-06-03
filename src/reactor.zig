@@ -1,30 +1,33 @@
-//! 任务 6：核心反应堆（Data-Plane Reactor）
+//! Task 6: Core reactor (data-plane reactor).
 //!
-//! 单线程 epoll 边缘触发闭环：TUN_FD / UDP_FD / UDS_FD 非阻塞盲转。
-//! 出口统一经 `egress(mode, pkt)` 分发，新增模式只填分支，不动主循环。
-//! v1 仅交付 raw_direct；kcp_arq / fec_xor 为 v2 Roadmap，暂返回 NotImplemented。
+//! Single-threaded epoll edge-triggered loop: non-blocking blind forwarding of
+//! TUN_FD / UDP_FD / UDS_FD. Egress is dispatched uniformly via
+//! `egress(mode, pkt)`; adding a mode only adds a branch, never touches the main
+//! loop. v1 ships raw_direct only; kcp_arq / fec_xor are v2 roadmap and return
+//! NotImplemented for now.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const policy = @import("policy.zig");
 
-/// 私有报头（packed struct 物理对齐）：1B 版本 + 1B 标志 + 2B 预留协商字段
-/// + 8B 单调递增序列号（兼作 nonce 与防重放依据）。共 12 字节。
+/// Private wire header (packed struct, physically aligned): 1B version + 1B
+/// flags + 2B reserved negotiation field + 8B monotonic sequence number (doubles
+/// as the nonce and anti-replay basis). 12 bytes total.
 pub const WireHeader = packed struct {
     version: u8 = 1,
     flags: u8 = 0,
-    /// v2 握手协商预留。
+    /// Reserved for the v2 handshake negotiation.
     reserved: u16 = 0,
     seq: u64,
 };
 
 pub const HEADER_LEN = @divExact(@bitSizeOf(WireHeader), 8);
 
-/// 出口流控模式。新增模式只在此处与 `egress` 增加分支。
+/// Egress flow-control mode. New modes add a branch here and in `egress`.
 pub const EgressMode = enum {
-    raw_direct, // v1：跳过重传，MTU 1452
-    kcp_arq, // v2：自研 arena 版 ARQ，MTU 1428
-    fec_xor, // v2：自研前向纠错
+    raw_direct, // v1: skip retransmission, MTU 1452
+    kcp_arq, // v2: in-house arena-based ARQ, MTU 1428
+    fec_xor, // v2: in-house forward error correction
 };
 
 pub fn mtuFor(mode: EgressMode) u16 {
@@ -37,11 +40,11 @@ pub fn mtuFor(mode: EgressMode) u16 {
 
 pub const EgressError = error{NotImplemented};
 
-/// 出口分发。v1 仅 raw_direct 落地，其余为 v2 预留分支。
+/// Egress dispatch. v1 ships raw_direct only; the rest are v2-reserved branches.
 pub fn egress(mode: EgressMode, pkt: []const u8) EgressError!void {
     switch (mode) {
         .raw_direct => {
-            // TODO(任务 6)：经物理 UDP 套接字 sendto 发出。
+            // TODO(Task 6): send out via the physical UDP socket (sendto).
             _ = pkt;
         },
         .kcp_arq, .fec_xor => return EgressError.NotImplemented,
@@ -55,7 +58,8 @@ pub const Reactor = struct {
     active: *policy.ActiveTree,
     mode: EgressMode = .raw_direct,
 
-    /// 单线程 epoll_wait 闭环。脚手架：Linux 专属，骨架待任务 6 落地。
+    /// Single-threaded epoll_wait loop. Scaffold: Linux-only, skeleton pending
+    /// Task 6.
     pub fn run(self: *Reactor) !void {
         if (builtin.os.tag != .linux) return error.Unsupported;
         _ = self;
@@ -63,11 +67,11 @@ pub const Reactor = struct {
     }
 };
 
-test "WireHeader 为 12 字节" {
+test "WireHeader is 12 bytes" {
     try std.testing.expectEqual(@as(usize, 12), HEADER_LEN);
 }
 
-test "egress: v1 raw_direct 落地，v2 模式返回 NotImplemented" {
+test "egress: v1 raw_direct works, v2 modes return NotImplemented" {
     try egress(.raw_direct, &.{});
     try std.testing.expectError(EgressError.NotImplemented, egress(.kcp_arq, &.{}));
     try std.testing.expectError(EgressError.NotImplemented, egress(.fec_xor, &.{}));

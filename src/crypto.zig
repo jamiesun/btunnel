@@ -1,8 +1,9 @@
-//! 任务 5：密码学管道（Crypto Pipeline）
+//! Task 5: Crypto pipeline.
 //!
-//! - ChaCha20-Poly1305 全加密，运行时零分配（调用方传入固定缓冲区切片）
-//! - Nonce 由每端 64-bit 单调递增计数器派生，绝不复用
-//! - 接收端滑动窗口（64 位 bitmap）防重放
+//! - ChaCha20-Poly1305 full encryption, zero allocation at runtime (the caller
+//!   passes fixed-buffer slices)
+//! - Nonce derived from a per-endpoint 64-bit monotonic counter, never reused
+//! - Receiver-side sliding window (64-bit bitmap) anti-replay
 
 const std = @import("std");
 const Aead = std.crypto.aead.chacha_poly.ChaCha20Poly1305;
@@ -13,15 +14,17 @@ pub const NONCE_LEN = Aead.nonce_length; // 12
 
 pub const Key = [KEY_LEN]u8;
 
-/// 由 64-bit 序列号派生 12 字节 nonce（低 8 字节存序列号，高位预留续接）。
+/// Derive a 12-byte nonce from a 64-bit sequence number (low 8 bytes hold the
+/// sequence, the high bytes are reserved for continuation).
 pub fn nonceFromSeq(seq: u64) [NONCE_LEN]u8 {
     var n = [_]u8{0} ** NONCE_LEN;
     std.mem.writeInt(u64, n[0..8], seq, .little);
     return n;
 }
 
-/// 每端独立的单调递增计数器。发送即自增，绝不复用。
-/// 重启后可用高位续接（`reseedHigh`）杜绝跨会话复用。
+/// Per-endpoint monotonic counter. Incremented on every send, never reused.
+/// After a restart the high bits can be reseeded (`reseedHigh`) to avoid
+/// cross-session reuse.
 pub const NonceCounter = struct {
     value: u64 = 1,
 
@@ -36,8 +39,9 @@ pub const NonceCounter = struct {
     }
 };
 
-/// 加密：密文写入 `out[0..plaintext.len]`，Tag 追加在其后。
-/// 要求 `out.len >= plaintext.len + TAG_LEN`。返回写入的总字节数。
+/// Encrypt: ciphertext is written to `out[0..plaintext.len]` with the tag
+/// appended after it. Requires `out.len >= plaintext.len + TAG_LEN`. Returns the
+/// total number of bytes written.
 pub fn seal(key: Key, seq: u64, plaintext: []const u8, out: []u8) usize {
     std.debug.assert(out.len >= plaintext.len + TAG_LEN);
     const ct = out[0..plaintext.len];
@@ -47,8 +51,9 @@ pub fn seal(key: Key, seq: u64, plaintext: []const u8, out: []u8) usize {
     return plaintext.len + TAG_LEN;
 }
 
-/// 解密并认证：`ciphertext` 含尾部 16B Tag，明文写入 `out`。
-/// 认证失败返回 error（调用方必须直接 Drop）。返回明文字节数。
+/// Decrypt and authenticate: `ciphertext` includes the trailing 16-byte tag;
+/// plaintext is written to `out`. Returns an error on authentication failure
+/// (the caller must Drop). Returns the plaintext byte count.
 pub fn open(key: Key, seq: u64, ciphertext: []const u8, out: []u8) !usize {
     if (ciphertext.len < TAG_LEN) return error.Truncated;
     const ct = ciphertext[0 .. ciphertext.len - TAG_LEN];
@@ -59,12 +64,13 @@ pub fn open(key: Key, seq: u64, ciphertext: []const u8, out: []u8) !usize {
     return ct.len;
 }
 
-/// 64 包滑动窗口防重放。bit i 置位表示 (highest - i) 已收到。
+/// 64-packet sliding window anti-replay. Bit i set means (highest - i) was seen.
 pub const ReplayWindow = struct {
     highest: u64 = 0,
     bitmap: u64 = 0,
 
-    /// 校验并更新：未见过且在窗口内返回 true；重放或过旧返回 false。
+    /// Validate and update: returns true if unseen and within the window;
+    /// returns false for replays or sequences that are too old.
     pub fn accept(self: *ReplayWindow, seq: u64) bool {
         if (seq > self.highest) {
             const diff = seq - self.highest;
@@ -77,15 +83,15 @@ pub const ReplayWindow = struct {
             return true;
         }
         const diff = self.highest - seq;
-        if (diff >= 64) return false; // 超出窗口，过旧
+        if (diff >= 64) return false; // outside the window, too old
         const mask = @as(u64, 1) << @intCast(diff);
-        if (self.bitmap & mask != 0) return false; // 已见过，重放
+        if (self.bitmap & mask != 0) return false; // already seen, replay
         self.bitmap |= mask;
         return true;
     }
 };
 
-test "Crypto Invariance: 长度 +16 且明文一致" {
+test "Crypto Invariance: length +16 and plaintext matches" {
     var prng = std.Random.DefaultPrng.init(0xBEEF);
     const rand = prng.random();
     const key: Key = [_]u8{0x42} ** KEY_LEN;
@@ -106,7 +112,7 @@ test "Crypto Invariance: 长度 +16 且明文一致" {
     }
 }
 
-test "Nonce Monotonic: 严格递增不重复" {
+test "Nonce Monotonic: strictly increasing, no repeats" {
     var c = NonceCounter{};
     var prev = c.next();
     var i: usize = 0;
@@ -117,14 +123,14 @@ test "Nonce Monotonic: 严格递增不重复" {
     }
 }
 
-test "Anti-Replay: 窗口外/重放被 Drop，乱序在窗口内被接受" {
+test "Anti-Replay: out-of-window/replays dropped, in-window reorder accepted" {
     var w = ReplayWindow{};
     try std.testing.expect(w.accept(1));
     try std.testing.expect(w.accept(2));
     try std.testing.expect(w.accept(5));
-    try std.testing.expect(w.accept(4)); // 乱序但窗口内
-    try std.testing.expect(!w.accept(5)); // 重放
-    try std.testing.expect(!w.accept(4)); // 重放
-    try std.testing.expect(w.accept(100)); // 大跳跃，重置窗口
-    try std.testing.expect(!w.accept(1)); // 窗口外，过旧
+    try std.testing.expect(w.accept(4)); // reordered but in window
+    try std.testing.expect(!w.accept(5)); // replay
+    try std.testing.expect(!w.accept(4)); // replay
+    try std.testing.expect(w.accept(100)); // big jump, window resets
+    try std.testing.expect(!w.accept(1)); // outside the window, too old
 }

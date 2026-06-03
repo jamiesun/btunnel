@@ -1,15 +1,15 @@
-//! 任务 2：配置自检（Configuration Snapshot）
+//! Task 2: Configuration snapshot & sanity check.
 //!
-//! JSON 解析 + 编译期备用配置 + 防呆边界自检。
-//! 本文件为脚手架：`validate` 已落地真实边界校验，`fromJson` 提供最小实现，
-//! 握手协商字段已预留。
+//! JSON parsing + compile-time fallback config + foolproof boundary checks.
+//! Scaffold: `validate` implements real boundary checks; `fromJson` is a minimal
+//! stub; the handshake negotiation field is reserved.
 
 const std = @import("std");
 
 pub const MTU_MIN: u16 = 68;
 pub const MTU_MAX: u16 = 1500;
 
-/// 32 字节预共享密钥（PSK）。
+/// 32-byte pre-shared key (PSK).
 pub const Psk = [32]u8;
 
 pub const SanityError = error{
@@ -18,9 +18,9 @@ pub const SanityError = error{
     InvalidPsk,
 };
 
-/// 表示一个 CIDR 网段（网络号 + 前缀长度）。
+/// A CIDR subnet (network address + prefix length).
 pub const Cidr = struct {
-    /// 主机字节序的网络地址。
+    /// Network address in host byte order.
     network: u32,
     prefix: u6,
 
@@ -29,7 +29,7 @@ pub const Cidr = struct {
         return @as(u32, 0xffff_ffff) << @intCast(32 - @as(u6, self.prefix));
     }
 
-    /// 两个网段是否存在地址空间重叠。
+    /// Whether two subnets overlap in address space.
     pub fn overlaps(a: Cidr, b: Cidr) bool {
         const m = a.mask() & b.mask();
         return (a.network & m) == (b.network & m);
@@ -37,23 +37,24 @@ pub const Cidr = struct {
 };
 
 pub const Config = struct {
-    /// v1 报头/配置协商版本（v1 固定为 1，为 v2 握手预留）。
+    /// v1 header/config negotiation version (fixed to 1 in v1, reserved for the
+    /// v2 handshake).
     negotiation_version: u8 = 1,
-    /// 预共享密钥。
+    /// Pre-shared key.
     psk: Psk = [_]u8{0} ** 32,
-    /// 隧道 MTU。
+    /// Tunnel MTU.
     local_tun_mtu: u16 = 1452,
-    /// 本机 UDP 监听端口。
+    /// Local UDP listen port.
     listen_port: u16 = 51820,
-    /// 虚拟子网（默认 10.0.0.0/24）。
+    /// Virtual subnet (default 10.0.0.0/24).
     virtual_subnet: Cidr = .{ .network = 0x0A00_0000, .prefix = 24 },
 
-    /// 编译期硬编码的缺省底盘配置（config.json 缺失时使用）。
+    /// Compile-time hardcoded fallback config (used when config.json is missing).
     pub fn default() Config {
         return .{};
     }
 
-    /// 防呆边界自检：MTU 区间 + 虚拟子网与宿主机物理子网重叠检测。
+    /// Foolproof boundary checks: MTU range + virtual/host subnet overlap.
     pub fn validate(self: Config, host_subnets: []const Cidr) SanityError!void {
         if (self.local_tun_mtu < MTU_MIN or self.local_tun_mtu > MTU_MAX) {
             return SanityError.MtuOutOfRange;
@@ -63,8 +64,9 @@ pub const Config = struct {
         }
     }
 
-    /// 一次性吞入 config.json。脚手架阶段：解析失败或缺失则回退到缺省底盘。
-    /// TODO(任务 2)：实现 psk hex/base64 解码与完整字段映射。
+    /// Ingest config.json in one shot. Scaffold stage: on parse failure or a
+    /// missing file, fall back to the default config.
+    /// TODO(Task 2): implement PSK hex/base64 decoding and full field mapping.
     pub fn fromJson(allocator: std.mem.Allocator, slice: []const u8) Config {
         _ = allocator;
         _ = slice;
@@ -72,7 +74,7 @@ pub const Config = struct {
     }
 };
 
-test "validate: MTU 越界被拦截" {
+test "validate: MTU out of range is rejected" {
     var cfg = Config.default();
     cfg.local_tun_mtu = 9000;
     try std.testing.expectError(SanityError.MtuOutOfRange, cfg.validate(&.{}));
@@ -81,7 +83,7 @@ test "validate: MTU 越界被拦截" {
     try cfg.validate(&.{});
 }
 
-test "validate: 虚拟子网与物理子网重叠被拦截" {
+test "validate: virtual/host subnet overlap is rejected" {
     const cfg = Config.default(); // 10.0.0.0/24
     const overlap = Cidr{ .network = 0x0A00_0000, .prefix = 16 }; // 10.0.0.0/16
     try std.testing.expectError(SanityError.SubnetOverlap, cfg.validate(&.{overlap}));
