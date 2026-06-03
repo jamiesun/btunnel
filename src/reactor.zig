@@ -37,15 +37,19 @@ const peer = @import("peer.zig");
 const uds = @import("uds.zig");
 
 /// Private wire header (packed struct, physically aligned): 1B version + 1B
-/// flags + 2B reserved negotiation field + 8B monotonic sequence number (doubles
-/// as the nonce and anti-replay basis). 12 bytes total. The header is serialized
-/// field-by-field (see `encodeEgress`/`decodeIngress`) rather than by memory
-/// layout, so the wire format is endian-stable.
+/// flags + 2B reserved negotiation field + 8B boot epoch (issue #14, identifies
+/// the sender's current session so the receiver can derive the matching session
+/// key statelessly and scope anti-replay per session) + 8B monotonic sequence
+/// number (doubles as the nonce and anti-replay basis). 20 bytes total. The
+/// header is serialized field-by-field (see `encodeEgress`/`decodeIngress`)
+/// rather than by memory layout, so the wire format is endian-stable.
 pub const WireHeader = packed struct {
     version: u8 = 1,
     flags: u8 = 0,
     /// Reserved for the v2 handshake negotiation.
     reserved: u16 = 0,
+    /// Sender boot epoch (wall-clock ns at startup); never zero.
+    epoch: u64,
     seq: u64,
 };
 
@@ -79,7 +83,7 @@ pub const BUF_LEN: usize = 2048;
 
 comptime {
     std.debug.assert(BUF_LEN >= MAX_WIRE);
-    std.debug.assert(HEADER_LEN == 12);
+    std.debug.assert(HEADER_LEN == 20);
 }
 
 pub const EgressError = error{NotImplemented};
@@ -96,34 +100,67 @@ pub fn egress(mode: EgressMode, pkt: []const u8) EgressError!void {
     }
 }
 
-/// Serialize the wire header for `seq`, seal `ip_pkt` after it, and return the
-/// total wire length. Allocation-free: writes straight into `out`. `seq` is
-/// drawn from the monotonic counter (never reused with the same key).
-pub fn encodeEgress(key: crypto.Key, counter: *crypto.NonceCounter, ip_pkt: []const u8, out: []u8) usize {
+/// Serialize the wire header for the session's next sequence number, seal
+/// `ip_pkt` after it, and return the total wire length. Allocation-free: writes
+/// straight into `out`. The header carries the session `epoch` so the receiver
+/// can derive the matching session key (issue #14); the body is sealed with the
+/// epoch-bound session key, and `seq` is drawn from the per-session monotonic
+/// counter (never reused with the same key).
+pub fn encodeEgress(tx: *crypto.TxSession, ip_pkt: []const u8, out: []u8) usize {
     std.debug.assert(out.len >= HEADER_LEN + ip_pkt.len + crypto.TAG_LEN);
-    const seq = counter.next();
+    const seq = tx.counter.next();
     out[0] = WIRE_VERSION;
     out[1] = 0; // flags
     std.mem.writeInt(u16, out[2..][0..2], 0, .little); // reserved
-    std.mem.writeInt(u64, out[4..][0..8], seq, .little);
-    const sealed = crypto.seal(key, seq, ip_pkt, out[HEADER_LEN..]);
+    std.mem.writeInt(u64, out[4..][0..8], tx.epoch, .little);
+    std.mem.writeInt(u64, out[12..][0..8], seq, .little);
+    const sealed = crypto.seal(tx.skey, seq, ip_pkt, out[HEADER_LEN..]);
     return HEADER_LEN + sealed;
 }
 
-/// Parse, authenticate, then anti-replay check an inbound datagram. Writes the
-/// recovered IP packet into `out` and returns its length, or `null` if the
-/// datagram must be dropped (malformed header, reserved bits set, auth failure,
-/// or replay). Authentication runs BEFORE the replay window is advanced so a
-/// forged sequence number can never poison the window.
-pub fn decodeIngress(key: crypto.Key, window: *crypto.ReplayWindow, datagram: []const u8, out: []u8) ?usize {
+/// Parse, authenticate, then anti-replay check an inbound datagram against the
+/// receive session. Writes the recovered IP packet into `out` and returns its
+/// length, or `null` if the datagram must be dropped (malformed header,
+/// reserved bits set, stale/zero epoch, auth failure, or replay).
+///
+/// Session-epoch handling (issue #14) is forward-only: the highest
+/// authenticated epoch wins. A packet from an older epoch than the one in force
+/// is dropped before any crypto (cheap, and it rejects cross-session replay of a
+/// retired lifetime). A packet from a newer epoch, once authenticated, adopts
+/// that epoch and RESETS the replay window — this is what lets a one-sided
+/// sender restart re-establish a fresh accepted session instead of being stuck
+/// behind a window that ran ahead. Authentication always runs BEFORE any state
+/// is mutated, so a forged higher epoch (or sequence number) can never poison
+/// the session.
+pub fn decodeIngress(rx: *crypto.RxSession, datagram: []const u8, out: []u8) ?usize {
     if (datagram.len < HEADER_LEN) return null;
     if (datagram[0] != WIRE_VERSION) return null;
     if (datagram[1] != 0) return null; // flags reserved in v1
     if (std.mem.readInt(u16, datagram[2..][0..2], .little) != 0) return null; // reserved
-    const seq = std.mem.readInt(u64, datagram[4..][0..8], .little);
+    const pkt_epoch = std.mem.readInt(u64, datagram[4..][0..8], .little);
+    if (pkt_epoch == 0) return null; // zero is the "no session" sentinel, never valid on the wire
+    const seq = std.mem.readInt(u64, datagram[12..][0..8], .little);
+
+    // Forward-only: a strictly older epoch than the one in force is a retired
+    // session (or a cross-epoch replay). Drop before spending any crypto.
+    if (rx.epoch != 0 and pkt_epoch < rx.epoch) return null;
+
+    // Steady state reuses the cached session key; a newer (or first) epoch
+    // derives a candidate key that is only committed after authentication.
+    const key = if (pkt_epoch == rx.epoch) rx.skey else crypto.deriveSessionKey(rx.link_key, pkt_epoch);
+
     const ct = datagram[HEADER_LEN..];
     const plen = crypto.open(key, seq, ct, out) catch return null; // silent drop on auth/truncation
-    if (!window.accept(seq)) return null; // replay or too old -> drop
+
+    // Authenticated: a newer epoch now supersedes the old session — adopt it and
+    // start a fresh replay window so the restarted sender's low sequence numbers
+    // are accepted again.
+    if (pkt_epoch > rx.epoch) {
+        rx.epoch = pkt_epoch;
+        rx.skey = key;
+        rx.window = .{};
+    }
+    if (!rx.window.accept(seq)) return null; // replay or too old -> drop
     return plen;
 }
 
@@ -264,7 +301,7 @@ pub const Reactor = struct {
             if (pkt.len > MAX_PLAINTEXT) continue; // oversized -> drop
             egress(self.mode, pkt) catch continue; // v2 modes not yet shipped -> drop
 
-            const wire_len = encodeEgress(dst_peer.tx_key, &dst_peer.tx, pkt, &self.tx);
+            const wire_len = encodeEgress(&dst_peer.tx, pkt, &self.tx);
             self.sendTo(dst_peer.endpoint, self.tx[0..wire_len]);
         }
     }
@@ -287,7 +324,7 @@ pub const Reactor = struct {
             // Source-endpoint filter: only a configured peer is admitted.
             const src_peer = self.registry.findByAddr(src.addr, src.port) orelse continue;
 
-            const plen = decodeIngress(src_peer.rx_key, &src_peer.rx, dgram, &self.tx) orelse continue;
+            const plen = decodeIngress(&src_peer.rx, dgram, &self.tx) orelse continue;
             const pkt = self.tx[0..plen];
 
             // Inner-source binding: the decoded source IP must belong to the
@@ -308,7 +345,7 @@ pub const Reactor = struct {
             const dst_peer = self.registry.findById(entry.target) orelse continue; // unknown target
             if (dst_peer.id == src_peer.id) continue; // no-reflect guard
             if (pkt.len > MAX_PLAINTEXT) continue;
-            const wire_len = encodeEgress(dst_peer.tx_key, &dst_peer.tx, pkt, &self.relay);
+            const wire_len = encodeEgress(&dst_peer.tx, pkt, &self.relay);
             self.sendTo(dst_peer.endpoint, self.relay[0..wire_len]);
         }
     }
@@ -338,8 +375,8 @@ pub const Reactor = struct {
     }
 };
 
-test "WireHeader is 12 bytes" {
-    try std.testing.expectEqual(@as(usize, 12), HEADER_LEN);
+test "WireHeader is 20 bytes" {
+    try std.testing.expectEqual(@as(usize, 20), HEADER_LEN);
 }
 
 test "egress: v1 raw_direct works, v2 modes return NotImplemented" {
@@ -351,52 +388,94 @@ test "egress: v1 raw_direct works, v2 modes return NotImplemented" {
 
 test "codec: encodeEgress -> decodeIngress roundtrips the IP packet" {
     const key: crypto.Key = [_]u8{0x11} ** crypto.KEY_LEN;
-    var counter = crypto.NonceCounter{};
-    var window = crypto.ReplayWindow{};
+    var tx = crypto.TxSession.init(key, 0x1700_0000_0000_0001);
+    var rx = crypto.RxSession.init(key);
 
     const ip_pkt = [_]u8{ 0x45, 0, 0, 28 } ++ [_]u8{0} ** 12 ++ [_]u8{ 10, 0, 0, 2 } ++ [_]u8{0} ** 8;
     var wire: [MAX_WIRE]u8 = undefined;
-    const wlen = encodeEgress(key, &counter, &ip_pkt, &wire);
+    const wlen = encodeEgress(&tx, &ip_pkt, &wire);
     try std.testing.expectEqual(HEADER_LEN + ip_pkt.len + crypto.TAG_LEN, wlen);
     try std.testing.expectEqual(WIRE_VERSION, wire[0]);
 
     var out: [MAX_PLAINTEXT]u8 = undefined;
-    const plen = decodeIngress(key, &window, wire[0..wlen], &out) orelse return error.UnexpectedDrop;
+    const plen = decodeIngress(&rx, wire[0..wlen], &out) orelse return error.UnexpectedDrop;
     try std.testing.expectEqualSlices(u8, &ip_pkt, out[0..plen]);
+    // The receiver adopted the sender's epoch.
+    try std.testing.expectEqual(@as(u64, 0x1700_0000_0000_0001), rx.epoch);
 }
 
 test "codec: decodeIngress drops tampered, replayed, and malformed datagrams" {
     const key: crypto.Key = [_]u8{0x22} ** crypto.KEY_LEN;
-    var counter = crypto.NonceCounter{};
+    var tx = crypto.TxSession.init(key, 0x1700_0000_0000_0001);
 
     const ip_pkt = [_]u8{ 0x45, 0, 0, 20 } ++ [_]u8{0} ** 16;
     var wire: [MAX_WIRE]u8 = undefined;
-    const wlen = encodeEgress(key, &counter, &ip_pkt, &wire);
+    const wlen = encodeEgress(&tx, &ip_pkt, &wire);
     var out: [MAX_PLAINTEXT]u8 = undefined;
 
     // Tampered ciphertext -> auth fails -> drop, and the replay window must not
     // have advanced (a fresh valid copy still decodes afterwards).
-    var window = crypto.ReplayWindow{};
+    var rx = crypto.RxSession.init(key);
     var tampered = wire;
     tampered[wlen - 1] ^= 0xFF;
-    try std.testing.expect(decodeIngress(key, &window, tampered[0..wlen], &out) == null);
-    try std.testing.expect(decodeIngress(key, &window, wire[0..wlen], &out) != null);
+    try std.testing.expect(decodeIngress(&rx, tampered[0..wlen], &out) == null);
+    try std.testing.expect(decodeIngress(&rx, wire[0..wlen], &out) != null);
 
     // Replay of the same seq is dropped the second time.
-    try std.testing.expect(decodeIngress(key, &window, wire[0..wlen], &out) == null);
+    try std.testing.expect(decodeIngress(&rx, wire[0..wlen], &out) == null);
 
     // Wrong version byte -> drop.
     var badver = wire;
     badver[0] = 2;
-    try std.testing.expect(decodeIngress(key, &window, badver[0..wlen], &out) == null);
+    try std.testing.expect(decodeIngress(&rx, badver[0..wlen], &out) == null);
 
     // Set reserved flags byte -> drop.
     var badflags = wire;
     badflags[1] = 1;
-    try std.testing.expect(decodeIngress(key, &window, badflags[0..wlen], &out) == null);
+    try std.testing.expect(decodeIngress(&rx, badflags[0..wlen], &out) == null);
+
+    // Zero epoch (the "no session" sentinel) -> drop.
+    var badepoch = wire;
+    std.mem.writeInt(u64, badepoch[4..][0..8], 0, .little);
+    try std.testing.expect(decodeIngress(&rx, badepoch[0..wlen], &out) == null);
 
     // Too short for a header -> drop.
-    try std.testing.expect(decodeIngress(key, &window, wire[0 .. HEADER_LEN - 1], &out) == null);
+    try std.testing.expect(decodeIngress(&rx, wire[0 .. HEADER_LEN - 1], &out) == null);
+}
+
+test "codec: session epoch is forward-only (stale dropped, newer resets window)" {
+    const key: crypto.Key = [_]u8{0x33} ** crypto.KEY_LEN;
+    const ip_pkt = [_]u8{ 0x45, 0, 0, 20 } ++ [_]u8{0} ** 16;
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    var rx = crypto.RxSession.init(key);
+
+    // Session 1 (epoch E1) sends a few packets; the receiver advances its window.
+    var tx1 = crypto.TxSession.init(key, 1_700_000_000_000_000_000);
+    var w1a: [MAX_WIRE]u8 = undefined;
+    var w1b: [MAX_WIRE]u8 = undefined;
+    const l1a = encodeEgress(&tx1, &ip_pkt, &w1a); // seq 1
+    const l1b = encodeEgress(&tx1, &ip_pkt, &w1b); // seq 2
+    try std.testing.expect(decodeIngress(&rx, w1a[0..l1a], &out) != null);
+    try std.testing.expect(decodeIngress(&rx, w1b[0..l1b], &out) != null);
+    try std.testing.expectEqual(@as(u64, 1_700_000_000_000_000_000), rx.epoch);
+
+    // The sender restarts: session 2 (a later epoch) restarts seq at 1. Without
+    // the epoch reset this seq-1 packet would be rejected as a replay; with it,
+    // the newer epoch is adopted and the window resets, so it is accepted.
+    var tx2 = crypto.TxSession.init(key, 1_700_000_000_000_000_500);
+    var w2: [MAX_WIRE]u8 = undefined;
+    const l2 = encodeEgress(&tx2, &ip_pkt, &w2); // seq 1 again, new epoch
+    try std.testing.expect(decodeIngress(&rx, w2[0..l2], &out) != null);
+    try std.testing.expectEqual(@as(u64, 1_700_000_000_000_000_500), rx.epoch);
+
+    // A leftover packet from the retired session 1 (older epoch) is now dropped,
+    // defeating cross-epoch replay of the previous lifetime.
+    var w1c: [MAX_WIRE]u8 = undefined;
+    const l1c = encodeEgress(&tx1, &ip_pkt, &w1c); // session 1, seq 3
+    try std.testing.expect(decodeIngress(&rx, w1c[0..l1c], &out) == null);
+
+    // Replay within the live session 2 is still rejected.
+    try std.testing.expect(decodeIngress(&rx, w2[0..l2], &out) == null);
 }
 
 // ---- Live-socket pump tests (Linux only; skip elsewhere / on permission gaps) ----
@@ -431,6 +510,7 @@ fn ipPkt(src: [4]u8, dst: [4]u8) [28]u8 {
 }
 
 const ANY_SRC = policy.Cidr{ .network = 0, .prefix = 0 };
+const TEST_EPOCH: u64 = 1_700_000_000_000_000_000;
 
 test "pump: TUN->UDP seals to the policy-selected peer" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
@@ -449,7 +529,7 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     defer _ = linux.close(udp_a);
 
     var reg = peer.PeerRegistry.init(1);
-    _ = try reg.add(psk, 2, try addrOf(udp_a), ANY_SRC);
+    _ = try reg.add(psk, 2, try addrOf(udp_a), ANY_SRC, TEST_EPOCH);
 
     // Route 10.0.0.2 -> peer 2.
     const entries = [_]policy.PolicyEntry{.{
@@ -473,10 +553,10 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     try std.testing.expect(linux.errno(rc) == .SUCCESS);
 
     // Peer A decodes with its rx key for traffic from the hub: derive(psk, 1, 2).
-    const a_rx = crypto.deriveLinkKey(psk, 1, 2);
-    var window = crypto.ReplayWindow{};
+    const a_rx_key = crypto.deriveLinkKey(psk, 1, 2);
+    var a_rx = crypto.RxSession.init(a_rx_key);
     var out: [MAX_PLAINTEXT]u8 = undefined;
-    const plen = decodeIngress(a_rx, &window, buf[0..rc], &out) orelse return error.UnexpectedDrop;
+    const plen = decodeIngress(&a_rx, buf[0..rc], &out) orelse return error.UnexpectedDrop;
     try std.testing.expectEqualSlices(u8, &ip_pkt, out[0..plen]);
 
     // A packet whose destination has no route is dropped (no default peer).
@@ -502,8 +582,8 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     const hub_addr = try addrOf(udp_hub);
 
     var reg = peer.PeerRegistry.init(1);
-    _ = try reg.add(psk, 2, try addrOf(udp_a), try policy.parseCidr("10.0.0.2/32"));
-    _ = try reg.add(psk, 3, try addrOf(udp_b), try policy.parseCidr("10.0.0.3/32"));
+    _ = try reg.add(psk, 2, try addrOf(udp_a), try policy.parseCidr("10.0.0.2/32"), TEST_EPOCH);
+    _ = try reg.add(psk, 3, try addrOf(udp_b), try policy.parseCidr("10.0.0.3/32"), TEST_EPOCH);
 
     // 10.0.0.3 relays to peer 3; 10.0.0.2 would reflect back to the source.
     const entries = [_]policy.PolicyEntry{
@@ -522,11 +602,11 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
 
     // A seals with its tx key to the hub: derive(psk, 2, 1).
-    const a_tx = crypto.deriveLinkKey(psk, 2, 1);
-    var a_counter = crypto.NonceCounter{};
+    const a_tx_key = crypto.deriveLinkKey(psk, 2, 1);
+    var a_tx = crypto.TxSession.init(a_tx_key, TEST_EPOCH);
     const to_b = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 3 });
     var wire: [MAX_WIRE]u8 = undefined;
-    const wlen = encodeEgress(a_tx, &a_counter, &to_b, &wire);
+    const wlen = encodeEgress(&a_tx, &to_b, &wire);
     _ = linux.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
 
     r.pumpUdpIngress();
@@ -535,17 +615,16 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     var buf: [MAX_WIRE]u8 = undefined;
     const rcb = linux.recvfrom(udp_b, &buf, buf.len, 0, null, null);
     try std.testing.expect(linux.errno(rcb) == .SUCCESS);
-    const b_rx = crypto.deriveLinkKey(psk, 1, 3);
-    var window = crypto.ReplayWindow{};
+    const b_rx_key = crypto.deriveLinkKey(psk, 1, 3);
+    var b_rx = crypto.RxSession.init(b_rx_key);
     var out: [MAX_PLAINTEXT]u8 = undefined;
-    const plen = decodeIngress(b_rx, &window, buf[0..rcb], &out) orelse return error.UnexpectedDrop;
+    const plen = decodeIngress(&b_rx, buf[0..rcb], &out) orelse return error.UnexpectedDrop;
     try std.testing.expectEqualSlices(u8, &to_b, out[0..plen]);
 
     // No-reflect: A sends a packet destined to itself (target 2). The hub must
     // not bounce it back to A.
     const to_self = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 2 });
-    var c2 = crypto.NonceCounter{};
-    const wlen2 = encodeEgress(a_tx, &c2, &to_self, &wire);
+    const wlen2 = encodeEgress(&a_tx, &to_self, &wire);
     _ = linux.sendto(udp_a, &wire, wlen2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
     r.pumpUdpIngress();
     const rca = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
@@ -572,7 +651,7 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     const hub_addr = try addrOf(udp_hub);
 
     var reg = peer.PeerRegistry.init(1);
-    _ = try reg.add(psk, 2, try addrOf(udp_a), try policy.parseCidr("10.0.0.2/32"));
+    _ = try reg.add(psk, 2, try addrOf(udp_a), try policy.parseCidr("10.0.0.2/32"), TEST_EPOCH);
 
     // 10.0.0.1 is the hub's own TUN address (LOCAL delivery).
     const entries = [_]policy.PolicyEntry{.{
@@ -586,18 +665,19 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
 
     var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
 
-    const a_tx = crypto.deriveLinkKey(psk, 2, 1);
-    // A single monotonic counter for everything peer A sends (mirrors reality:
-    // one counter per peer, so sequence numbers never repeat against the hub's
-    // per-peer replay window).
-    var a_counter = crypto.NonceCounter{};
+    const a_tx_key = crypto.deriveLinkKey(psk, 2, 1);
+    // A single per-peer session for everything peer A legitimately sends (mirrors
+    // reality: one counter per peer, so sequence numbers never repeat against the
+    // hub's per-peer replay window).
+    var a_tx = crypto.TxSession.init(a_tx_key, TEST_EPOCH);
 
     // Stranger (not in the registry) -> dropped by the source filter, even with
-    // a correctly-sealed packet (the source filter fires before decode).
+    // a correctly-sealed packet (the source filter fires before decode). Its own
+    // session never reaches the hub's receive state.
     const legit = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 1 });
-    var c0 = crypto.NonceCounter{};
+    var stray_tx = crypto.TxSession.init(a_tx_key, TEST_EPOCH);
     var wire: [MAX_WIRE]u8 = undefined;
-    const wl0 = encodeEgress(a_tx, &c0, &legit, &wire);
+    const wl0 = encodeEgress(&stray_tx, &legit, &wire);
     _ = linux.sendto(udp_c, &wire, wl0, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
     r.pumpUdpIngress();
     var buf: [MAX_PLAINTEXT]u8 = undefined;
@@ -605,13 +685,13 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
 
     // Inner-source spoof: A is bound to 10.0.0.2/32 but claims source 10.0.0.99.
     const spoof = ipPkt(.{ 10, 0, 0, 99 }, .{ 10, 0, 0, 1 });
-    const wl1 = encodeEgress(a_tx, &a_counter, &spoof, &wire);
+    const wl1 = encodeEgress(&a_tx, &spoof, &wire);
     _ = linux.sendto(udp_a, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
     r.pumpUdpIngress();
     try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
 
     // Legitimate packet from A to the LOCAL target -> written to the TUN.
-    const wl2 = encodeEgress(a_tx, &a_counter, &legit, &wire);
+    const wl2 = encodeEgress(&a_tx, &legit, &wire);
     _ = linux.sendto(udp_a, &wire, wl2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
     r.pumpUdpIngress();
     const rc = linux.read(pipe_fds[0], &buf, buf.len);

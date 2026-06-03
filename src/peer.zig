@@ -31,10 +31,10 @@ pub const Peer = struct {
     id: u32,
     endpoint: linux.sockaddr.in,
     allowed_src: config.Cidr,
-    tx_key: crypto.Key,
-    rx_key: crypto.Key,
-    tx: crypto.NonceCounter = .{},
-    rx: crypto.ReplayWindow = .{},
+    /// Transmit session: epoch-bound key + monotonic counter (issue #14).
+    tx: crypto.TxSession,
+    /// Receive session: forward-only epoch + per-session anti-replay window.
+    rx: crypto.RxSession,
 };
 
 pub const RegistryError = error{
@@ -44,28 +44,41 @@ pub const RegistryError = error{
     ReservedPeerId,
     SelfReference,
     MissingLocalId,
-    EntropyUnavailable,
+    ClockUnavailable,
 };
 
-/// Random high word for a transmit nonce counter, sourced from getrandom so
-/// nonces do not repeat across a restart with the same key.
+/// Earliest plausible boot epoch: 2024-01-01T00:00:00Z in nanoseconds. A clock
+/// reporting an earlier wall time has not been set (no RTC / pre-NTP), which
+/// would defeat the forward-only session-epoch ordering and risks a low,
+/// collision-prone epoch. We fail closed rather than emit an unsafe epoch.
+const MIN_BOOT_EPOCH_NS: u64 = 1_704_067_200 * std.time.ns_per_s;
+
+/// This daemon's boot epoch (issue #14): wall-clock nanoseconds sampled once at
+/// startup. Each process lifetime gets a distinct, time-ordered value, which:
+///   - makes the per-session key (`crypto.deriveSessionKey`) fresh on every
+///     restart so the transmit counter can safely restart at 1 without ever
+///     reproducing a `(key, nonce)` pair from a previous lifetime, and
+///   - lets receivers order sessions forward-only (a later boot supersedes an
+///     earlier one) so a one-sided restart re-establishes a fresh session.
 ///
-/// Entropy failure is FATAL: silently falling back to a constant would make the
-/// reseed deterministic and risk reusing a `(link key, nonce)` pair across
-/// restarts, which is catastrophic for ChaCha20-Poly1305. On a non-Linux host
-/// (unit tests only; never a real deployment) a constant 0 is returned.
+/// Clock failure or an implausibly early clock is FATAL (fail-closed): emitting
+/// a zero/low epoch would be catastrophic. On a non-Linux host (unit tests only;
+/// never a real deployment) a fixed in-range constant is returned.
 ///
-/// Known v1 limitation: a 32-bit random high word does not fully solve restart
-/// safety — after a one-sided restart the receiver's replay window may still be
-/// ahead of the fresh counter, and the high word can collide by birthday. A
-/// proper session epoch / boot-nonce handshake is deferred to the v2
-/// negotiation (the wire header's reserved field is reserved for it).
-fn randomHigh() RegistryError!u32 {
-    if (builtin.os.tag != .linux) return 0;
-    var b: [4]u8 = undefined;
-    const rc = linux.getrandom(&b, b.len, 0);
-    if (linux.errno(rc) != .SUCCESS or rc != b.len) return error.EntropyUnavailable;
-    return std.mem.readInt(u32, &b, .little);
+/// Residual limitation (documented): if a node's wall clock runs BACKWARD across
+/// a restart (e.g. no RTC and not yet NTP-synced), its new epoch may be lower
+/// than a peer's last-seen epoch, and that peer will reject the new session
+/// until wall time advances past the old epoch. Operators must keep the clock
+/// monotonic across restarts (RTC/NTP) or restart both ends. The symmetric fix
+/// is deferred to the v2 handshake.
+pub fn bootEpoch() RegistryError!u64 {
+    if (builtin.os.tag != .linux) return MIN_BOOT_EPOCH_NS;
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(linux.CLOCK.REALTIME, &ts)) != .SUCCESS) return error.ClockUnavailable;
+    if (ts.sec < 0) return error.ClockUnavailable;
+    const ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    if (ns < MIN_BOOT_EPOCH_NS) return error.ClockUnavailable;
+    return ns;
 }
 
 /// Fixed-capacity peer table. Pointers returned by `add`/`findById`/`findByAddr`
@@ -80,15 +93,16 @@ pub const PeerRegistry = struct {
         return .{ .local_id = local_id };
     }
 
-    /// Register a peer, deriving its directional keys from `psk` and reseeding
-    /// its transmit nonce counter. Rejects the reserved id 0, the node's own id,
-    /// duplicate ids/endpoints, and overflow.
+    /// Register a peer, deriving its directional link keys from `psk` and binding
+    /// the transmit session to `boot_epoch` (issue #14). Rejects the reserved id
+    /// 0, the node's own id, duplicate ids/endpoints, and overflow.
     pub fn add(
         self: *PeerRegistry,
         psk: crypto.Key,
         id: u32,
         endpoint: linux.sockaddr.in,
         allowed_src: config.Cidr,
+        boot_epoch: u64,
     ) RegistryError!*Peer {
         if (id == LOCAL_TARGET) return error.ReservedPeerId;
         if (id == self.local_id) return error.SelfReference;
@@ -96,18 +110,18 @@ pub const PeerRegistry = struct {
         if (self.findById(id) != null) return error.DuplicateId;
         if (self.findByAddr(endpoint.addr, endpoint.port) != null) return error.DuplicateEndpoint;
 
-        const high = try randomHigh();
+        // Sender uses (local -> peer); the peer derives the matching rx key with
+        // the same ordered pair, and vice versa.
+        const tx_link = crypto.deriveLinkKey(psk, self.local_id, id);
+        const rx_link = crypto.deriveLinkKey(psk, id, self.local_id);
         const p = &self.peers[self.len];
         p.* = .{
             .id = id,
             .endpoint = endpoint,
             .allowed_src = allowed_src,
-            // Sender uses (local -> peer); the peer derives the matching rx key
-            // with the same ordered pair, and vice versa.
-            .tx_key = crypto.deriveLinkKey(psk, self.local_id, id),
-            .rx_key = crypto.deriveLinkKey(psk, id, self.local_id),
+            .tx = crypto.TxSession.init(tx_link, boot_epoch),
+            .rx = crypto.RxSession.init(rx_link),
         };
-        p.tx.reseedHigh(high);
         self.len += 1;
         return p;
     }
@@ -134,13 +148,15 @@ pub const PeerRegistry = struct {
 
     /// Build a registry from a parsed config. Requires a non-zero `local_id`
     /// whenever peers are present (key derivation must anchor on a real id).
-    pub fn fromConfig(cfg: config.Config) RegistryError!PeerRegistry {
+    /// `boot_epoch` (from `bootEpoch()`) binds every transmit session to this
+    /// daemon lifetime.
+    pub fn fromConfig(cfg: config.Config, boot_epoch: u64) RegistryError!PeerRegistry {
         if (cfg.peer_count > 0 and cfg.local_id == LOCAL_TARGET) return error.MissingLocalId;
         var reg = PeerRegistry.init(cfg.local_id);
         var i: usize = 0;
         while (i < cfg.peer_count) : (i += 1) {
             const spec = cfg.peers[i];
-            _ = try reg.add(cfg.psk, spec.id, spec.endpoint, spec.allowed_src);
+            _ = try reg.add(cfg.psk, spec.id, spec.endpoint, spec.allowed_src, boot_epoch);
         }
         return reg;
     }
@@ -152,10 +168,11 @@ fn testEndpoint(comptime text: []const u8) linux.sockaddr.in {
 
 test "registry: add, lookup, and directional keys agree across the link" {
     const psk: crypto.Key = [_]u8{0x5a} ** crypto.KEY_LEN;
+    const epoch: u64 = 1_700_000_000_000_000_000;
 
     var hub = PeerRegistry.init(1); // local node is the hub (id 1)
-    const a = try hub.add(psk, 2, testEndpoint("10.0.0.2:51820"), .{ .network = 0, .prefix = 0 });
-    const b = try hub.add(psk, 3, testEndpoint("10.0.0.3:51820"), .{ .network = 0, .prefix = 0 });
+    const a = try hub.add(psk, 2, testEndpoint("10.0.0.2:51820"), .{ .network = 0, .prefix = 0 }, epoch);
+    const b = try hub.add(psk, 3, testEndpoint("10.0.0.3:51820"), .{ .network = 0, .prefix = 0 }, epoch);
 
     try std.testing.expectEqual(@as(usize, 2), hub.len);
     try std.testing.expectEqual(a, hub.findById(2).?);
@@ -163,25 +180,26 @@ test "registry: add, lookup, and directional keys agree across the link" {
     try std.testing.expect(hub.findById(9) == null);
     try std.testing.expectEqual(a, hub.findByAddr(a.endpoint.addr, a.endpoint.port).?);
 
-    // The hub's tx key to peer 2 must equal peer 2's rx key for traffic from the
-    // hub: spoke 2 (local id 2) derives rx = deriveLinkKey(psk, 1, 2).
+    // The hub's tx link key to peer 2 must equal peer 2's rx link key for traffic
+    // from the hub: spoke 2 (local id 2) derives rx = deriveLinkKey(psk, 1, 2).
     var spoke = PeerRegistry.init(2);
-    const hub_seen_by_spoke = try spoke.add(psk, 1, testEndpoint("10.0.0.1:51820"), .{ .network = 0, .prefix = 0 });
-    try std.testing.expectEqualSlices(u8, &a.tx_key, &hub_seen_by_spoke.rx_key);
-    try std.testing.expectEqualSlices(u8, &a.rx_key, &hub_seen_by_spoke.tx_key);
+    const hub_seen_by_spoke = try spoke.add(psk, 1, testEndpoint("10.0.0.1:51820"), .{ .network = 0, .prefix = 0 }, epoch);
+    try std.testing.expectEqualSlices(u8, &a.tx.link_key, &hub_seen_by_spoke.rx.link_key);
+    try std.testing.expectEqualSlices(u8, &a.rx.link_key, &hub_seen_by_spoke.tx.link_key);
 }
 
 test "registry: rejects reserved id, self-reference, duplicates, and overflow" {
     const psk: crypto.Key = [_]u8{0x5a} ** crypto.KEY_LEN;
     const any = config.Cidr{ .network = 0, .prefix = 0 };
+    const epoch: u64 = 1_700_000_000_000_000_000;
 
     var reg = PeerRegistry.init(1);
-    try std.testing.expectError(RegistryError.ReservedPeerId, reg.add(psk, 0, testEndpoint("10.0.0.9:1"), any));
-    try std.testing.expectError(RegistryError.SelfReference, reg.add(psk, 1, testEndpoint("10.0.0.9:1"), any));
+    try std.testing.expectError(RegistryError.ReservedPeerId, reg.add(psk, 0, testEndpoint("10.0.0.9:1"), any, epoch));
+    try std.testing.expectError(RegistryError.SelfReference, reg.add(psk, 1, testEndpoint("10.0.0.9:1"), any, epoch));
 
-    _ = try reg.add(psk, 2, testEndpoint("10.0.0.2:51820"), any);
-    try std.testing.expectError(RegistryError.DuplicateId, reg.add(psk, 2, testEndpoint("10.0.0.5:51820"), any));
-    try std.testing.expectError(RegistryError.DuplicateEndpoint, reg.add(psk, 5, testEndpoint("10.0.0.2:51820"), any));
+    _ = try reg.add(psk, 2, testEndpoint("10.0.0.2:51820"), any, epoch);
+    try std.testing.expectError(RegistryError.DuplicateId, reg.add(psk, 2, testEndpoint("10.0.0.5:51820"), any, epoch));
+    try std.testing.expectError(RegistryError.DuplicateEndpoint, reg.add(psk, 5, testEndpoint("10.0.0.2:51820"), any, epoch));
 
     // Fill to capacity, then overflow.
     var reg2 = PeerRegistry.init(100);
@@ -191,11 +209,11 @@ test "registry: rejects reserved id, self-reference, duplicates, and overflow" {
         var ep = testEndpoint("10.1.0.1:1");
         ep.port = std.mem.nativeToBig(u16, port);
         port += 1;
-        _ = try reg2.add(psk, id, ep, any);
+        _ = try reg2.add(psk, id, ep, any, epoch);
     }
     var ep_last = testEndpoint("10.1.0.1:1");
     ep_last.port = std.mem.nativeToBig(u16, port);
-    try std.testing.expectError(RegistryError.TooManyPeers, reg2.add(psk, 999, ep_last, any));
+    try std.testing.expectError(RegistryError.TooManyPeers, reg2.add(psk, 999, ep_last, any, epoch));
 }
 
 test "registry: fromConfig requires a local_id when peers are present" {
@@ -203,11 +221,18 @@ test "registry: fromConfig requires a local_id when peers are present" {
     cfg.psk = [_]u8{0x5a} ** 32;
     cfg.peer_count = 1;
     cfg.peers[0] = .{ .id = 2, .endpoint = testEndpoint("10.0.0.2:51820"), .allowed_src = .{ .network = 0, .prefix = 0 } };
+    const epoch: u64 = 1_700_000_000_000_000_000;
 
     cfg.local_id = 0;
-    try std.testing.expectError(RegistryError.MissingLocalId, PeerRegistry.fromConfig(cfg));
+    try std.testing.expectError(RegistryError.MissingLocalId, PeerRegistry.fromConfig(cfg, epoch));
 
     cfg.local_id = 1;
-    const reg = try PeerRegistry.fromConfig(cfg);
+    const reg = try PeerRegistry.fromConfig(cfg, epoch);
     try std.testing.expectEqual(@as(usize, 1), reg.len);
+}
+
+test "registry: bootEpoch is non-zero and time-ordered" {
+    const e = try bootEpoch();
+    try std.testing.expect(e >= MIN_BOOT_EPOCH_NS);
+    try std.testing.expect(e != 0);
 }
