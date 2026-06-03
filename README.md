@@ -10,7 +10,7 @@
 
 BTunnel builds a virtual subnet on top of a physical leased line, using a
 **hub-and-spoke topology** and forwarding raw IP packets through a private UDP
-tunnel. It does **not depend on WireGuard or any third-party network framework**:
+tunnel. It does **not depend on any third-party network framework**:
 the TUN device, encryption, anti-replay, and policy engine are all in-house,
 producing a single, fully statically linked binary.
 
