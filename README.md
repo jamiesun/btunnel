@@ -125,7 +125,7 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | Task | Module | Status |
 |---|---|---|
 | 1 Build config | `build.zig` | ✅ Done (static musl, ReleaseSmall, dual binaries) |
-| 2 Config sanity | `config.zig` | 🟡 Partial (boundary checks done; JSON parsing stubbed) |
+| 2 Config sanity | `config.zig` | ✅ Done (std.json parse + hex PSK + CIDR; boundary fuse) |
 | 3 Policy match | `policy.zig` | ✅ Done (CIDR / longest-prefix / RCU) |
 | 4 System driver | `tun.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd) |
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / nonce / anti-replay) |
@@ -133,8 +133,8 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 7 Control-plane UDS | `uds.zig` | 🟡 Partial (tokenizer done; socket listener stubbed) |
 | 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
 
-> **Currently verifiable**: `zig build test` is all green (24/24 in the Linux
-> dev container; 21 pass + 3 Linux-only skips on a macOS host); produces a
+> **Currently verifiable**: `zig build test` is all green (26/26 in the Linux
+> dev container; 23 pass + 3 Linux-only skips on a macOS host); produces a
 > < 200KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the

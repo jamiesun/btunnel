@@ -1,8 +1,10 @@
 //! Task 2: Configuration snapshot & sanity check.
 //!
-//! JSON parsing + compile-time fallback config + foolproof boundary checks.
-//! Scaffold: `validate` implements real boundary checks; `fromJson` is a minimal
-//! stub; the handshake negotiation field is reserved.
+//! Parse `config.json` once at startup via `std.json`; if the file is missing
+//! the caller falls back to the comptime hard-coded default. Malformed JSON or
+//! an out-of-range field aborts startup (the daemon never silently runs a
+//! half-valid config). This module is pure (no file I/O) so it stays portable
+//! and unit-testable on any host; the actual file read lives in `main.zig`.
 
 const std = @import("std");
 
@@ -16,6 +18,13 @@ pub const SanityError = error{
     MtuOutOfRange,
     SubnetOverlap,
     InvalidPsk,
+};
+
+/// CIDR string parse errors (canonical home; re-exported by `policy.zig`).
+pub const CidrError = error{
+    MissingSlash,
+    InvalidOctet,
+    InvalidPrefix,
 };
 
 /// A CIDR subnet (network address + prefix length).
@@ -35,6 +44,28 @@ pub const Cidr = struct {
         return (a.network & m) == (b.network & m);
     }
 };
+
+/// Parse "A.B.C.D/P" into a Cidr (network in host byte order).
+pub fn parseCidr(text: []const u8) CidrError!Cidr {
+    const slash = std.mem.indexOfScalar(u8, text, '/') orelse return CidrError.MissingSlash;
+    const addr_str = text[0..slash];
+    const prefix_str = text[slash + 1 ..];
+
+    var octets: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, addr_str, '.');
+    var i: usize = 0;
+    while (it.next()) |part| : (i += 1) {
+        if (i >= 4) return CidrError.InvalidOctet;
+        octets[i] = std.fmt.parseInt(u8, part, 10) catch return CidrError.InvalidOctet;
+    }
+    if (i != 4) return CidrError.InvalidOctet;
+
+    const prefix = std.fmt.parseInt(u8, prefix_str, 10) catch return CidrError.InvalidPrefix;
+    if (prefix > 32) return CidrError.InvalidPrefix;
+
+    const network = std.mem.readInt(u32, &octets, .big);
+    return .{ .network = network, .prefix = @intCast(prefix) };
+}
 
 pub const Config = struct {
     /// v1 header/config negotiation version (fixed to 1 in v1, reserved for the
@@ -64,13 +95,42 @@ pub const Config = struct {
         }
     }
 
-    /// Ingest config.json in one shot. Scaffold stage: on parse failure or a
-    /// missing file, fall back to the default config.
-    /// TODO(Task 2): implement PSK hex/base64 decoding and full field mapping.
-    pub fn fromJson(allocator: std.mem.Allocator, slice: []const u8) Config {
-        _ = allocator;
-        _ = slice;
-        return Config.default();
+    /// On-wire JSON schema. Defaults mirror `Config` so a partial document is
+    /// valid; `psk` is a 64-char hex string and `virtual_subnet` a CIDR string.
+    /// Unknown fields are ignored so forward-compatible keys (e.g. the future
+    /// multi-peer `peers` array, issue #5) do not break v1 parsing.
+    const Wire = struct {
+        negotiation_version: u8 = 1,
+        psk: []const u8 = "",
+        local_tun_mtu: u16 = 1452,
+        listen_port: u16 = 51820,
+        virtual_subnet: []const u8 = "10.0.0.0/24",
+    };
+
+    /// Parse a config.json document. Returns a fully-owned `Config` (no slices
+    /// borrowed from the input or the parse arena). Propagates JSON syntax
+    /// errors so the caller can abort startup. Does NOT run `validate`; the
+    /// caller invokes it after loading.
+    pub fn fromJson(allocator: std.mem.Allocator, slice: []const u8) !Config {
+        const parsed = try std.json.parseFromSlice(Wire, allocator, slice, .{
+            .ignore_unknown_fields = true,
+        });
+        defer parsed.deinit();
+        const w = parsed.value;
+
+        var cfg = Config{
+            .negotiation_version = w.negotiation_version,
+            .local_tun_mtu = w.local_tun_mtu,
+            .listen_port = w.listen_port,
+            .virtual_subnet = parseCidr(w.virtual_subnet) catch return error.InvalidCidr,
+        };
+
+        if (w.psk.len != 0) {
+            if (w.psk.len != 64) return error.InvalidPsk;
+            _ = std.fmt.hexToBytes(cfg.psk[0..], w.psk) catch return error.InvalidPsk;
+        }
+
+        return cfg;
     }
 };
 
@@ -90,4 +150,51 @@ test "validate: virtual/host subnet overlap is rejected" {
 
     const disjoint = Cidr{ .network = 0xC0A8_0100, .prefix = 24 }; // 192.168.1.0/24
     try cfg.validate(&.{disjoint});
+}
+
+test "JSON Parser & Sanity Check" {
+    const a = std.testing.allocator;
+
+    // A full document maps every field and decodes the hex PSK.
+    const psk_hex = "0123456789abcdef" ** 4; // 64 hex chars
+    const ok =
+        "{ \"negotiation_version\": 1, \"psk\": \"" ++ psk_hex ++
+        "\", \"local_tun_mtu\": 1400, \"listen_port\": 4000, \"virtual_subnet\": \"10.9.0.0/24\" }";
+    const cfg = try Config.fromJson(a, ok);
+    try cfg.validate(&.{});
+    try std.testing.expectEqual(@as(u16, 1400), cfg.local_tun_mtu);
+    try std.testing.expectEqual(@as(u16, 4000), cfg.listen_port);
+    try std.testing.expectEqual(@as(u32, 0x0A09_0000), cfg.virtual_subnet.network);
+    try std.testing.expectEqual(@as(u6, 24), cfg.virtual_subnet.prefix);
+    try std.testing.expectEqual(@as(u8, 0x01), cfg.psk[0]);
+    try std.testing.expectEqual(@as(u8, 0xef), cfg.psk[7]);
+
+    // A partial document falls back to per-field defaults (and a zero PSK).
+    const partial = "{ \"local_tun_mtu\": 1300 }";
+    const cfg2 = try Config.fromJson(a, partial);
+    try std.testing.expectEqual(@as(u16, 1300), cfg2.local_tun_mtu);
+    try std.testing.expectEqual(@as(u16, 51820), cfg2.listen_port);
+    try std.testing.expectEqual([_]u8{0} ** 32, cfg2.psk);
+
+    // An out-of-range MTU parses but is rejected by the sanity check (fuse).
+    const bad_mtu = "{ \"local_tun_mtu\": 9000 }";
+    const cfg3 = try Config.fromJson(a, bad_mtu);
+    try std.testing.expectError(SanityError.MtuOutOfRange, cfg3.validate(&.{}));
+
+    // Malformed JSON aborts parsing (no silent default fallback).
+    try std.testing.expect(std.meta.isError(Config.fromJson(a, "{ not valid json")));
+
+    // A non-64-char PSK is rejected.
+    try std.testing.expectError(error.InvalidPsk, Config.fromJson(a, "{ \"psk\": \"abcd\" }"));
+
+    // A malformed virtual subnet is rejected.
+    try std.testing.expectError(error.InvalidCidr, Config.fromJson(a, "{ \"virtual_subnet\": \"10.0.0.0\" }"));
+}
+
+test "parseCidr" {
+    const c = try parseCidr("192.168.1.0/24");
+    try std.testing.expectEqual(@as(u32, 0xC0A8_0100), c.network);
+    try std.testing.expectEqual(@as(u6, 24), c.prefix);
+    try std.testing.expectError(CidrError.MissingSlash, parseCidr("10.0.0.0"));
+    try std.testing.expectError(CidrError.InvalidPrefix, parseCidr("10.0.0.0/33"));
 }
