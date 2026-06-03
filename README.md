@@ -129,17 +129,18 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 3 Policy match | `policy.zig` | ✅ Done (CIDR / longest-prefix / RCU) |
 | 4 System driver | `tun.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd) |
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / nonce / anti-replay) |
-| 6 Core reactor | `reactor.zig` | 🟡 Partial (header + egress done; epoll loop stubbed) |
+| 6 Core reactor | `reactor.zig` | ✅ Done (single-peer epoll ET loop, seal/forward + open/anti-replay, source filter) |
 | 7 Control-plane UDS | `uds.zig` | 🟡 Partial (tokenizer done; socket listener stubbed) |
 | 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
 
-> **Currently verifiable**: `zig build test` is all green (20/20); produces a
+> **Currently verifiable**: `zig build test` is all green (24/24 in the Linux
+> dev container; 21 pass + 3 Linux-only skips on a macOS host); produces a
 > < 200KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
 > static-link and size constraints across both musl targets.
-> **End-to-end networking** still pending: epoll send/recv loop (Task 6), UDS
-> communication (Tasks 7/8).
+> **End-to-end networking** still pending: control-plane UDS listener and
+> multi-peer relay table (Tasks 5/7/8).
 
 See [`docs/btunnel-develop.md`](docs/btunnel-develop.md) for the detailed
 architecture, memory model, and acceptance checklist.
