@@ -81,10 +81,12 @@ docker run --rm --privileged --device=/dev/net/tun \
 ```
 
 [`test/integration/run.sh`](test/integration/run.sh) 会在容器原生架构上构建
-二进制，强制校验静态链接与 ≤ 512KB 约束，冒烟运行守护进程，交叉编译另一个
-musl 架构，并运行单元测试。双节点 TUN + 网络命名空间隧道测试在数据通路仍为
-占位期间会被**跳过**；同时设有“防遗忘”守卫：一旦占位被移除却未启用该测试，
-脚本即判定失败，确保此预检永不悄悄停止覆盖真实通路。
+二进制，强制校验静态链接与 ≤ 512KB 约束，冒烟运行守护进程（`btunnel --check`），
+交叉编译另一个 musl 架构，运行单元测试，最后运行**多点 + 中继端到端测试**：
+在网络命名空间中搭建 3 节点 Hub-and-Spoke 星型拓扑（一个 Hub 中继 + 两个
+Spoke），断言端到端投递 spoke-A → Hub（中继）→ spoke-B、链路加密（明文标记
+不会泄漏到底层）、以及负载下 RCU 策略热更新不阻塞数据面。该测试需要
+`--privileged` + `--device=/dev/net/tun`。
 
 ## 🚀 使用
 
@@ -108,7 +110,8 @@ cp config.example.json config.json
 
 ## 📊 开发进度
 
-当前为脚手架阶段：框架与纯算法层已落地并测试通过，系统调用密集部分为占位。
+当前框架层、纯算法层与系统调用数据通路（TUN、epoll 反应堆、AF_UNIX 控制面、
+守护进程主循环）均已落地，并在开发容器中完成端到端验证。
 
 | 任务 | 模块 | 状态 |
 |---|---|---|
@@ -120,14 +123,15 @@ cp config.example.json config.json
 | 6 核心反应堆 | `reactor.zig`、`peer.zig` | ✅ 完成（epoll ET 主循环；多对端注册表 + 每链路独立密钥；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
 | 7 控制面 UDS | `uds.zig` | ✅ 完成（分词器 + AF_UNIX 数据报监听；原子 RCU 策略热替换，双缓冲） |
 | 8 控制工具 | `ptctl.zig` | ✅ 完成（UDS 投递；`policy add` 即发即弃，`policy show`/`save` 读取守护进程回包；守护进程未运行时非零退出） |
+| 9 守护进程主循环 + e2e | `main.zig`、`test/integration/run.sh` | ✅ 完成（接线 TUN + UDP + UDS + 反应堆；落地多点 + 中继网络命名空间端到端测试） |
 
 > **当前可验证**：`zig build test` 全绿（Linux 开发容器内 42/42；macOS 宿主
 > 31 通过 + 11 个仅 Linux 用例跳过），可产出 < 512KB 静态二进制。
 > Linux 开发容器（[`.devcontainer/`](.devcontainer/)）提供集成/预检脚本
 > （[`test/integration/run.sh`](test/integration/run.sh)），在两个 musl 目标上
-> 强制校验静态链接与体积约束。
-> **联网端到端**待补齐：守护进程主循环尚未接线（不会启动反应堆），
-> 多点 + 中继的网络命名空间端到端测试仍处于跳过状态（issue #8）。
+> 强制校验静态链接与体积约束，**并运行一套真实的多点 + 中继端到端隧道测试**
+> （网络命名空间中的 3 节点 Hub-and-Spoke 星型）：真实投递 spoke-A → Hub（中继）
+> → spoke-B、链路加密、以及负载下的 RCU 策略热更新。
 
 详细架构、内存模型与验收清单见 [`docs/btunnel-develop.md`](docs/btunnel-develop.md)。
 

@@ -97,11 +97,12 @@ docker run --rm --privileged --device=/dev/net/tun \
 
 [`test/integration/run.sh`](test/integration/run.sh) builds the binary on the
 container's native arch, enforces the static-link and ≤ 512 KB constraints,
-smoke-runs the daemon, cross-builds the other musl arch, and runs the unit
-tests. The two-node TUN + network-namespace tunnel test is intentionally
-**skipped** while the data path is stubbed; an anti-forgetting guard fails the
-run if the stubs are removed without enabling that test, so the harness can
-never silently stop testing the real path.
+smoke-runs the daemon (`btunnel --check`), cross-builds the other musl arch,
+runs the unit tests, and then runs the **multi-point + relay end-to-end test**:
+a 3-node hub-and-spoke star across network namespaces (one Hub relay + two
+Spokes). It asserts end-to-end delivery spoke-A → Hub(relay) → spoke-B, on-wire
+encryption (no plaintext marker leaks onto the underlay), and a non-stalling RCU
+policy hot-update under load. It needs `--privileged` + `--device=/dev/net/tun`.
 
 ## 🚀 Usage
 
@@ -125,8 +126,9 @@ See [`config.example.json`](config.example.json) for a config example.
 
 ## 📊 Development status
 
-Currently at the scaffold stage: the framework and pure-algorithm layer are
-implemented and passing tests; the syscall-heavy parts are placeholders.
+Currently the framework, the pure-algorithm layer, and the syscall data path
+(TUN, epoll reactor, AF_UNIX control plane, daemon main loop) are implemented
+and exercised end-to-end in the dev container.
 
 | Task | Module | Status |
 |---|---|---|
@@ -138,16 +140,17 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 6 Core reactor | `reactor.zig`, `peer.zig` | ✅ Done (epoll ET loop; multi-peer registry with per-link keys; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
 | 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
 | 8 Control tool | `ptctl.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
+| 9 Daemon main loop + e2e | `main.zig`, `test/integration/run.sh` | ✅ Done (wires TUN + UDP + UDS + reactor; live multi-point + relay netns end-to-end test) |
 
 > **Currently verifiable**: `zig build test` is all green (42/42 in the Linux
 > dev container; 31 pass + 11 Linux-only skips on a macOS host); produces a
 > < 512KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
-> static-link and size constraints across both musl targets.
-> **End-to-end networking** still pending: the daemon main loop is not yet wired
-> (it does not start the reactor), so the multi-point + relay netns e2e remains
-> skipped (issue #8).
+> static-link and size constraints across both musl targets **and runs a live
+> multi-point + relay end-to-end tunnel test** (3-node hub-and-spoke star across
+> network namespaces): real delivery spoke-A → Hub(relay) → spoke-B, on-wire
+> encryption, and RCU policy hot-update under load.
 
 See [`docs/btunnel-develop.md`](docs/btunnel-develop.md) for the detailed
 architecture, memory model, and acceptance checklist.
