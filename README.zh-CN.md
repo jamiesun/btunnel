@@ -46,12 +46,12 @@ docs/
 需要 **Zig 0.16.0** 及以上。
 
 ```bash
-# 本机构建（默认 ReleaseSmall）
-zig build --release=small
+# 本机构建（默认 ReleaseSmall；本地开发可加 -Doptimize=Debug）
+zig build
 
 # 静态交叉编译
-zig build --release=small -Dtarget=x86_64-linux-musl
-zig build --release=small -Dtarget=aarch64-linux-musl
+zig build -Dtarget=x86_64-linux-musl
+zig build -Dtarget=aarch64-linux-musl
 
 # 运行测试
 zig build test
@@ -91,7 +91,7 @@ zig build run
 | 7 控制面 UDS | `uds.zig` | 🟡 部分（分词器完成；socket 监听占位） |
 | 8 控制工具 | `ptctl.zig` | 🟡 部分（参数校验完成；UDS 投递待实现） |
 
-> **当前可验证**：`zig build test` 全绿（16/16），可产出 < 200KB 静态二进制。
+> **当前可验证**：`zig build test` 全绿（19/19），可产出 < 200KB 静态二进制。
 > **联网端到端**待补齐：TUN ioctl（任务 4）、epoll 收发主循环（任务 6）、UDS 通信（任务 7/8）。
 
 详细架构、内存模型与验收清单见 [`docs/btunnel-develop.md`](docs/btunnel-develop.md)。

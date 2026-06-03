@@ -59,12 +59,12 @@ docs/
 Requires **Zig 0.16.0** or later.
 
 ```bash
-# Native build (defaults to ReleaseSmall)
-zig build --release=small
+# Native build (defaults to ReleaseSmall; pass -Doptimize=Debug for dev builds)
+zig build
 
 # Static cross-compile
-zig build --release=small -Dtarget=x86_64-linux-musl
-zig build --release=small -Dtarget=aarch64-linux-musl
+zig build -Dtarget=x86_64-linux-musl
+zig build -Dtarget=aarch64-linux-musl
 
 # Run tests
 zig build test
@@ -105,7 +105,7 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 7 Control-plane UDS | `uds.zig` | 🟡 Partial (tokenizer done; socket listener stubbed) |
 | 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
 
-> **Currently verifiable**: `zig build test` is all green (16/16); produces a
+> **Currently verifiable**: `zig build test` is all green (19/19); produces a
 > < 200KB static binary.
 > **End-to-end networking** still pending: TUN ioctl (Task 4), epoll send/recv loop
 > (Task 6), UDS communication (Tasks 7/8).

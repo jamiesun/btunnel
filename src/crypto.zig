@@ -123,6 +123,39 @@ test "Nonce Monotonic: strictly increasing, no repeats" {
     }
 }
 
+test "Crypto: auth failure is rejected (tampered tag / wrong key / wrong seq)" {
+    const key: Key = [_]u8{0x42} ** KEY_LEN;
+    const plain = "the quick brown fox";
+
+    var sealed: [plain.len + TAG_LEN]u8 = undefined;
+    const out_len = seal(key, 7, plain, &sealed);
+
+    var opened: [plain.len]u8 = undefined;
+
+    // Sanity: the untouched ciphertext decrypts fine.
+    _ = try open(key, 7, sealed[0..out_len], &opened);
+
+    // Tampered tag (flip the last byte) -> AuthenticationFailed.
+    var tampered = sealed;
+    tampered[out_len - 1] ^= 0xFF;
+    try std.testing.expectError(error.AuthenticationFailed, open(key, 7, tampered[0..out_len], &opened));
+
+    // Tampered ciphertext body (flip the first byte).
+    var tampered_body = sealed;
+    tampered_body[0] ^= 0x01;
+    try std.testing.expectError(error.AuthenticationFailed, open(key, 7, tampered_body[0..out_len], &opened));
+
+    // Wrong key.
+    const wrong_key: Key = [_]u8{0x43} ** KEY_LEN;
+    try std.testing.expectError(error.AuthenticationFailed, open(wrong_key, 7, sealed[0..out_len], &opened));
+
+    // Wrong seq (nonce mismatch) -> authentication fails, defeating replay/reorder forgery.
+    try std.testing.expectError(error.AuthenticationFailed, open(key, 8, sealed[0..out_len], &opened));
+
+    // Truncated input (shorter than the tag) is rejected before AEAD.
+    try std.testing.expectError(error.Truncated, open(key, 7, sealed[0 .. TAG_LEN - 1], &opened));
+}
+
 test "Anti-Replay: out-of-window/replays dropped, in-window reorder accepted" {
     var w = ReplayWindow{};
     try std.testing.expect(w.accept(1));
@@ -134,3 +167,27 @@ test "Anti-Replay: out-of-window/replays dropped, in-window reorder accepted" {
     try std.testing.expect(w.accept(100)); // big jump, window resets
     try std.testing.expect(!w.accept(1)); // outside the window, too old
 }
+
+test "Anti-Replay: window boundary (diff==63 accepted, diff==64 rejected)" {
+    // Advance highest to 64, then probe the exact 64-wide window edges.
+    var w = ReplayWindow{};
+    try std.testing.expect(w.accept(64)); // highest = 64, bit 0 = seq 64
+    // seq 1 => diff = 63 (the oldest still-tracked slot) must be accepted once...
+    try std.testing.expect(w.accept(1));
+    // ...and rejected as a replay the second time.
+    try std.testing.expect(!w.accept(1));
+    // seq 0 => diff = 64, just outside the window, must be rejected as too old.
+    try std.testing.expect(!w.accept(0));
+}
+
+test "Anti-Replay: forward shift preserves previously-seen bits" {
+    // Seeing an old packet after the window slides forward must still be a replay.
+    var w = ReplayWindow{};
+    try std.testing.expect(w.accept(1)); // highest = 1
+    try std.testing.expect(w.accept(64)); // slide forward by 63; seq 1 now at bit 63
+    try std.testing.expect(!w.accept(1)); // still flagged seen -> replay
+    // A fresh in-window seq between them is accepted exactly once.
+    try std.testing.expect(w.accept(30));
+    try std.testing.expect(!w.accept(30));
+}
+

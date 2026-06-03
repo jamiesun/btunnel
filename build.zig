@@ -3,7 +3,19 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     // Default to ReleaseSmall per the design doc (≤ 200KB static binary target).
-    const optimize = b.standardOptimizeOption(.{ .preferred_optimize_mode = .ReleaseSmall });
+    // Unlike `standardOptimizeOption`, this makes a bare `zig build` (no flags)
+    // resolve to ReleaseSmall instead of Debug, while still honoring explicit
+    // `-Doptimize=...` and `--release=...` overrides (e.g. `-Doptimize=Debug`
+    // for local development).
+    const optimize: std.builtin.OptimizeMode = b.option(
+        std.builtin.OptimizeMode,
+        "optimize",
+        "Prioritize performance, safety, or binary size",
+    ) orelse switch (b.release_mode) {
+        .off, .any, .small => .ReleaseSmall,
+        .fast => .ReleaseFast,
+        .safe => .ReleaseSafe,
+    };
 
     // Shared core library module: re-exports config / policy / crypto / tun /
     // reactor / uds so both the daemon and the control tool can import it.
