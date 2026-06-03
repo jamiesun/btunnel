@@ -60,7 +60,10 @@ pub fn main() !void {
         "btunnel v0.1.0 (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d})\n",
         .{ cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len },
     );
-    std.debug.print("scaffold: reactor not yet wired (see task 7)\n", .{});
+    // E2E-BLOCKER(issue #8): the daemon main loop does not open the TUN, bind the
+    // UDP/UDS sockets, or start the reactor yet, so no packets flow end-to-end.
+    // The multi-point + relay netns e2e test stays skipped until this is wired.
+    std.debug.print("scaffold: daemon main loop not wired (issue #8)\n", .{});
 }
 
 test "daemon module wiring" {

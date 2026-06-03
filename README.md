@@ -136,17 +136,18 @@ implemented and passing tests; the syscall-heavy parts are placeholders.
 | 4 System driver | `tun.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd) |
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / nonce / anti-replay) |
 | 6 Core reactor | `reactor.zig`, `peer.zig` | ✅ Done (epoll ET loop; multi-peer registry with per-link keys; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
-| 7 Control-plane UDS | `uds.zig` | 🟡 Partial (tokenizer done; socket listener stubbed) |
+| 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
 | 8 Control tool | `ptctl.zig` | 🟡 Partial (argument validation done; UDS delivery pending) |
 
-> **Currently verifiable**: `zig build test` is all green (35/35 in the Linux
-> dev container; 31 pass + 4 Linux-only skips on a macOS host); produces a
+> **Currently verifiable**: `zig build test` is all green (37/37 in the Linux
+> dev container; 29 pass + 6 Linux-only skips on a macOS host); produces a
 > < 200KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
 > static-link and size constraints across both musl targets.
-> **End-to-end networking** still pending: control-plane UDS listener and the
-> multi-point + relay netns e2e (Tasks 7/8).
+> **End-to-end networking** still pending: the daemon main loop is not yet wired
+> (it does not start the reactor), so the multi-point + relay netns e2e remains
+> skipped (issue #8).
 
 See [`docs/btunnel-develop.md`](docs/btunnel-develop.md) for the detailed
 architecture, memory model, and acceptance checklist.

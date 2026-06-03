@@ -24,8 +24,9 @@
 //! - The hub never reflects a packet back to its source peer (no-reflect guard).
 //!   Topology is single-hub hub-and-spoke; spokes do not relay.
 //!
-//! Scope boundary: the AF_UNIX control listener (accept/parse) is issue #7, so
-//! `uds_fd` is intentionally NOT registered with epoll here.
+//! Control plane (issue #6): an optional `*uds.Control` listener is registered
+//! level-triggered so `ptctl` can hot-swap the policy tree at runtime; the data
+//! plane only ever reads the tree atomically and never blocks on control I/O.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -33,6 +34,7 @@ const linux = std.os.linux;
 const policy = @import("policy.zig");
 const crypto = @import("crypto.zig");
 const peer = @import("peer.zig");
+const uds = @import("uds.zig");
 
 /// Private wire header (packed struct, physically aligned): 1B version + 1B
 /// flags + 2B reserved negotiation field + 8B monotonic sequence number (doubles
@@ -157,9 +159,11 @@ fn setNonblock(fd: linux.fd_t) !void {
 pub const Reactor = struct {
     tun_fd: linux.fd_t,
     udp_fd: linux.fd_t,
-    /// AF_UNIX control fd. Stored for completeness; registration + accept/parse
-    /// is issue #7 and deliberately not wired into the epoll set here.
-    uds_fd: linux.fd_t,
+    /// Optional AF_UNIX control listener (issue #6). When present its datagram
+    /// socket is registered level-triggered in `run()` and drained via
+    /// `Control.handle()`; the control plane owns the policy-tree storage and the
+    /// data plane only reads `active` atomically.
+    control: ?*uds.Control = null,
     active: *policy.ActiveTree,
     mode: EgressMode = .raw_direct,
     /// Multi-peer endpoint + crypto registry (per-peer keys, counters, windows).
@@ -174,22 +178,22 @@ pub const Reactor = struct {
     pub fn init(
         tun_fd: linux.fd_t,
         udp_fd: linux.fd_t,
-        uds_fd: linux.fd_t,
+        control: ?*uds.Control,
         active: *policy.ActiveTree,
         registry: *peer.PeerRegistry,
     ) Reactor {
         return .{
             .tun_fd = tun_fd,
             .udp_fd = udp_fd,
-            .uds_fd = uds_fd,
+            .control = control,
             .active = active,
             .registry = registry,
         };
     }
 
-    fn epollAdd(epfd: i32, fd: linux.fd_t) !void {
+    fn epollAdd(epfd: i32, fd: linux.fd_t, events: u32) !void {
         var ev = linux.epoll_event{
-            .events = linux.EPOLL.IN | linux.EPOLL.ET,
+            .events = events,
             .data = .{ .fd = fd },
         };
         const rc = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &ev);
@@ -197,8 +201,9 @@ pub const Reactor = struct {
     }
 
     /// Single-threaded epoll_wait loop (Linux only). Forces TUN/UDP non-blocking,
-    /// registers them edge-triggered, and dispatches readable events to the
-    /// drain pumps. Runs until an unrecoverable epoll error.
+    /// registers them edge-triggered, registers the optional control socket
+    /// level-triggered, and dispatches readable events to the drain pumps. Runs
+    /// until an unrecoverable epoll error.
     pub fn run(self: *Reactor) !void {
         if (builtin.os.tag != .linux) return error.Unsupported;
 
@@ -210,9 +215,11 @@ pub const Reactor = struct {
         const epfd: i32 = @intCast(epfd_rc);
         defer _ = linux.close(epfd);
 
-        try epollAdd(epfd, self.tun_fd);
-        try epollAdd(epfd, self.udp_fd);
-        // uds_fd is intentionally NOT registered here (issue #7 owns accept/parse).
+        try epollAdd(epfd, self.tun_fd, linux.EPOLL.IN | linux.EPOLL.ET);
+        try epollAdd(epfd, self.udp_fd, linux.EPOLL.IN | linux.EPOLL.ET);
+        // Control socket is level-triggered: handle() processes a bounded number
+        // of commands per tick, and epoll re-notifies while datagrams remain.
+        if (self.control) |c| try epollAdd(epfd, c.fd, linux.EPOLL.IN);
 
         var events: [16]linux.epoll_event = undefined;
         while (true) {
@@ -227,6 +234,8 @@ pub const Reactor = struct {
                     self.pumpTunToUdp();
                 } else if (fd == self.udp_fd) {
                     self.pumpUdpIngress();
+                } else if (self.control != null and fd == self.control.?.fd) {
+                    self.control.?.handle();
                 }
             }
         }
@@ -452,7 +461,7 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     var tree = policy.PolicyTree{ .entries = &entries };
     var active = policy.ActiveTree.init(&tree);
 
-    var r = Reactor.init(pipe_fds[0], udp_hub, -1, &active, &reg);
+    var r = Reactor.init(pipe_fds[0], udp_hub, null, &active, &reg);
 
     const ip_pkt = ipPkt(.{ 10, 0, 0, 1 }, .{ 10, 0, 0, 2 });
     _ = linux.write(pipe_fds[1], &ip_pkt, ip_pkt.len);
@@ -510,7 +519,7 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     defer _ = linux.close(pipe_fds[0]);
     defer _ = linux.close(pipe_fds[1]);
 
-    var r = Reactor.init(pipe_fds[1], udp_hub, -1, &active, &reg);
+    var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
 
     // A seals with its tx key to the hub: derive(psk, 2, 1).
     const a_tx = crypto.deriveLinkKey(psk, 2, 1);
@@ -575,7 +584,7 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     var tree = policy.PolicyTree{ .entries = &entries };
     var active = policy.ActiveTree.init(&tree);
 
-    var r = Reactor.init(pipe_fds[1], udp_hub, -1, &active, &reg);
+    var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
 
     const a_tx = crypto.deriveLinkKey(psk, 2, 1);
     // A single monotonic counter for everything peer A sends (mirrors reality:
