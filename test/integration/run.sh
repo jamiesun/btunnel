@@ -15,10 +15,11 @@
 #   5. Run the unit test suite (`zig build test`).
 #
 # What it does NOT do yet:
-#   6. The two-node TUN + network-namespace tunnel test. The data path
-#      (tun/reactor/uds) is still stubbed (Tasks 4/6/7), so this step is SKIPPED
-#      — never faked. An anti-forgetting guard (see e2e_netns) FAILS the run if
-#      the stubs are removed but this test is still skipped, so the harness can
+#   6. The multi-point + relay tunnel test (hub-and-spoke star across network
+#      namespaces: Hub relays spoke-A -> spoke-B). The data path (tun/reactor/
+#      uds) is still stubbed (Tasks 4/6/7), so this step is SKIPPED — never
+#      faked. An anti-forgetting guard (see e2e_netns) FAILS the run if the
+#      stubs are removed but this test is still skipped, so the harness can
 #      never silently rot into decoration.
 #
 # Usage (from repo root, on the host):
@@ -99,6 +100,17 @@ zig build test >/dev/null || die "zig build test failed"
 ok "unit tests green"
 
 # --- 6: end-to-end netns tunnel test (gated) -------------------------------
+# Target topology once the data path lands: a 3+ node hub-and-spoke star in
+# separate network namespaces — one Hub (relay) and >=2 Spokes — exercising
+# BOTH capabilities the PRD calls for:
+#   * multi-point: every spoke reaches the Hub over its own encrypted UDP
+#     tunnel and joins the virtual 10.0.0.0/24 subnet;
+#   * relay: a packet from spoke-A destined for spoke-B's subnet is forwarded
+#     (relayed) by the Hub per a `policy ... --action forward --target <B>`
+#     rule — spokes never talk directly.
+# Assertions: end-to-end delivery A->Hub->B, ciphertext carries no plaintext /
+# magic on the wire, replayed datagrams are dropped by the sliding window, and
+# an RCU `ptctl policy add` hot-update does not stall in-flight traffic.
 data_path_stubbed() {
   # Stable sentinels that vanish once Tasks 4/6 implement the data path.
   grep -q "the real TUNSETIFF ioctl lands in Task 4" src/tun.zig &&
@@ -107,14 +119,15 @@ data_path_stubbed() {
 
 e2e_netns() {
   if data_path_stubbed; then
-    skip "e2e tunnel test: data path still stubbed (Tasks 4/6/7) — nothing to exercise yet"
+    skip "multi-point + relay e2e: data path still stubbed (Tasks 4/6/7) — reactor moves no packets yet"
     return 0
   fi
   # Anti-forgetting guard: stubs are gone but no real e2e is wired here.
-  die "data path is no longer stubbed but the netns e2e test is unimplemented.
-     -> Implement the two-node TUN + 'ip netns' tunnel test in e2e_netns()
-        (create two namespaces, run btunnel in each, push IP packets through
-        the TUN devices, assert delivery + encryption + anti-replay)."
+  die "data path is no longer stubbed but the hub-and-spoke e2e test is unimplemented.
+     -> Implement the multi-point + relay test in e2e_netns(): create a Hub and
+        >=2 Spoke network namespaces, run btunnel in each, and assert
+        spoke-A -> Hub(relay) -> spoke-B delivery, on-wire encryption (no
+        plaintext/magic), anti-replay drops, and RCU policy hot-update under load."
 }
 e2e_netns
 
