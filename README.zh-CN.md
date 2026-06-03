@@ -118,15 +118,16 @@ cp config.example.json config.json
 | 4 系统驱动 | `tun.zig` | ✅ 完成（TUNSETIFF ioctl，非阻塞 L3 fd） |
 | 5 密码学管道 | `crypto.zig` | ✅ 完成（AEAD / nonce / 防重放） |
 | 6 核心反应堆 | `reactor.zig`、`peer.zig` | ✅ 完成（epoll ET 主循环；多对端注册表 + 每链路独立密钥；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
-| 7 控制面 UDS | `uds.zig` | 🟡 部分（分词器完成；socket 监听占位） |
+| 7 控制面 UDS | `uds.zig` | ✅ 完成（分词器 + AF_UNIX 数据报监听；原子 RCU 策略热替换，双缓冲） |
 | 8 控制工具 | `ptctl.zig` | 🟡 部分（参数校验完成；UDS 投递待实现） |
 
-> **当前可验证**：`zig build test` 全绿（Linux 开发容器内 35/35；macOS 宿主
-> 31 通过 + 4 个仅 Linux 用例跳过），可产出 < 200KB 静态二进制。
+> **当前可验证**：`zig build test` 全绿（Linux 开发容器内 37/37；macOS 宿主
+> 29 通过 + 6 个仅 Linux 用例跳过），可产出 < 200KB 静态二进制。
 > Linux 开发容器（[`.devcontainer/`](.devcontainer/)）提供集成/预检脚本
 > （[`test/integration/run.sh`](test/integration/run.sh)），在两个 musl 目标上
 > 强制校验静态链接与体积约束。
-> **联网端到端**待补齐：控制面 UDS 监听与多点 + 中继的网络命名空间端到端测试（任务 7/8）。
+> **联网端到端**待补齐：守护进程主循环尚未接线（不会启动反应堆），
+> 多点 + 中继的网络命名空间端到端测试仍处于跳过状态（issue #8）。
 
 详细架构、内存模型与验收清单见 [`docs/btunnel-develop.md`](docs/btunnel-develop.md)。
 

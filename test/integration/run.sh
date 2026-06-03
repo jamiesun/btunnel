@@ -16,11 +16,11 @@
 #
 # What it does NOT do yet:
 #   6. The multi-point + relay tunnel test (hub-and-spoke star across network
-#      namespaces: Hub relays spoke-A -> spoke-B). The data path (tun/reactor/
-#      uds) is still stubbed (Tasks 4/6/7), so this step is SKIPPED — never
-#      faked. An anti-forgetting guard (see e2e_netns) FAILS the run if the
-#      stubs are removed but this test is still skipped, so the harness can
-#      never silently rot into decoration.
+#      namespaces: Hub relays spoke-A -> spoke-B). The daemon main loop does not
+#      yet open the TUN, bind the sockets, or start the reactor (issue #8), so
+#      this step is SKIPPED — never faked. An anti-forgetting guard (see
+#      e2e_netns) FAILS the run if that blocker is removed but this test is still
+#      skipped, so the harness can never silently rot into decoration.
 #
 # Usage (from repo root, on the host):
 #   docker build -t btunnel-dev -f .devcontainer/Dockerfile .
@@ -126,13 +126,13 @@ data_path_stubbed() {
   # Stub sentinels per module; while ANY remains, the e2e path can't run.
   grep -q "the real TUNSETIFF ioctl lands in Task 4" src/tun.zig && return 0  # Task 4
   grep -q "skeleton pending" src/reactor.zig && return 0                      # Task 6
-  grep -q "TODO(Task 7)" src/uds.zig && return 0                              # Task 7
+  grep -q "E2E-BLOCKER(issue #8)" src/main.zig && return 0                    # daemon main loop not wired
   return 1
 }
 
 e2e_netns() {
   if data_path_stubbed; then
-    skip "multi-point + relay e2e: data path still stubbed (Tasks 4/6/7) — reactor moves no packets yet"
+    skip "multi-point + relay e2e: daemon main loop not wired yet (issue #8) — reactor never starts"
     return 0
   fi
   # Anti-forgetting guard: stubs are gone but no real e2e is wired here.
