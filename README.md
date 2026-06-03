@@ -27,8 +27,9 @@ producing a single, fully statically linked binary.
 - **Stateless obfuscation**: ChaCha20-Poly1305 full encryption; ciphertext has no
   fixed magic number; authentication failures are silently dropped — physically
   invisible to probing.
-- **Transport security**: PSK pre-shared key + 64-bit monotonic nonce (never
-  reused) + sliding-window anti-replay.
+- **Transport security**: PSK pre-shared key + per-link directional keys +
+  per-restart session epoch (fresh key each daemon lifetime) + 64-bit monotonic
+  nonce (never reused) + per-session sliding-window anti-replay.
 - **Lock-free RCU hot updates**: the policy tree is replaced wholesale via an atomic
   pointer swap; hot updates are zero-copy and jitter-free.
 - **Multi-subnet policy engine**: CIDR longest-prefix matching, with Site-to-Site
@@ -136,14 +137,14 @@ and exercised end-to-end in the dev container.
 | 2 Config sanity | `config.zig` | ✅ Done (std.json parse + hex PSK + CIDR; boundary fuse) |
 | 3 Policy match | `policy.zig` | ✅ Done (CIDR / longest-prefix / RCU) |
 | 4 System driver | `tun.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd) |
-| 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / nonce / anti-replay) |
-| 6 Core reactor | `reactor.zig`, `peer.zig` | ✅ Done (epoll ET loop; multi-peer registry with per-link keys; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
+| 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / per-link keys / session epoch / anti-replay) |
+| 6 Core reactor | `reactor.zig`, `peer.zig` | ✅ Done (epoll ET loop; multi-peer registry with per-link keys + per-restart session epoch; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
 | 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
 | 8 Control tool | `ptctl.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
 | 9 Daemon main loop + e2e | `main.zig`, `test/integration/run.sh` | ✅ Done (wires TUN + UDP + UDS + reactor; live multi-point + relay netns end-to-end test) |
 
-> **Currently verifiable**: `zig build test` is all green (42/42 in the Linux
-> dev container; 31 pass + 11 Linux-only skips on a macOS host); produces a
+> **Currently verifiable**: `zig build test` is all green (46/46 in the Linux
+> dev container; 35 pass + 11 Linux-only skips on a macOS host); produces a
 > < 512KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the

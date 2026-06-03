@@ -85,9 +85,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return err;
     };
 
+    // Sample this daemon's boot epoch once (issue #14): binds every transmit
+    // session to this lifetime so the nonce space is fresh after a restart. A
+    // failed/implausible clock is fatal (fail-closed).
+    const boot_epoch = bt.peer.bootEpoch() catch |err| {
+        std.debug.print("boot epoch unavailable (clock not set?): {s}\n", .{@errorName(err)});
+        return err;
+    };
+
     // Build the peer registry so any malformed mesh configuration aborts startup
     // (issue #5). Pointers into the registry are stable for its lifetime.
-    var registry = bt.peer.PeerRegistry.fromConfig(cfg) catch |err| {
+    var registry = bt.peer.PeerRegistry.fromConfig(cfg, boot_epoch) catch |err| {
         std.debug.print("peer registry build failed: {s}\n", .{@errorName(err)});
         return err;
     };

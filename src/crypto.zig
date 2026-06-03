@@ -15,6 +15,7 @@ pub const NONCE_LEN = Aead.nonce_length; // 12
 pub const Key = [KEY_LEN]u8;
 
 const LINK_LABEL = "btunnel-v1-link";
+const SESSION_LABEL = "btunnel-v1-session";
 
 /// Derive a directional per-link key from the shared PSK and the ordered pair
 /// of mesh node ids (`from_id` is the sender, `to_id` is the receiver).
@@ -47,9 +48,31 @@ pub fn nonceFromSeq(seq: u64) [NONCE_LEN]u8 {
     return n;
 }
 
-/// Per-endpoint monotonic counter. Incremented on every send, never reused.
-/// After a restart the high bits can be reseeded (`reseedHigh`) to avoid
-/// cross-session reuse.
+/// Derive a per-session key from a directional link key and a boot epoch
+/// (issue #14). Each daemon lifetime picks a fresh `epoch` (wall-clock
+/// nanoseconds at startup), so the session key changes on every restart even
+/// though the link key is stable. This lets the transmit sequence number safely
+/// restart at 1 after a reboot: a fresh key means a repeated `(seq)` can never
+/// reproduce a `(key, nonce)` pair that was used in a previous lifetime, which
+/// would be catastrophic for ChaCha20-Poly1305.
+///
+/// The epoch is also carried on the wire so the receiver derives the matching
+/// session key statelessly (no handshake), and uses it to scope its anti-replay
+/// window per session (see `reactor.decodeIngress`).
+pub fn deriveSessionKey(link_key: Key, epoch: u64) Key {
+    const Blake2b256 = std.crypto.hash.blake2.Blake2b256;
+    var msg: [SESSION_LABEL.len + 8]u8 = undefined;
+    @memcpy(msg[0..SESSION_LABEL.len], SESSION_LABEL);
+    std.mem.writeInt(u64, msg[SESSION_LABEL.len..][0..8], epoch, .big);
+    var out: Key = undefined;
+    Blake2b256.hash(&msg, &out, .{ .key = &link_key });
+    return out;
+}
+
+/// Per-endpoint monotonic counter. Incremented on every send, never reused
+/// within a session. Because the session key is epoch-bound (see
+/// `deriveSessionKey`), the counter safely restarts at 1 on each daemon
+/// lifetime.
 pub const NonceCounter = struct {
     value: u64 = 1,
 
@@ -58,9 +81,46 @@ pub const NonceCounter = struct {
         self.value += 1;
         return cur;
     }
+};
 
-    pub fn reseedHigh(self: *NonceCounter, high: u32) void {
-        self.value = (@as(u64, high) << 32) | 1;
+/// Transmit session state for one directional link (issue #14). Built once at
+/// peer registration from the link key and this daemon's boot epoch. The egress
+/// path stamps `epoch` into every header and seals with the epoch-bound `skey`.
+pub const TxSession = struct {
+    /// Stable directional link key (kept for inspection/tests).
+    link_key: Key,
+    /// Epoch-bound session key = deriveSessionKey(link_key, epoch).
+    skey: Key,
+    /// This daemon's boot epoch, carried on the wire.
+    epoch: u64,
+    /// Monotonic per-session sequence number.
+    counter: NonceCounter = .{},
+
+    pub fn init(link_key: Key, epoch: u64) TxSession {
+        return .{
+            .link_key = link_key,
+            .skey = deriveSessionKey(link_key, epoch),
+            .epoch = epoch,
+        };
+    }
+};
+
+/// Receive session state for one directional link (issue #14). Forward-only:
+/// the highest authenticated epoch wins. `epoch == 0` is the "no session yet"
+/// sentinel (a real boot epoch is wall-clock ns, never zero), in which case
+/// `skey` is undefined and must not be read until an epoch has been adopted.
+pub const RxSession = struct {
+    /// Stable directional link key; session keys are derived from it on demand.
+    link_key: Key,
+    /// Currently-adopted peer epoch (0 = none seen yet).
+    epoch: u64 = 0,
+    /// Cached session key for `epoch` (valid only when `epoch != 0`).
+    skey: Key = undefined,
+    /// Anti-replay window, reset whenever a newer epoch is adopted.
+    window: ReplayWindow = .{},
+
+    pub fn init(link_key: Key) RxSession {
+        return .{ .link_key = link_key };
     }
 };
 
@@ -245,5 +305,47 @@ test "Link keys: directional pair agrees, namespace is disjoint" {
     try std.testing.expect(!std.mem.eql(u8, &ct_a, &ct_b));
     var opened: [plain.len]u8 = undefined;
     try std.testing.expectError(error.AuthenticationFailed, open(hub_to_b, 7, &ct_a, &opened));
+}
+
+test "Session epoch: distinct epochs derive distinct session keys" {
+    const link: Key = [_]u8{0x5a} ** KEY_LEN;
+    const k1 = deriveSessionKey(link, 1_700_000_000_000_000_000);
+    const k2 = deriveSessionKey(link, 1_700_000_000_000_000_001); // 1ns later
+    try std.testing.expect(!std.mem.eql(u8, &k1, &k2));
+
+    // Same (link, epoch) is reproducible so both ends agree statelessly.
+    const k1b = deriveSessionKey(link, 1_700_000_000_000_000_000);
+    try std.testing.expectEqualSlices(u8, &k1, &k1b);
+
+    // A different link key under the same epoch yields a different session key.
+    const other: Key = [_]u8{0x5b} ** KEY_LEN;
+    const ko = deriveSessionKey(other, 1_700_000_000_000_000_000);
+    try std.testing.expect(!std.mem.eql(u8, &k1, &ko));
+}
+
+test "Session epoch: restart with a fresh epoch avoids (key,nonce) reuse" {
+    // The catastrophic case #14 fixes: a restart reuses the link key and the
+    // transmit counter restarts at 1. With epoch-bound session keys, seq 1 in
+    // two different lifetimes seals under different keys, so the ciphertext (and
+    // the implied (key, nonce) pair) never repeats.
+    const link: Key = [_]u8{0x42} ** KEY_LEN;
+    const plain = "identical plaintext, identical seq, different lifetime";
+
+    var s1 = TxSession.init(link, 1_700_000_000_000_000_000);
+    var s2 = TxSession.init(link, 1_700_000_000_000_000_777); // a later boot
+
+    const seq1 = s1.counter.next();
+    const seq2 = s2.counter.next();
+    try std.testing.expectEqual(seq1, seq2); // both restart at 1
+
+    var ct1: [plain.len + TAG_LEN]u8 = undefined;
+    var ct2: [plain.len + TAG_LEN]u8 = undefined;
+    _ = seal(s1.skey, seq1, plain, &ct1);
+    _ = seal(s2.skey, seq2, plain, &ct2);
+    try std.testing.expect(!std.mem.eql(u8, &ct1, &ct2));
+
+    // Neither lifetime's packet opens under the other lifetime's session key.
+    var opened: [plain.len]u8 = undefined;
+    try std.testing.expectError(error.AuthenticationFailed, open(s2.skey, seq1, &ct1, &opened));
 }
 

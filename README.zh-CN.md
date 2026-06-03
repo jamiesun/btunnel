@@ -17,7 +17,7 @@ BTunnel 在物理专线之上构建虚拟子网，采用**星型拓扑（Hub-and
 - **分层零动态内存分配**：数据面（reactor / crypto）严格零分配，缓冲区启动时锁死在常驻内存。
 - **单线程事件驱动反应堆**：基于 Linux epoll 边缘触发（`EPOLLET`），无锁、无并发竞争。
 - **无状态混淆**：ChaCha20-Poly1305 全加密，密文无固定魔数，认证失败静默 Drop，对探测物理隐形。
-- **传输安全**：PSK 预共享密钥 + 64-bit 单调递增 nonce（绝不复用）+ 滑动窗口防重放。
+- **传输安全**：PSK 预共享密钥 + 每链路方向密钥 + 每次重启的会话 epoch（每个进程生命周期派生全新会话密钥）+ 64-bit 单调递增 nonce（绝不复用）+ 每会话滑动窗口防重放。
 - **无锁 RCU 热更新**：策略树以原子指针交换整体替换，热更新零拷贝、零抖动。
 - **多网段策略引擎**：CIDR 逆序最长前缀匹配，支持 Site-to-Site 路由。
 
@@ -119,14 +119,14 @@ cp config.example.json config.json
 | 2 配置自检 | `config.zig` | ✅ 完成（std.json 解析 + 十六进制 PSK + CIDR；边界熔断） |
 | 3 策略匹配 | `policy.zig` | ✅ 完成（CIDR / 最长前缀 / RCU） |
 | 4 系统驱动 | `tun.zig` | ✅ 完成（TUNSETIFF ioctl，非阻塞 L3 fd） |
-| 5 密码学管道 | `crypto.zig` | ✅ 完成（AEAD / nonce / 防重放） |
-| 6 核心反应堆 | `reactor.zig`、`peer.zig` | ✅ 完成（epoll ET 主循环；多对端注册表 + 每链路独立密钥；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
+| 5 密码学管道 | `crypto.zig` | ✅ 完成（AEAD / 每链路密钥 / 会话 epoch / 防重放） |
+| 6 核心反应堆 | `reactor.zig`、`peer.zig` | ✅ 完成（epoll ET 主循环；多对端注册表 + 每链路独立密钥 + 每次重启的会话 epoch；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
 | 7 控制面 UDS | `uds.zig` | ✅ 完成（分词器 + AF_UNIX 数据报监听；原子 RCU 策略热替换，双缓冲） |
 | 8 控制工具 | `ptctl.zig` | ✅ 完成（UDS 投递；`policy add` 即发即弃，`policy show`/`save` 读取守护进程回包；守护进程未运行时非零退出） |
 | 9 守护进程主循环 + e2e | `main.zig`、`test/integration/run.sh` | ✅ 完成（接线 TUN + UDP + UDS + 反应堆；落地多点 + 中继网络命名空间端到端测试） |
 
-> **当前可验证**：`zig build test` 全绿（Linux 开发容器内 42/42；macOS 宿主
-> 31 通过 + 11 个仅 Linux 用例跳过），可产出 < 512KB 静态二进制。
+> **当前可验证**：`zig build test` 全绿（Linux 开发容器内 46/46；macOS 宿主
+> 35 通过 + 11 个仅 Linux 用例跳过），可产出 < 512KB 静态二进制。
 > Linux 开发容器（[`.devcontainer/`](.devcontainer/)）提供集成/预检脚本
 > （[`test/integration/run.sh`](test/integration/run.sh)），在两个 musl 目标上
 > 强制校验静态链接与体积约束，**并运行一套真实的多点 + 中继端到端隧道测试**
