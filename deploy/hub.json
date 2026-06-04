@@ -1,5 +1,6 @@
 {
   "negotiation_version": 1,
+  "role": "hub",
   "local_tun_mtu": 1400,
   "listen_port": 51820,
   "virtual_subnet": "10.0.0.0/24",
