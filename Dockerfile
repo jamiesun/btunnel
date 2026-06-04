@@ -2,12 +2,17 @@
 #
 # This is the SHIPPING image, distinct from .devcontainer/Dockerfile (which is a
 # fat dev/test box). The product contract is unchanged: a single static musl
-# binary with zero third-party dependencies. So the final stage is `scratch` and
-# contains nothing but the two binaries — no shell, no libc, no package manager.
+# binary with zero third-party dependencies. The final stage is a minimal
+# `busybox:uclibc` base, so the image carries our two static binaries plus a
+# tiny BusyBox shell + core utilities for in-container debugging (the daemon
+# itself still needs nothing from the base — it is fully static). The uclibc
+# variant is chosen because it is the busybox tag that publishes ALL four
+# architectures we ship, including arm/v5 (the musl tag omits arm/v5).
 #
 # Multi-arch is produced WITHOUT qemu: the build stage is pinned to the native
 # BUILDPLATFORM and Zig cross-compiles to the requested TARGETARCH. The final
-# `scratch` stage only copies files, so it needs no emulation either.
+# stage only copies files onto the matching-arch BusyBox layer, so it needs no
+# emulation either.
 #
 # Runtime requirements (the binary is an L3 tunnel daemon):
 #   docker run --rm \
@@ -75,15 +80,23 @@ RUN set -eux; \
     esac; \
     zig build -Dtarget="${ZIG_TARGET}" ${ZIG_CPU} -Doptimize=ReleaseSmall
 
-# --- final stage: nothing but the static binaries ----------------------------
-FROM scratch
+# --- final stage: minimal BusyBox base + the static binaries -----------------
+# BusyBox (uclibc variant) is a few MB and is the busybox tag that ships every
+# arch we target (amd64, arm64, arm/v7, arm/v5), giving the image a shell + core
+# utilities for debugging while the daemon stays fully static and
+# dependency-free. NOTE: do not switch this to busybox:*-musl — that tag does
+# not publish a linux/arm/v5 image and would break the arm/v5 release build.
+FROM busybox:1.37.0-uclibc
 
 COPY --from=build /src/zig-out/bin/btunnel /usr/local/bin/btunnel
 COPY --from=build /src/zig-out/bin/ptctl /usr/local/bin/ptctl
 COPY --from=build /src/config.example.json /etc/btunnel/config.example.json
 
 # The daemon reads ./config.json from its working directory; mount the real
-# config at /etc/btunnel/config.json.
+# config at /etc/btunnel/config.json. The busybox:uclibc base is a minimal tree
+# that ships no /var/run, so create it (via WORKDIR) for the default control
+# socket /var/run/btunnel.sock, then settle the working dir at /etc/btunnel.
+WORKDIR /var/run
 WORKDIR /etc/btunnel
 
 ENTRYPOINT ["/usr/local/bin/btunnel"]
