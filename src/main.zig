@@ -225,10 +225,73 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     var reactor = bt.reactor.Reactor.init(tun.fd, udp_fd, &control, &active, &registry);
     reactor.counters = &counters;
+
+    // Privileged setup is complete: the TUN device and all sockets are open and
+    // will not be reopened. The reactor only does read/write/recv/send/epoll on
+    // these held fds plus pure-userspace policy swaps, so it needs no further
+    // privilege. Drop all capabilities now to shrink the blast radius if the
+    // data path is ever compromised (issue #38). Fail closed when we started
+    // privileged but could not drop.
+    dropCapabilities() catch |err| {
+        std.debug.print("capability drop failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
+
     reactor.run() catch |err| {
         std.debug.print("reactor exited: {s}\n", .{@errorName(err)});
         return err;
     };
+}
+
+/// `_LINUX_CAPABILITY_VERSION_3`: the 64-bit capability ABI (two u32 words).
+const CAP_VERSION_3: u32 = 0x20080522;
+
+/// Authoritative highest valid capability number, read from the kernel. Falls
+/// back to a generous bound if `/proc` is unreadable; dropping a nonexistent
+/// capability from the bounding set is a harmless `EINVAL`.
+fn capLastCap() usize {
+    const fallback: usize = 63;
+    const rc = linux.open("/proc/sys/kernel/cap_last_cap", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return fallback;
+    const fd: linux.fd_t = @intCast(rc);
+    defer _ = linux.close(fd);
+    var buf: [32]u8 = undefined;
+    const n = linux.read(fd, &buf, buf.len);
+    if (linux.errno(n) != .SUCCESS) return fallback;
+    const s = std.mem.trim(u8, buf[0..@intCast(n)], " \t\r\n");
+    return std.fmt.parseInt(usize, s, 10) catch fallback;
+}
+
+/// Drop every capability after the privileged setup phase. Three layers:
+///   1. `PR_SET_NO_NEW_PRIVS` — bars regaining privilege through execve.
+///   2. Empty the bounding set up to `cap_last_cap` (needs CAP_SETPCAP, so done
+///      *before* the effective set is cleared) so caps can never be reacquired.
+///   3. `capset` clears the effective/permitted/inheritable sets for the thread.
+/// Fail closed: if we currently HOLD capabilities (started privileged) and the
+/// `capset` clear fails, return an error so startup aborts rather than silently
+/// running privileged. When already unprivileged (e.g. an unprivileged user
+/// namespace) there is nothing to drop and a `capset` refusal is tolerated.
+fn dropCapabilities() !void {
+    _ = linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+
+    const last = capLastCap();
+    var cap: usize = 0;
+    while (cap <= last) : (cap += 1) {
+        _ = linux.prctl(@intFromEnum(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+    }
+
+    var hdr = linux.cap_user_header_t{ .version = CAP_VERSION_3, .pid = 0 };
+    var cur = [_]linux.cap_user_data_t{.{ .effective = 0, .permitted = 0, .inheritable = 0 }} ** 2;
+    const had_caps = blk: {
+        if (linux.errno(linux.capget(&hdr, &cur[0])) != .SUCCESS) break :blk false;
+        break :blk (cur[0].permitted | cur[0].effective | cur[1].permitted | cur[1].effective) != 0;
+    };
+
+    var data = [_]linux.cap_user_data_t{.{ .effective = 0, .permitted = 0, .inheritable = 0 }} ** 2;
+    if (linux.errno(linux.capset(&hdr, &data[0])) != .SUCCESS) {
+        if (had_caps) return error.CapDropFailed;
+        // Already unprivileged: nothing meaningful to drop.
+    }
 }
 
 test "daemon module wiring" {

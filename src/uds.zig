@@ -58,6 +58,7 @@ pub const ControlError = error{
     Unsupported,
     SocketFailed,
     BindFailed,
+    ChmodFailed,
     PathTooLong,
     TooManyEntries,
 };
@@ -168,8 +169,19 @@ fn openDgramSocket(path: []const u8) ControlError!linux.fd_t {
     // Best-effort removal of a stale socket from a previous run.
     _ = linux.unlink(@ptrCast(&a.addr.path));
 
+    // Create the node already owner-only: a permissive inherited umask must not
+    // leave a window where a local user can enqueue a control datagram before
+    // the fchmod below tightens it. umask is process-global, but this runs in the
+    // single-threaded setup phase, so the scoped save/restore is safe.
+    const prev_umask = linux.syscall1(.umask, 0o177);
     const brc = linux.bind(fd, @ptrCast(&a.addr), a.alen);
+    _ = linux.syscall1(.umask, prev_umask);
     if (linux.errno(brc) != .SUCCESS) return error.BindFailed;
+
+    // Defense in depth: pin the mode to 0600 explicitly on the bound fd
+    // (path-TOCTOU-free), independent of umask. The control plane mutates routing
+    // policy and exposes peer state, so it must never be group/world reachable.
+    if (linux.errno(linux.fchmod(fd, 0o600)) != .SUCCESS) return error.ChmodFailed;
 
     return fd;
 }
@@ -683,6 +695,26 @@ fn unlinkPath(path: []const u8) void {
     @memcpy(pz[0..path.len], path);
     pz[path.len] = 0;
     _ = linux.unlink(@ptrCast(&pz));
+}
+
+test "openDgramSocket: control socket is bound 0600 regardless of umask (#37)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    // A permissive umask must not widen the control socket: fchmod is explicit.
+    const prev = linux.syscall1(.umask, 0);
+    defer _ = linux.syscall1(.umask, prev);
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-perm-{d}.sock", .{linux.getpid()});
+    defer unlinkPath(path);
+
+    const fd = try openDgramSocket(path);
+    defer _ = linux.close(fd);
+
+    var stx: linux.Statx = undefined;
+    const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MODE = true }, &stx);
+    try std.testing.expect(linux.errno(rc) == .SUCCESS);
+    try std.testing.expectEqual(@as(u16, 0o600), stx.mode & 0o777);
 }
 
 test "control: policy add datagram hot-swaps the active tree" {
