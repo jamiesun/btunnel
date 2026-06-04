@@ -170,8 +170,9 @@ pub fn parseEndpoint(text: []const u8) EndpointError!linux.sockaddr.in {
 }
 
 pub const Config = struct {
-    /// v1 header/config negotiation version (fixed to 1 in v1, reserved for the
-    /// v2 handshake).
+    /// v1 header/config negotiation version (fixed to 1 in v1). Reserved for
+    /// future STATIC per-link transport-mode selection, never an on-wire
+    /// handshake or in-band negotiation (AGENT.md iron law #8).
     negotiation_version: u8 = 1,
     /// Tunnel MTU.
     local_tun_mtu: u16 = 1452,

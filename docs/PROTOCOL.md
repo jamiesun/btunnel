@@ -113,6 +113,13 @@ Each daemon lifetime samples a **boot epoch** once at startup:
 - A fresh epoch on every restart re-keys the session, which is what lets the
   transmit sequence number safely restart at `1` after a reboot without ever
   reproducing a previous lifetime's `(key, nonce)` pair.
+- **Accepted consequence (by design — no handshake).** Because epoch ordering is
+  forward-only (§5) and there is **no** epoch-exchange handshake, a node whose
+  wall clock runs *backward* across a restart emits a lower epoch that peers
+  reject until their clocks advance past the old value. This is a deliberate
+  trade-off of the stateless, handshake-free design, **not** a deferred fix; it
+  is mitigated operationally (NTP/RTC), never in-protocol — see the deployment
+  guide.
 
 ---
 
@@ -236,8 +243,12 @@ security-critical.
 > receiver has observed `E` (`cur < E`) will pass steps 3–7 (adopt-epoch, reset
 > window, accept) and thus also *learn the attacker's endpoint*. This requires
 > on-path capture; an off-path attacker cannot forge an authenticator. It is the
-> standard trade-off of stateless-epoch establishment plus endpoint learning; a
-> handshake/challenge that closes it is deferred to v2 and is out of scope here.
+> standard trade-off of stateless-epoch establishment plus endpoint learning,
+> and it is **accepted by design, not deferred**: BTunnel performs no handshake
+> as a deliberate constraint (the design contract's iron law #8), so there is no
+> challenge/response to close it. The harm is also transient — the peer's next
+> genuine packet relocates the endpoint back — and an off-path attacker cannot
+> forge the authenticator.
 
 ---
 
@@ -288,10 +299,11 @@ byte underlay path the largest safe inner MTU is `1500 - 64 = 1436`; operators
 - This document specifies **`wire_version = 1`**. A v1 receiver **MUST** drop any
   datagram whose `version` byte is not `1` (there is no in-band negotiation in
   v1).
-- The `flags` byte is **reserved for the v2 handshake negotiation** and **MUST be
-  zero** in v1, on both send and receive. Header bytes [2..4] carry the `key_id`
-  selector (§3.1) — in v1 this is the sender's mesh id; it is **not** a free
-  negotiation field.
+- The `flags` byte is **reserved for future static per-link mode selection**
+  (there is **no** on-wire handshake or in-band negotiation — a deliberate design
+  constraint) and **MUST be zero** in v1, on both send and receive. Header bytes
+  [2..4] carry the `key_id` selector (§3.1) — in v1 this is the sender's mesh id;
+  it is **not** a free negotiation field.
 - Two egress modes are reserved for v2 and are **not** part of the v1 wire
   contract: `kcp_arq` (in-house ARQ, MTU 1428) and `fec_xor` (forward error
   correction). A v1 implementation does not implement them.

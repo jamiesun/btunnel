@@ -60,18 +60,36 @@ a hard failure regardless of how "clean" the result looks.
    `not a dynamic executable`.
 7. **Stay test-driven.** Follow the TDD workflow in the PRD. Pure logic must ship
    with tests. `zig build test` must stay green before any commit.
+8. **Stateless, handshake-free transport.** Every datagram is self-describing and
+   independently decodable — the per-packet `epoch` *is* the entire
+   session-establishment mechanism. BTunnel performs **no connection-establishment
+   round-trip, no challenge/response, no in-band session negotiation** — not in
+   v1, and not in v2. Reliability state (a future ARQ/FEC layer) may live in an
+   independent arena but must never become a handshake; any future transport mode
+   is chosen by **static per-link config** (the reserved
+   `negotiation_version`/`flags` fields), never negotiated on the wire. Two
+   consequences are accepted **by design, not deferred**: (a) an on-path attacker
+   may replay a captured datagram of a not-yet-observed epoch to *transiently*
+   relocate a peer's endpoint — it self-heals on the peer's next genuine packet
+   and an off-path attacker cannot forge it (issue #42); and (b) a node whose wall
+   clock runs backward across a restart is rejected by peers until their clocks
+   advance — mitigated operationally by NTP/RTC (see `docs/deployment.md`), never
+   by an in-protocol epoch exchange.
 
 ## 4. Scope: v1 vs v2 — do not cross the line
 
 - **v1 (deliver this):** `raw_direct` data plane + PSK encryption + anti-replay +
   RCU hot-update policy engine.
-- **v2 (roadmap, interface only):** `kcp_arq`, `fec_xor`, and handshake
-  negotiation. In v1 you **only reserve** the `egress` branch and the header
-  negotiation field — you do **not** implement these. v2 branches return
-  `error.NotImplemented`.
+- **v2 (roadmap, interface only):** `kcp_arq` and `fec_xor` — in-house
+  reliability modes, **selected by static per-link config, never an on-wire
+  handshake** (see iron law #8). In v1 you **only reserve** the `egress` branch
+  and the header `negotiation_version`/`flags` fields — you do **not** implement
+  these. v2 branches return `error.NotImplemented`. **There is no handshake on
+  the roadmap**; the symmetric fixes for issue #42 and clock-backward that a
+  handshake would have enabled are intentionally *not* pursued (iron law #8).
 
-Do not start v2 work, do not pull v2 complexity into v1, and do not delete the v2
-reservation points.
+Do not start v2 work, do not pull v2 complexity into v1, do not add a handshake,
+and do not delete the v2 reservation points.
 
 ## 5. How you must work
 
