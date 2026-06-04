@@ -427,6 +427,14 @@ pub const Control = struct {
         self.trees[0] = .{ .entries = self.bufs[0][0..initial.len] };
         self.active = active;
         _ = active.swap(&self.trees[0]);
+
+        // `Control` is constructed via `= undefined`, so field defaults do NOT
+        // apply. Explicitly clear the optional status sources; `bindStatus`
+        // wires them later. Without this they hold garbage and the unbound
+        // `status` path treats them as non-null and dereferences junk.
+        self.status_meta = null;
+        self.status_registry = null;
+        self.status_counters = null;
     }
 
     /// Wire the optional status sources for `ptctl status` (issue #24). Call
