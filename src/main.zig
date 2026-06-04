@@ -34,11 +34,75 @@ const CONFIG_PATH = "config.json";
 const CONFIG_MAX = 64 * 1024;
 const DEFAULT_TUN = "btun0";
 
-/// Read and parse config.json with raw syscalls (consistent with the rest of
-/// the data path). A missing file falls back to the compile-time default;
-/// malformed JSON or an unreadable file is propagated so startup aborts.
-fn loadConfig(allocator: std.mem.Allocator) !bt.config.Config {
-    const orc = linux.open(CONFIG_PATH, .{ .ACCMODE = .RDONLY }, 0);
+const USAGE =
+    \\btunnel — stateless L3 UDP tunnel daemon
+    \\
+    \\Usage: btunnel [OPTIONS]
+    \\
+    \\Options:
+    \\  --config PATH         Path to the JSON config (default: ./config.json).
+    \\  --check               Validate the config + peer registry and exit.
+    \\  --print-network-plan  Print the host ip(8) commands for this config and exit.
+    \\  --path-mtu N          Path MTU used by --print-network-plan (default 1420).
+    \\  -h, --help            Show this help and exit.
+    \\  -V, --version         Show the version and exit.
+    \\
+    \\Environment:
+    \\  BTUNNEL_CONFIG  Config path (overridden by --config).
+    \\  BTUNNEL_SOCK    Control socket path (default /var/run/btunnel.sock).
+    \\  BTUNNEL_TUN     TUN interface name (default btun0).
+    \\
+    \\The daemon never mutates host networking; use --print-network-plan to emit
+    \\the commands to run, and `ptctl status` to inspect a running daemon.
+    \\
+;
+
+/// Flags that consume the following argv token as their value.
+const VALUE_FLAGS = [_][]const u8{ "--config", "--path-mtu" };
+/// Standalone boolean flags.
+const BOOL_FLAGS = [_][]const u8{ "--check", "--print-network-plan", "--help", "-h", "--version", "-V" };
+
+/// Fail fast on an unrecognized argument so a typo like `--chek` aborts instead
+/// of silently starting the daemon with the mistyped flag ignored. No positional
+/// arguments are accepted.
+fn validateArgs(args: std.process.Args) !void {
+    var it = args.iterate();
+    _ = it.skip(); // argv[0]
+    outer: while (it.next()) |a| {
+        for (VALUE_FLAGS) |f| {
+            if (std.mem.eql(u8, a, f)) {
+                _ = it.next(); // consume the value token
+                continue :outer;
+            }
+        }
+        for (BOOL_FLAGS) |f| {
+            if (std.mem.eql(u8, a, f)) continue :outer;
+        }
+        std.debug.print("unknown argument: {s}\n\n{s}", .{ a, USAGE });
+        return error.UnknownArgument;
+    }
+}
+
+/// Resolve the config path from --config, then BTUNNEL_CONFIG, then the default.
+/// Returns a NUL-terminated slice usable directly with the open(2) syscall.
+fn resolveConfigPath(args: std.process.Args, environ: anytype, buf: []u8) ![:0]const u8 {
+    const p: []const u8 = if (flagValue(args, "--config")) |v|
+        v
+    else if (std.process.Environ.getPosix(environ, "BTUNNEL_CONFIG")) |s|
+        s
+    else
+        CONFIG_PATH;
+    if (p.len + 1 > buf.len) return error.PathTooLong;
+    @memcpy(buf[0..p.len], p);
+    buf[p.len] = 0;
+    return buf[0..p.len :0];
+}
+
+/// Read and parse the config at `path` with raw syscalls (consistent with the
+/// rest of the data path). A missing file falls back to the compile-time
+/// default; malformed JSON or an unreadable file is propagated so startup aborts.
+fn loadConfig(allocator: std.mem.Allocator, path: [:0]const u8) !bt.config.Config {
+    const orc = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
     switch (linux.errno(orc)) {
         .SUCCESS => {},
         .NOENT => return bt.config.Config.default(),
@@ -105,8 +169,25 @@ fn envTunName(environ: anytype) []const u8 {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    const cfg = loadConfig(std.heap.page_allocator) catch |err| {
-        std.debug.print("config load failed: {s}\n", .{@errorName(err)});
+    // Help/version short-circuit BEFORE loading config so they work on a box with
+    // no config.json present (operator convenience).
+    if (hasFlag(init.args, "--help") or hasFlag(init.args, "-h")) {
+        std.debug.print("{s}", .{USAGE});
+        return;
+    }
+    if (hasFlag(init.args, "--version") or hasFlag(init.args, "-V")) {
+        std.debug.print("btunnel v{s}\n", .{build_options.version});
+        return;
+    }
+    validateArgs(init.args) catch |err| return err;
+
+    var cfg_path_buf: [4096]u8 = undefined;
+    const cfg_path = resolveConfigPath(init.args, init.environ, &cfg_path_buf) catch |err| {
+        std.debug.print("config path invalid: {s}\n", .{@errorName(err)});
+        return err;
+    };
+    const cfg = loadConfig(std.heap.page_allocator, cfg_path) catch |err| {
+        std.debug.print("config load failed ({s}): {s}\n", .{ cfg_path, @errorName(err) });
         return err;
     };
     cfg.validate(&.{}) catch |err| {

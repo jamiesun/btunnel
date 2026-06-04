@@ -76,9 +76,13 @@ sudo install -m 0600 -o root -g root deploy/spoke-a.json /etc/btunnel/config.jso
 Validate before starting:
 
 ```bash
-sudo btunnel --check        # run from /etc/btunnel, or copy config.json to CWD
+sudo btunnel --check --config /etc/btunnel/config.json
 # btunnel v… (mtu=1400, udp_port=51820, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
+
+`--config` is optional; without it the daemon reads `./config.json` from its
+working directory (or `$BTUNNEL_CONFIG`). `btunnel --version` and `btunnel --help`
+work without a config; an unrecognized flag is rejected rather than ignored.
 
 ## 3. Host networking
 
@@ -195,8 +199,9 @@ sudo systemctl restart btunnel
 > `btunnel.service` after `time-sync.target` (`After=time-sync.target` +
 > `Wants=time-sync.target`) so the clock is monotonic across restarts. If a clock
 > did jump backward, restart **both** ends of the affected link to force a fresh
-> epoch on each side. A symmetric, clock-independent fix (epoch exchange) is
-> deferred to the v2 handshake.
+> epoch on each side. This is an accepted, permanent trade-off of the
+> stateless, handshake-free transport (iron law #8): there is no in-protocol
+> epoch exchange to repair it, so the fix is operational (keep the clock synced).
 
 ## 7. Firewall / NAT requirements
 

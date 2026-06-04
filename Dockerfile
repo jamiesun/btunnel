@@ -105,4 +105,11 @@ COPY --from=build /src/config.example.json /etc/btunnel/config.example.json
 WORKDIR /var/run
 WORKDIR /etc/btunnel
 
+# Liveness for orchestrators (docker/compose/k8s): `ptctl status` exits non-zero
+# when the control socket is absent or the daemon is unresponsive. Exec form +
+# absolute path so it works on both busybox:musl and the shell-less scratch base.
+# It honors BTUNNEL_SOCK from the container environment.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/usr/local/bin/ptctl", "status"]
+
 ENTRYPOINT ["/usr/local/bin/btunnel"]

@@ -112,6 +112,10 @@ docker run -d --name btunnel \
     ghcr.io/jamiesun/btunnel:latest
 ```
 
+The image ships a Docker `HEALTHCHECK` (`ptctl status`), so `docker ps` /
+Compose / Kubernetes report the daemon `healthy` once it is serving its control
+socket and `unhealthy` if it stops responding.
+
 The image is built `FROM busybox:musl` for amd64, arm64 and arm/v7: it carries the
 two static binaries plus `config.example.json` and a tiny BusyBox shell + core
 utilities for in-container debugging. The daemon itself is fully static and needs

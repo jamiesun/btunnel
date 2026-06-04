@@ -20,9 +20,10 @@ WorkingDirectory=/etc/btunnel
 RuntimeDirectory=btunnel
 Environment=BTUNNEL_SOCK=/run/btunnel/btunnel.sock
 
-# Fail fast on a bad config instead of crash-looping the data plane.
-ExecStartPre=/usr/local/bin/btunnel --check
-ExecStart=/usr/local/bin/btunnel
+# Fail fast on a bad config instead of crash-looping the data plane. The config
+# path is explicit (--config) so it does not silently depend on WorkingDirectory.
+ExecStartPre=/usr/local/bin/btunnel --check --config /etc/btunnel/config.json
+ExecStart=/usr/local/bin/btunnel --config /etc/btunnel/config.json
 
 # btunnel only PRINTS the host network plan (`--print-network-plan`); it never
 # mutates routes itself. The TUN device exists only while the daemon runs, so

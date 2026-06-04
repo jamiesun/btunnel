@@ -68,6 +68,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(ptctl);
+    ptctl.root_module.addOptions("build_options", build_options);
 
     // gen-vectors: emits the canonical wire-protocol KAT set as JSON. Used to
     // (re)generate the committed golden `tests/protocol-vectors.json`, which the
