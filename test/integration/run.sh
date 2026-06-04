@@ -145,9 +145,10 @@ ok "unit tests green"
 # be rejected by validate (DuplicatePsk) and defeat per-peer isolation.
 PSK_A="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PSK_B="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-E2E_NS=(bt_hub bt_a bt_b)
+E2E_NS=(bt_hub bt_a bt_b bt2_hub bt2_a bt2_b)
 declare -a E2E_PIDS=()
 E2E_TMP=""
+E2E_TMP2=""
 
 e2e_cleanup() {
   set +e
@@ -162,7 +163,13 @@ e2e_cleanup() {
   for ns in "${E2E_NS[@]}"; do
     ip netns del "$ns" >/dev/null 2>&1
   done
+  # Best-effort: reap any root-namespace veth ends left by a partial setup
+  # (a veth survives in the root ns if `ip link set ... netns` failed mid-way).
+  for link in veth_ha veth_ah veth_hb veth_bh veth2_ha veth2_ah veth2_hb veth2_bh; do
+    ip link del "$link" >/dev/null 2>&1
+  done
   [ -n "$E2E_TMP" ] && rm -rf "$E2E_TMP"
+  [ -n "$E2E_TMP2" ] && rm -rf "$E2E_TMP2"
 }
 
 # wait_until <timeout_s> <cmd...> : poll cmd at 10 Hz until it succeeds.
@@ -342,6 +349,94 @@ e2e_netns() {
   fi
 }
 e2e_netns
+
+# --- scenario 2: role-based config auto-derives the relay/local policy --------
+# Issue #21. SAME star topology, but each node ships ONLY a `role` + routes and
+# NO `ptctl policy add`: the daemon must derive the full forwarding table from
+# config at boot. We assert (a) the auto-policy is visible via `policy show` on
+# the hub and a spoke, and (b) end-to-end delivery works with zero runtime
+# policy injection. The deeper encryption/hot-update invariants are already
+# proven by scenario 1, so this stays focused on the derivation contract.
+e2e_netns_role() {
+  if [ "$(id -u)" -ne 0 ]; then return 0; fi   # scenario 1 already emitted the skip
+  for tool in ip ping; do command -v "$tool" >/dev/null 2>&1 || return 0; done
+  [ -c /dev/net/tun ] || return 0
+
+  log "role-config e2e (#21): same star, policy derived from config (no ptctl) ..."
+  # Scenario 1 owns the native rebuild, the EXIT trap, and $PTCTL. If it skipped
+  # (e.g. tcpdump missing) none of those exist, so don't run half-set-up.
+  [ -n "${PTCTL:-}" ] || { skip "role-config e2e (#21): scenario 1 setup did not run"; return 0; }
+  for ns in bt2_hub bt2_a bt2_b; do ip netns del "$ns" >/dev/null 2>&1 || true; done
+  E2E_TMP2=$(mktemp -d)
+  mkdir -p "$E2E_TMP2/hub" "$E2E_TMP2/a" "$E2E_TMP2/b"
+  for d in hub a b; do cp zig-out/bin/btunnel "$E2E_TMP2/$d/btunnel"; done
+
+  for ns in bt2_hub bt2_a bt2_b; do ip netns add "$ns"; done
+  ip link add veth2_ha type veth peer name veth2_ah
+  ip link set veth2_ha netns bt2_hub
+  ip link set veth2_ah netns bt2_a
+  ip link add veth2_hb type veth peer name veth2_bh
+  ip link set veth2_hb netns bt2_hub
+  ip link set veth2_bh netns bt2_b
+  ip netns exec bt2_hub ip addr add 10.100.1.1/24 dev veth2_ha
+  ip netns exec bt2_hub ip addr add 10.100.2.1/24 dev veth2_hb
+  ip netns exec bt2_a   ip addr add 10.100.1.2/24 dev veth2_ah
+  ip netns exec bt2_b   ip addr add 10.100.2.2/24 dev veth2_bh
+  ip netns exec bt2_hub ip link set veth2_ha up
+  ip netns exec bt2_hub ip link set veth2_hb up
+  ip netns exec bt2_a   ip link set veth2_ah up
+  ip netns exec bt2_b   ip link set veth2_bh up
+  for ns in bt2_hub bt2_a bt2_b; do ip netns exec "$ns" ip link set lo up; done
+
+  # role=hub: per-spoke allowed_src becomes a forward rule to that peer id.
+  cat > "$E2E_TMP2/hub/config.json" <<EOF
+{ "role": "hub", "virtual_subnet": "10.0.0.0/24", "local_id": 1, "peers":
+  [ {"id":2,"endpoint":"10.100.1.2:51820","allowed_src":"10.0.0.2/32","psk":"$PSK_A"},
+    {"id":3,"endpoint":"10.100.2.2:51820","allowed_src":"10.0.0.3/32","psk":"$PSK_B"} ] }
+EOF
+  # role=spoke: local_routes -> LOCAL, remote (virtual_subnet) -> the one hub.
+  cat > "$E2E_TMP2/a/config.json" <<EOF
+{ "role": "spoke", "virtual_subnet": "10.0.0.0/24", "local_id": 2,
+  "local_tun_ip": "10.0.0.2/24", "local_routes": ["10.0.0.2/32"], "peers":
+  [ {"id":1,"endpoint":"10.100.1.1:51820","allowed_src":"10.0.0.0/24","psk":"$PSK_A"} ] }
+EOF
+  cat > "$E2E_TMP2/b/config.json" <<EOF
+{ "role": "spoke", "virtual_subnet": "10.0.0.0/24", "local_id": 3,
+  "local_tun_ip": "10.0.0.3/24", "local_routes": ["10.0.0.3/32"], "peers":
+  [ {"id":1,"endpoint":"10.100.2.1:51820","allowed_src":"10.0.0.0/24","psk":"$PSK_B"} ] }
+EOF
+
+  local hub_sock="$E2E_TMP2/hub.sock" a_sock="$E2E_TMP2/a.sock" b_sock="$E2E_TMP2/b.sock"
+  start_daemon bt2_hub "$E2E_TMP2/hub" "$hub_sock"
+  start_daemon bt2_a   "$E2E_TMP2/a"   "$a_sock"
+  start_daemon bt2_b   "$E2E_TMP2/b"   "$b_sock"
+
+  wait_until 5 ip netns exec bt2_hub ip link show btun0 || die "role hub btun0 never appeared:\n$(cat "$E2E_TMP2/hub/daemon.log")"
+  wait_until 5 ip netns exec bt2_a   ip link show btun0 || die "role spoke-a btun0 never appeared:\n$(cat "$E2E_TMP2/a/daemon.log")"
+  wait_until 5 ip netns exec bt2_b   ip link show btun0 || die "role spoke-b btun0 never appeared:\n$(cat "$E2E_TMP2/b/daemon.log")"
+
+  ip netns exec bt2_hub ip link set btun0 mtu 1400 up
+  ip netns exec bt2_a   ip link set btun0 mtu 1400 up
+  ip netns exec bt2_b   ip link set btun0 mtu 1400 up
+  ip netns exec bt2_a   ip addr add 10.0.0.2/24 dev btun0
+  ip netns exec bt2_b   ip addr add 10.0.0.3/24 dev btun0
+
+  # --- assertion: the policy was DERIVED FROM CONFIG, not injected at runtime ---
+  wait_until 5 policy_has bt2_hub "$hub_sock" "10.0.0.3/32" || die "role hub did not auto-derive the spoke-B relay rule:\n$(ptctl_in bt2_hub "$hub_sock" policy show 2>&1)"
+  if policy_has bt2_hub "$hub_sock" "target 3" && policy_has bt2_a "$a_sock" "10.0.0.0/24"; then
+    ok "role-config (#21): hub auto-derived per-spoke relay rules, spoke auto-derived its hub route"
+  else
+    die "role auto-derivation incomplete\nhub:\n$(ptctl_in bt2_hub "$hub_sock" policy show 2>&1)\na:\n$(ptctl_in bt2_a "$a_sock" policy show 2>&1)"
+  fi
+
+  # --- assertion: delivery works end-to-end with NO ptctl policy injection ---
+  if ip netns exec bt2_a ping -c3 -W2 10.0.0.3 >/dev/null 2>&1; then
+    ok "role-config (#21): spoke-A -> Hub(relay) -> spoke-B with zero runtime policy commands"
+  else
+    die "role-config delivery failed\nhub:$(cat "$E2E_TMP2/hub/daemon.log")\na:$(cat "$E2E_TMP2/a/daemon.log")\nb:$(cat "$E2E_TMP2/b/daemon.log")"
+  fi
+}
+e2e_netns_role
 
 # --- summary ---------------------------------------------------------------
 printf '\n'

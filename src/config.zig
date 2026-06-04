@@ -16,14 +16,43 @@ pub const MTU_MAX: u16 = 1500;
 /// the registry stays zero-allocation (issue #5).
 pub const MAX_PEERS: usize = 16;
 
+/// Maximum number of local/remote route CIDRs a simplified (`role`) config can
+/// declare. Fixed so the config stays zero-allocation; the derived policy never
+/// exceeds MAX_PEERS + MAX_ROUTES*2 entries, well under MAX_POLICY_ENTRIES.
+pub const MAX_ROUTES: usize = 8;
+
 /// 32-byte pre-shared key (PSK).
 pub const Psk = [32]u8;
+
+/// Deployment role for the simplified config (issue #21). `manual` (the default)
+/// preserves the original low-level behavior: the policy tree starts empty and
+/// the operator installs rules at runtime via `ptctl`. `hub`/`spoke` make the
+/// daemon AUTO-DERIVE the initial policy from the peer/route declarations so no
+/// hand-written forwarding rules are needed. The peer registry, key derivation,
+/// and data plane are identical across roles — only the bootstrap policy differs.
+pub const Role = enum { manual, hub, spoke };
 
 pub const SanityError = error{
     MtuOutOfRange,
     SubnetOverlap,
     InvalidPsk,
     DuplicatePsk,
+    /// role=hub: a peer's `allowed_src` is the permissive 0.0.0.0/0, so it could
+    /// claim (and source-spoof) the whole address space. Each hub peer must own
+    /// a specific prefix.
+    HubPeerNeedsAllowedSrc,
+    /// role=hub: two peers' `allowed_src` prefixes overlap, so a packet's
+    /// destination (and a peer's spoof surface) is ambiguous between them.
+    HubAllowedSrcOverlap,
+    /// role=spoke: a spoke must point at exactly one hub peer.
+    SpokeNeedsOneHub,
+    /// role=spoke: the spoke declares no local delivery target (neither
+    /// `local_routes` nor `local_tun_ip`), so inbound tunnel traffic has nowhere
+    /// to land.
+    SpokeMissingLocal,
+    /// role=spoke: a `local_routes` entry is 0.0.0.0/0, which would tie the
+    /// default hub route and trap ALL traffic locally — almost always a mistake.
+    SpokeLocalRouteTooBroad,
 };
 
 /// CIDR string parse errors (canonical home; re-exported by `policy.zig`).
@@ -162,6 +191,20 @@ pub const Config = struct {
     peers: [MAX_PEERS]PeerSpec = undefined,
     peer_count: usize = 0,
 
+    /// Deployment role (issue #21). `manual` keeps the original behavior (empty
+    /// initial policy); `hub`/`spoke` auto-derive the bootstrap policy.
+    role: Role = .manual,
+    /// role=spoke: subnets this node delivers LOCALLY (to its own TUN/host). When
+    /// empty, `local_tun_ip` (as a /32) is used. Only the first
+    /// `local_route_count` are valid.
+    local_routes: [MAX_ROUTES]Cidr = undefined,
+    local_route_count: usize = 0,
+    /// role=spoke: subnets reachable THROUGH the hub. When empty, the spoke
+    /// routes `virtual_subnet` to the hub (the overlay default). Only the first
+    /// `remote_route_count` are valid.
+    remote_routes: [MAX_ROUTES]Cidr = undefined,
+    remote_route_count: usize = 0,
+
     /// Compile-time hardcoded fallback config (used when config.json is
     /// missing). Note: it has zero peers, which `validate()` deliberately
     /// rejects — the default config is intentionally NON-RUNNABLE until real
@@ -197,6 +240,45 @@ pub const Config = struct {
         for (host_subnets) |hs| {
             if (self.virtual_subnet.overlaps(hs)) return SanityError.SubnetOverlap;
         }
+
+        // Role-specific structural checks (issue #21). `manual` adds none.
+        switch (self.role) {
+            .manual => {},
+            .hub => {
+                // Each hub peer must own a SPECIFIC, NON-OVERLAPPING source
+                // prefix: it is reused as the relay destination AND the
+                // anti-spoof source binding, so overlap makes both ambiguous.
+                // Check every prefix first so a permissive 0.0.0.0/0 reports the
+                // specific "needs allowed_src" error rather than a generic overlap.
+                var hi: usize = 0;
+                while (hi < self.peer_count) : (hi += 1) {
+                    if (self.peers[hi].allowed_src.prefix == 0) {
+                        return SanityError.HubPeerNeedsAllowedSrc;
+                    }
+                }
+                hi = 0;
+                while (hi < self.peer_count) : (hi += 1) {
+                    var hj: usize = hi + 1;
+                    while (hj < self.peer_count) : (hj += 1) {
+                        if (self.peers[hi].allowed_src.overlaps(self.peers[hj].allowed_src)) {
+                            return SanityError.HubAllowedSrcOverlap;
+                        }
+                    }
+                }
+            },
+            .spoke => {
+                if (self.peer_count != 1) return SanityError.SpokeNeedsOneHub;
+                if (self.local_route_count == 0 and self.local_tun_ip == null) {
+                    return SanityError.SpokeMissingLocal;
+                }
+                var si: usize = 0;
+                while (si < self.local_route_count) : (si += 1) {
+                    if (self.local_routes[si].prefix == 0) {
+                        return SanityError.SpokeLocalRouteTooBroad;
+                    }
+                }
+            },
+        }
     }
 
     /// On-wire JSON schema. Defaults mirror `Config` so a partial document is
@@ -214,6 +296,9 @@ pub const Config = struct {
         local_tun_ip: []const u8 = "",
         local_id: u32 = 0,
         peers: []const WirePeer = &.{},
+        role: []const u8 = "manual",
+        local_routes: []const []const u8 = &.{},
+        remote_routes: []const []const u8 = &.{},
     };
 
     /// On-wire schema for a single mesh peer. `psk` is this link's private
@@ -269,6 +354,29 @@ pub const Config = struct {
             };
         }
         cfg.peer_count = w.peers.len;
+
+        // Simplified-config fields (issue #21). Parse-copy every route out by
+        // value so nothing borrows the parse arena.
+        cfg.role = if (std.mem.eql(u8, w.role, "manual"))
+            .manual
+        else if (std.mem.eql(u8, w.role, "hub"))
+            .hub
+        else if (std.mem.eql(u8, w.role, "spoke"))
+            .spoke
+        else
+            return error.InvalidRole;
+
+        if (w.local_routes.len > MAX_ROUTES) return error.TooManyRoutes;
+        for (w.local_routes, 0..) |r, i| {
+            cfg.local_routes[i] = parseCidr(r) catch return error.InvalidCidr;
+        }
+        cfg.local_route_count = w.local_routes.len;
+
+        if (w.remote_routes.len > MAX_ROUTES) return error.TooManyRoutes;
+        for (w.remote_routes, 0..) |r, i| {
+            cfg.remote_routes[i] = parseCidr(r) catch return error.InvalidCidr;
+        }
+        cfg.remote_route_count = w.remote_routes.len;
 
         return cfg;
     }
@@ -404,6 +512,77 @@ test "parseCidr" {
     try std.testing.expectEqual(@as(u6, 24), c.prefix);
     try std.testing.expectError(CidrError.MissingSlash, parseCidr("10.0.0.0"));
     try std.testing.expectError(CidrError.InvalidPrefix, parseCidr("10.0.0.0/33"));
+}
+
+test "validate: role=hub requires specific, non-overlapping peer allowed_src (issue #21)" {
+    var cfg = Config.default();
+    cfg.role = .hub;
+    cfg.peer_count = 2;
+    cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .allowed_src = .{ .network = 0x0A00_0002, .prefix = 32 }, .psk = [_]u8{0x5a} ** 32 };
+    cfg.peers[1] = .{ .id = 3, .endpoint = undefined, .allowed_src = .{ .network = 0x0A00_0003, .prefix = 32 }, .psk = [_]u8{0x6b} ** 32 };
+    try cfg.validate(&.{});
+
+    // A permissive 0.0.0.0/0 allowed_src is rejected for a hub peer.
+    cfg.peers[1].allowed_src = .{ .network = 0, .prefix = 0 };
+    try std.testing.expectError(SanityError.HubPeerNeedsAllowedSrc, cfg.validate(&.{}));
+
+    // Overlapping peer prefixes are rejected (10.0.0.0/24 contains 10.0.0.3/32).
+    cfg.peers[1].allowed_src = .{ .network = 0x0A00_0003, .prefix = 32 };
+    cfg.peers[0].allowed_src = .{ .network = 0x0A00_0000, .prefix = 24 };
+    try std.testing.expectError(SanityError.HubAllowedSrcOverlap, cfg.validate(&.{}));
+}
+
+test "validate: role=spoke needs exactly one hub and a local target (issue #21)" {
+    var cfg = Config.default();
+    cfg.role = .spoke;
+    cfg.peers[0] = .{ .id = 1, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
+
+    // Zero peers (no hub) is rejected.
+    cfg.peer_count = 0;
+    try std.testing.expectError(SanityError.InvalidPsk, cfg.validate(&.{})); // caught earlier by the PSK gate
+
+    // Two peers (ambiguous hub) is rejected.
+    cfg.peer_count = 2;
+    cfg.peers[1] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x6b} ** 32 };
+    try std.testing.expectError(SanityError.SpokeNeedsOneHub, cfg.validate(&.{}));
+
+    // One hub but no local target (no local_routes, no local_tun_ip) is rejected.
+    cfg.peer_count = 1;
+    try std.testing.expectError(SanityError.SpokeMissingLocal, cfg.validate(&.{}));
+
+    // local_tun_ip supplies the local target -> ok.
+    cfg.local_tun_ip = .{ .network = 0x0A00_0002, .prefix = 24 };
+    try cfg.validate(&.{});
+
+    // A 0.0.0.0/0 local route is rejected as too broad.
+    cfg.local_tun_ip = null;
+    cfg.local_route_count = 1;
+    cfg.local_routes[0] = .{ .network = 0, .prefix = 0 };
+    try std.testing.expectError(SanityError.SpokeLocalRouteTooBroad, cfg.validate(&.{}));
+}
+
+test "fromJson: parses role and route arrays (issue #21)" {
+    const a = std.testing.allocator;
+    const psk_hex = "0123456789abcdef" ** 4;
+
+    const spoke =
+        "{ \"role\": \"spoke\", \"local_id\": 2, \"local_tun_ip\": \"10.0.0.2/24\"," ++
+        " \"local_routes\": [\"10.0.0.2/32\"], \"remote_routes\": [\"192.168.31.0/24\"]," ++
+        " \"peers\": [ { \"id\": 1, \"endpoint\": \"10.100.1.1:51820\", \"allowed_src\": \"10.0.0.0/24\", \"psk\": \"" ++
+        psk_hex ++ "\" } ] }";
+    const cfg = try Config.fromJson(a, spoke);
+    try cfg.validate(&.{});
+    try std.testing.expectEqual(Role.spoke, cfg.role);
+    try std.testing.expectEqual(@as(usize, 1), cfg.local_route_count);
+    try std.testing.expectEqual(@as(u32, 0x0A00_0002), cfg.local_routes[0].network);
+    try std.testing.expectEqual(@as(usize, 1), cfg.remote_route_count);
+    try std.testing.expectEqual(@as(u32, 0xC0A8_1F00), cfg.remote_routes[0].network);
+
+    // An unknown role string is rejected.
+    try std.testing.expectError(error.InvalidRole, Config.fromJson(a, "{ \"role\": \"mesh\" }"));
+
+    // A malformed route CIDR is rejected.
+    try std.testing.expectError(error.InvalidCidr, Config.fromJson(a, "{ \"local_routes\": [\"10.0.0.0\"] }"));
 }
 
 test "parseEndpoint: address and port land in network byte order" {

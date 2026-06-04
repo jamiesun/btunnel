@@ -192,12 +192,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // reactor, so plain increments are race-free.
     var counters = bt.stats.Counters{};
 
-    // The policy tree starts empty; operators install rules at runtime via
-    // ptctl. The Control owns the double-buffered tree and publishes it here.
+    // The policy tree's bootstrap depends on `role` (issue #21): `manual` starts
+    // empty (operators install rules via ptctl), `hub`/`spoke` auto-derive the
+    // initial forwarding/delivery rules from the config. Derived AFTER the peer
+    // registry so every target id is known-valid. The buffer must outlive the
+    // bindInPlace call (which copies it into the Control's double buffer).
+    var initial_buf: [bt.config.MAX_PEERS + bt.config.MAX_ROUTES * 2]bt.policy.PolicyEntry = undefined;
+    const initial_policy = bt.policy.deriveInitialPolicy(cfg, &initial_buf) catch |err| {
+        std.debug.print("initial policy derivation failed: {s}\n", .{@errorName(err)});
+        return err;
+    };
     var empty = bt.policy.PolicyTree{ .entries = &.{} };
     var active = bt.policy.ActiveTree.init(&empty);
     var control: bt.uds.Control = undefined;
-    control.bindInPlace(sock_path, save_path, &active, &.{}) catch |err| {
+    control.bindInPlace(sock_path, save_path, &active, initial_policy) catch |err| {
         std.debug.print("control socket bind failed ({s}) at {s}\n", .{ @errorName(err), sock_path });
         return err;
     };

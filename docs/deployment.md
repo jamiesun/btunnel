@@ -123,6 +123,13 @@ journalctl -u btunnel -f
 
 ## 5. Install the relay policy (Hub)
 
+> **Shortcut (recommended):** the example configs in [`../deploy/`](../deploy/)
+> set `"role": "hub"` / `"role": "spoke"`, so the daemon **derives this entire
+> policy from config at boot** — you can skip this whole section. See
+> [README → Roles](../README.md#roles-auto-derive-the-policy-from-config-role).
+> The manual steps below apply to `"role": "manual"` configs, or when you want to
+> layer extra rules on top of a derived table.
+
 The Hub starts with an empty policy tree; install the relay/delivery rules at
 runtime over the local control socket (hot-swapped, no restart). Set
 `BTUNNEL_SOCK` to match the unit (`/run/btunnel/btunnel.sock`):

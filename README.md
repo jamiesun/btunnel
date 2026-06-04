@@ -197,6 +197,51 @@ cp config.example.json config.json
 
 See [`config.example.json`](config.example.json) for a config example.
 
+### Roles: auto-derive the policy from config (`role`)
+
+Issue #21. Instead of hand-injecting `ptctl policy add` rules, set a `role` and
+let the daemon derive the forwarding table at boot. Two roles cover the common
+hub-and-spoke deployment; `role` defaults to `"manual"` (no derivation — inject
+rules yourself, exactly as before, so existing configs are unchanged).
+
+A home/office **spoke** that exposes its own overlay IP and routes everything
+else through the relay needs only:
+
+```json
+{
+  "role": "spoke",
+  "virtual_subnet": "10.0.0.0/24",
+  "local_id": 2,
+  "local_tun_ip": "10.0.0.2/24",
+  "local_routes": ["10.0.0.2/32"],
+  "peers": [
+    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
+  ]
+}
+```
+
+This derives `10.0.0.2/32 → LOCAL` and `10.0.0.0/24 → hub(id 1)` automatically —
+no `ptctl` calls. The matching **hub** just lists its spokes; each peer's
+`allowed_src` becomes a forward rule to that peer:
+
+```json
+{
+  "role": "hub",
+  "virtual_subnet": "10.0.0.0/24",
+  "local_id": 1,
+  "peers": [
+    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" },
+    { "id": 3, "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32", "psk": "…64 hex…" }
+  ]
+}
+```
+
+Validation is strict (`btunnel --check` enforces it): a `hub` rejects a peer
+with a missing or overlapping `allowed_src`; a `spoke` requires exactly one hub
+peer, at least one local target, and no `0.0.0.0/0` local route. Ready-to-edit
+examples live in [`deploy/`](deploy/). You can still add extra `ptctl policy`
+rules on top of a derived table at runtime.
+
 ### Host network setup (`--print-network-plan`)
 
 btunnel creates the TUN device but does **not** configure host addressing,
