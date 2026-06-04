@@ -89,11 +89,14 @@ docker run -d --name btunnel \
     ghcr.io/jamiesun/btunnel:latest
 ```
 
-镜像基于 `busybox:uclibc` 构建，包含两个静态二进制、`config.example.json`，
-以及一个极小的 BusyBox shell 和核心工具，方便在容器内排障；守护进程本身
-完全静态、不依赖基础镜像。构建阶段使用锁定到 `$BUILDPLATFORM` 的 Zig
-交叉编译，因此无需 QEMU 模拟。运行时镜像见 [`Dockerfile`](Dockerfile)，
-开发/测试工具链见 [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)。
+amd64、arm64 与 arm/v7 镜像基于 `busybox:musl` 构建，包含两个静态二进制、
+`config.example.json`，以及一个极小的 BusyBox shell 和核心工具，方便在容器内
+排障；守护进程本身完全静态、不依赖基础镜像。由于没有任何 musl 版 BusyBox 发布
+`linux/arm/v5`，arm/v5 镜像单独基于 `scratch` 独立构建（仍为静态 musl，但不带
+调试 shell），并合并进同一个 `:latest`/`:version` manifest。构建阶段使用锁定到
+`$BUILDPLATFORM` 的 Zig 交叉编译，因此无需 QEMU 模拟。运行时镜像见
+[`Dockerfile`](Dockerfile)，开发/测试工具链见
+[`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)。
 
 ### 离线 / 内网隔离安装
 
