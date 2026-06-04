@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BTunnel — Project Infographic</title>
+  <style>
+    :root {
+      --bg: #05080d;
+      --panel: rgba(9, 19, 30, 0.78);
+      --line: rgba(96, 244, 255, 0.42);
+      --cyan: #4df4ff;
+      --blue: #4b8dff;
+      --green: #80ff9f;
+      --pink: #ff4fd8;
+      --text: #e9fbff;
+      --muted: #8ca2b3;
+      --amber: #ffd166;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      height: 100vh;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background:
+        linear-gradient(90deg, rgba(77, 244, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(77, 244, 255, 0.05) 1px, transparent 1px),
+        radial-gradient(circle at 50% 48%, rgba(75, 141, 255, 0.18), transparent 42%),
+        var(--bg);
+      background-size: 44px 44px, 44px 44px, auto, auto;
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+
+    .poster {
+      width: 1600px;
+      height: 900px;
+      flex: 0 0 auto;
+      transform: scale(var(--scale, 1));
+      transform-origin: center center;
+      position: relative;
+      overflow: hidden;
+      padding: 48px 58px 42px;
+      background:
+        linear-gradient(145deg, rgba(8, 11, 18, 0.98), rgba(6, 15, 22, 0.96)),
+        var(--bg);
+      border: 1px solid rgba(77, 244, 255, 0.18);
+      box-shadow: 0 0 90px rgba(77, 244, 255, 0.12);
+    }
+
+    .poster::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, transparent, rgba(77,244,255,.06), transparent),
+        repeating-linear-gradient(0deg, rgba(255,255,255,.035) 0, rgba(255,255,255,.035) 1px, transparent 1px, transparent 7px);
+      opacity: .38;
+      pointer-events: none;
+      mix-blend-mode: screen;
+    }
+
+    .hud-corner {
+      position: absolute;
+      width: 100px;
+      height: 100px;
+      border-color: var(--cyan);
+      opacity: .65;
+    }
+
+    .tl { top: 24px; left: 24px; border-top: 2px solid; border-left: 2px solid; }
+    .tr { top: 24px; right: 24px; border-top: 2px solid; border-right: 2px solid; }
+    .bl { bottom: 24px; left: 24px; border-bottom: 2px solid; border-left: 2px solid; }
+    .br { bottom: 24px; right: 24px; border-bottom: 2px solid; border-right: 2px solid; }
+
+    header {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 36px;
+    }
+
+    .kicker {
+      color: var(--cyan);
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 78px;
+      line-height: .92;
+      letter-spacing: 0;
+      font-weight: 850;
+      text-shadow: 0 0 22px rgba(77, 244, 255, 0.45);
+    }
+
+    .subtitle {
+      margin: 18px 0 0;
+      width: 700px;
+      color: #c9e8f0;
+      font-size: 26px;
+      line-height: 1.36;
+      font-weight: 500;
+    }
+
+    .badge {
+      min-width: 250px;
+      padding: 18px 22px;
+      border: 1px solid rgba(128, 255, 159, .44);
+      background: linear-gradient(135deg, rgba(128,255,159,.12), rgba(77,244,255,.05));
+      clip-path: polygon(0 0, calc(100% - 22px) 0, 100% 22px, 100% 100%, 22px 100%, 0 calc(100% - 22px));
+    }
+
+    .badge strong {
+      display: block;
+      color: var(--green);
+      font-size: 34px;
+      line-height: 1;
+      margin-bottom: 8px;
+    }
+
+    .badge span {
+      color: var(--muted);
+      font-size: 17px;
+      line-height: 1.38;
+    }
+
+    .stage {
+      position: relative;
+      z-index: 1;
+      height: 358px;
+      margin-top: 18px;
+    }
+
+    .beam {
+      position: absolute;
+      left: 148px;
+      right: 148px;
+      top: 191px;
+      height: 20px;
+      background: linear-gradient(90deg, rgba(77,244,255,.05), rgba(77,244,255,.9), rgba(255,79,216,.9), rgba(128,255,159,.88), rgba(77,244,255,.08));
+      box-shadow: 0 0 34px rgba(77,244,255,.58), 0 0 80px rgba(255,79,216,.2);
+      clip-path: polygon(0 40%, 94% 40%, 94% 0, 100% 50%, 94% 100%, 94% 60%, 0 60%);
+    }
+
+    .node {
+      position: absolute;
+      width: 234px;
+      height: 164px;
+      padding: 18px 20px 16px;
+      background: linear-gradient(145deg, rgba(11, 27, 42, .94), rgba(6, 12, 20, .88));
+      border: 1px solid rgba(77, 244, 255, .35);
+      box-shadow: inset 0 0 28px rgba(77,244,255,.07), 0 0 28px rgba(77,244,255,.12);
+      clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 16px), calc(100% - 16px) 100%, 0 100%, 0 12px);
+    }
+
+    .node .label {
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    .node h2 {
+      margin: 6px 0 7px;
+      font-size: 30px;
+      line-height: 1.04;
+      letter-spacing: 0;
+    }
+
+    .node p {
+      margin: 0;
+      color: #bad4dd;
+      font-size: 16px;
+      line-height: 1.3;
+    }
+
+    .n1 { left: 40px; top: 128px; }
+    .n2 { left: 382px; top: 46px; height: 182px; border-color: rgba(255, 79, 216, .42); }
+    .n3 {
+      left: 684px;
+      top: 112px;
+      width: 250px;
+      height: 172px;
+      padding-right: 76px;
+      border-color: rgba(128, 255, 159, .52);
+      box-shadow: inset 0 0 28px rgba(128,255,159,.08), 0 0 34px rgba(128,255,159,.16);
+    }
+    .n4 { right: 382px; top: 46px; height: 182px; border-color: rgba(75, 141, 255, .5); }
+    .n5 { right: 40px; top: 128px; }
+
+    .orbit {
+      position: absolute;
+      left: 610px;
+      top: 34px;
+      width: 398px;
+      height: 310px;
+      border: 1px solid rgba(77,244,255,.2);
+      border-radius: 50%;
+      transform: rotate(-8deg);
+      box-shadow: 0 0 40px rgba(77,244,255,.08);
+    }
+
+    .hub-title {
+      position: absolute;
+      left: 674px;
+      top: 18px;
+      color: var(--green);
+      font-size: 18px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .packets {
+      position: absolute;
+      left: 292px;
+      right: 292px;
+      top: 200px;
+      height: 42px;
+    }
+
+    .packet {
+      position: absolute;
+      top: 0;
+      width: 16px;
+      height: 16px;
+      background: var(--cyan);
+      box-shadow: 0 0 16px var(--cyan);
+      transform: rotate(45deg);
+    }
+
+    .p1 { left: 4%; }
+    .p2 { left: 26%; background: var(--pink); box-shadow: 0 0 16px var(--pink); }
+    .p3 { left: 51%; background: var(--green); box-shadow: 0 0 16px var(--green); }
+    .p4 { left: 78%; background: var(--blue); box-shadow: 0 0 16px var(--blue); }
+
+    .support {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+      margin-top: 8px;
+    }
+
+    .support-item {
+      min-height: 132px;
+      padding: 18px 18px 16px;
+      background: rgba(8, 18, 28, .62);
+      border-top: 1px solid rgba(77,244,255,.28);
+      border-left: 1px solid rgba(77,244,255,.12);
+      position: relative;
+    }
+
+    .support-item::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 42px;
+      height: 2px;
+      background: var(--cyan);
+      box-shadow: 0 0 16px var(--cyan);
+    }
+
+    .metric {
+      font-size: 38px;
+      line-height: 1;
+      font-weight: 850;
+      color: var(--cyan);
+      margin-bottom: 10px;
+    }
+
+    .support-item:nth-child(2) .metric { color: var(--pink); }
+    .support-item:nth-child(3) .metric { color: var(--green); }
+    .support-item:nth-child(4) .metric { color: var(--amber); }
+
+    .support-item h3 {
+      margin: 0 0 8px;
+      font-size: 21px;
+      line-height: 1.15;
+    }
+
+    .support-item p {
+      margin: 0;
+      color: #a9c1cc;
+      font-size: 15px;
+      line-height: 1.34;
+    }
+
+    .footer {
+      position: absolute;
+      left: 58px;
+      right: 58px;
+      bottom: 20px;
+      z-index: 1;
+      display: flex;
+      justify-content: space-between;
+      gap: 28px;
+      color: #708796;
+      font-size: 13px;
+      line-height: 1.4;
+      border-top: 1px solid rgba(77,244,255,.12);
+      padding-top: 12px;
+    }
+
+    .footer b { color: #a7f9ff; font-weight: 700; }
+
+    @media (max-width: 900px) {
+      body { align-items: center; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <main class="poster" role="img" aria-label="BTunnel project infographic: the core logic of a pure-Zig, zero-dependency Layer-3 UDP tunnel">
+    <div class="hud-corner tl"></div>
+    <div class="hud-corner tr"></div>
+    <div class="hud-corner bl"></div>
+    <div class="hud-corner br"></div>
+
+    <header>
+      <div>
+        <div class="kicker">Layer-3 UDP Tunnel / Pure Zig / Static Binary</div>
+        <h1>BTunnel</h1>
+        <p class="subtitle">Wrap raw Layer-3 IP packets into a private UDP tunnel — a tiny static single binary that builds a hub-and-spoke virtual subnet across Linux hosts and lightweight containers.</p>
+      </div>
+      <div class="badge">
+        <strong>&lt; 512KB</strong>
+        <span>Zero third-party dependencies, fully static musl build; released for amd64, arm64, armv7 and armv5.</span>
+      </div>
+    </header>
+
+    <section class="stage" aria-label="Core data path">
+      <div class="orbit"></div>
+      <div class="hub-title">Single Hub Relay Core</div>
+      <div class="beam"></div>
+      <div class="packets">
+        <span class="packet p1"></span>
+        <span class="packet p2"></span>
+        <span class="packet p3"></span>
+        <span class="packet p4"></span>
+      </div>
+
+      <article class="node n1">
+        <div class="label">01 / Ingress</div>
+        <h2>TUN Ingress</h2>
+        <p>Read raw IPv4 packets from the virtual L3 device.</p>
+      </article>
+
+      <article class="node n2">
+        <div class="label">02 / Shield</div>
+        <h2>Encrypt &amp; Seal</h2>
+        <p>ChaCha20-Poly1305 over a 20B private header; silent drop on failure.</p>
+      </article>
+
+      <article class="node n3">
+        <div class="label">03 / Hub</div>
+        <h2>Star Relay</h2>
+        <p>Hub relays by policy to each spoke; never back to its source.</p>
+      </article>
+
+      <article class="node n4">
+        <div class="label">04 / Policy</div>
+        <h2>Policy Routing</h2>
+        <p>Longest-prefix CIDR match, hot-swapped via RCU — no restart.</p>
+      </article>
+
+      <article class="node n5">
+        <div class="label">05 / Egress</div>
+        <h2>Spoke Egress</h2>
+        <p>Verify epoch, nonce, anti-replay and inner source, then deliver.</p>
+      </article>
+    </section>
+
+    <section class="support" aria-label="Key foundations">
+      <article class="support-item">
+        <div class="metric">0</div>
+        <h3>Data-plane allocations</h3>
+        <p>Reactor and crypto paths lock buffers after startup — low jitter, steady memory.</p>
+      </article>
+      <article class="support-item">
+        <div class="metric">1</div>
+        <h3>Single-threaded epoll reactor</h3>
+        <p>Edge-triggered loop: lock-free, no data races — ideal for small devices.</p>
+      </article>
+      <article class="support-item">
+        <div class="metric">64B</div>
+        <h3>Fixed per-packet wire overhead</h3>
+        <p>20B header + 16B AEAD tag + 28B outer IPv4/UDP — sizes a safe MTU.</p>
+      </article>
+      <article class="support-item">
+        <div class="metric">PSK</div>
+        <h3>Per-link independent key</h3>
+        <p>One PSK per peer link; directional keys, epoch and nonce prevent reuse.</p>
+      </article>
+    </section>
+
+    <div class="footer">
+      <span><b>Bottom line:</b> BTunnel trades a tiny static artifact, a tightly constrained protocol and star-topology policy forwarding for deployability, stealth and a verifiable data plane.</span>
+      <span>Sources: jamiesun/btunnel README, README.zh-CN, PROTOCOL.md. Generated: 2026-06-04.</span>
+    </div>
+  </main>
+  <script>
+    // The poster is a fixed 1600x900 canvas; scale it to fit the viewport so the
+    // whole infographic is visible on one screen at any window size.
+    (function () {
+      var poster = document.querySelector('.poster');
+      function fit() {
+        var s = Math.min(window.innerWidth / 1600, window.innerHeight / 900) * 0.98;
+        poster.style.setProperty('--scale', s);
+      }
+      window.addEventListener('resize', fit);
+      fit();
+    })();
+  </script>
+</body>
+</html>
