@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.16.0"
+  # Pinned upstream SHA256 (x86_64-linux), see https://ziglang.org/download/index.json
+  ZIG_SHA256_X86_64: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+
+jobs:
+  unit-test:
+    name: Unit tests (zig build test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: zig build test
+        run: zig build test --summary all
+
+  cross-build:
+    name: Cross-build ${{ matrix.arch }} (static + size budget)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-linux-musl
+            cpu: ""
+          - arch: arm64
+            target: aarch64-linux-musl
+            cpu: ""
+          - arch: armv7
+            target: arm-linux-musleabihf
+            cpu: "generic+v7a"
+          - arch: armv5
+            target: arm-linux-musleabi
+            cpu: "arm926ej_s"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Build + assert static and <=512KB
+        run: |
+          set -euo pipefail
+          size_budget=524288
+          cpu_arg=""
+          if [ -n "${{ matrix.cpu }}" ]; then cpu_arg="-Dcpu=${{ matrix.cpu }}"; fi
+          zig build -Dtarget="${{ matrix.target }}" $cpu_arg -Doptimize=ReleaseSmall
+          for bin in btunnel ptctl; do
+            path="zig-out/bin/${bin}"
+            if readelf -d "$path" 2>/dev/null | grep -q NEEDED; then
+              echo "ERROR: ${path} is dynamically linked" >&2; exit 1
+            fi
+            size=$(stat -c%s "$path")
+            echo "${bin} (${{ matrix.arch }}): ${size} bytes"
+            if [ "$size" -gt "$size_budget" ]; then
+              echo "ERROR: ${path} ${size} bytes exceeds ${size_budget}" >&2; exit 1
+            fi
+          done
+  integration:
+    name: Integration + e2e (static binary, size budget, netns relay)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      # The harness builds both arch targets, asserts static + <=512KB, then runs
+      # the privileged multi-point + relay netns e2e (needs root + /dev/net/tun,
+      # both available on GitHub-hosted ubuntu runners). It SKIPs (not fails) any
+      # piece whose prerequisite is missing.
+      - name: Load tun module
+        run: sudo modprobe tun
+
+      - name: Run integration harness
+        run: sudo --preserve-env=PATH env "PATH=$PATH" bash test/integration/run.sh

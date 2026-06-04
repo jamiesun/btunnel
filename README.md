@@ -65,8 +65,10 @@ Requires **Zig 0.16.0** or later.
 zig build
 
 # Static cross-compile
-zig build -Dtarget=x86_64-linux-musl
-zig build -Dtarget=aarch64-linux-musl
+zig build -Dtarget=x86_64-linux-musl     # amd64
+zig build -Dtarget=aarch64-linux-musl    # arm64
+zig build -Dtarget=arm-linux-musleabihf  # armv7 (hard float)
+zig build -Dtarget=arm-linux-musleabi    # armv5 (soft float)
 
 # Run tests
 zig build test
@@ -76,6 +78,39 @@ zig build run
 ```
 
 Artifacts are placed in `zig-out/bin/`: `btunnel` (daemon) and `ptctl` (control tool).
+
+> **ARMv5 note:** ARMv5 has no hardware atomics (no `LDREX`/`STREX`), so the
+> standard library's threaded I/O scaffolding references legacy `__sync_*`
+> intrinsics that musl does not provide. Because BTunnel is strictly
+> single-threaded (iron law #3), [`src/atomic_shim.zig`](src/atomic_shim.zig)
+> supplies a provably-correct plain (non-atomic) implementation of those
+> builtins. The shim is gated at comptime and only compiled in for pre-ARMv6
+> targets — every other architecture is byte-for-byte unaffected.
+
+## 📦 Container images & releases
+
+Tagged releases (`vX.Y.Z`) are produced by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) and ship **both**
+static binary tarballs **and** a multi-arch container image, each covering four
+architectures: `amd64`, `arm64`, `armv7`, and `armv5`.
+
+```bash
+# Pull the multi-arch image (Docker selects the right arch automatically)
+docker pull ghcr.io/jamiesun/btunnel:latest
+
+# Run the daemon: it needs NET_ADMIN + the TUN device, and a config.json
+# mounted into its working directory (/etc/btunnel).
+docker run -d --name btunnel \
+    --cap-add=NET_ADMIN --device=/dev/net/tun \
+    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
+    ghcr.io/jamiesun/btunnel:latest
+```
+
+The image is built `FROM scratch` and contains only the two static binaries plus
+`config.example.json` — no shell, no libc, no package manager. The build stage
+cross-compiles with Zig pinned to `$BUILDPLATFORM`, so no QEMU emulation is
+needed. See [`Dockerfile`](Dockerfile) for the runtime image and
+[`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) for the dev/test toolchain.
 
 ## 🧪 Local integration testing (dev container)
 

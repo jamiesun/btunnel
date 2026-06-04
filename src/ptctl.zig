@@ -9,6 +9,16 @@ const std = @import("std");
 const bt = @import("btunnel");
 const linux = std.os.linux;
 
+// See main.zig: pre-ARMv6 atomics shim for the single-threaded build.
+const builtin = @import("builtin");
+comptime {
+    if (builtin.cpu.arch == .arm and
+        !std.Target.arm.featureSetHas(builtin.cpu.features, .has_v6))
+    {
+        _ = @import("atomic_shim.zig");
+    }
+}
+
 const REQUEST_TIMEOUT_MS: i32 = 2000;
 
 fn writeStdout(bytes: []const u8) void {

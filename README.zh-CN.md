@@ -50,8 +50,10 @@ docs/
 zig build
 
 # 静态交叉编译
-zig build -Dtarget=x86_64-linux-musl
-zig build -Dtarget=aarch64-linux-musl
+zig build -Dtarget=x86_64-linux-musl     # amd64
+zig build -Dtarget=aarch64-linux-musl    # arm64
+zig build -Dtarget=arm-linux-musleabihf  # armv7（硬浮点）
+zig build -Dtarget=arm-linux-musleabi    # armv5（软浮点）
 
 # 运行测试
 zig build test
@@ -61,6 +63,36 @@ zig build run
 ```
 
 产物位于 `zig-out/bin/`：`btunnel`（守护进程）与 `ptctl`（控制工具）。
+
+> **ARMv5 说明：** ARMv5 没有硬件原子指令（无 `LDREX`/`STREX`），标准库的线程化
+> I/O 脚手架会引用 musl 未提供的旧式 `__sync_*` 内建函数。由于 BTunnel 严格
+> 单线程（铁律 #3），[`src/atomic_shim.zig`](src/atomic_shim.zig) 提供了这些内建
+> 函数的可证明正确的普通（非原子）实现。该 shim 在 comptime 门控，仅对 ARMv6
+> 之前的目标编译进去——其它所有架构都逐字节不受影响。
+
+## 📦 容器镜像与发布
+
+打标签的发布（`vX.Y.Z`）由
+[`.github/workflows/release.yml`](.github/workflows/release.yml) 产出，**同时**提供
+静态二进制 tar 包**和**多架构容器镜像，二者均覆盖四种架构：`amd64`、`arm64`、
+`armv7`、`armv5`。
+
+```bash
+# 拉取多架构镜像（Docker 自动选择对应架构）
+docker pull ghcr.io/jamiesun/btunnel:latest
+
+# 运行守护进程：需要 NET_ADMIN + TUN 设备，并把 config.json 挂载到
+# 其工作目录（/etc/btunnel）。
+docker run -d --name btunnel \
+    --cap-add=NET_ADMIN --device=/dev/net/tun \
+    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
+    ghcr.io/jamiesun/btunnel:latest
+```
+
+镜像基于 `FROM scratch` 构建，只包含两个静态二进制和 `config.example.json`——
+没有 shell、没有 libc、没有包管理器。构建阶段使用锁定到 `$BUILDPLATFORM` 的
+Zig 交叉编译，因此无需 QEMU 模拟。运行时镜像见 [`Dockerfile`](Dockerfile)，
+开发/测试工具链见 [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)。
 
 ## 🧪 本地集成测试（开发容器）
 
