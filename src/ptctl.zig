@@ -8,6 +8,7 @@
 const std = @import("std");
 const bt = @import("btunnel");
 const linux = std.os.linux;
+const build_options = @import("build_options");
 
 // See main.zig: pre-ARMv6 atomics shim for the single-threaded build.
 const builtin = @import("builtin");
@@ -34,6 +35,36 @@ fn writeStdout(bytes: []const u8) void {
 pub fn main(init: std.process.Init.Minimal) !void {
     var buf: [512]u8 = undefined;
     var len: usize = 0;
+
+    // Version/help short-circuit before building a control command (these need no
+    // running daemon).
+    {
+        var pre = std.process.Args.Iterator.init(init.args);
+        _ = pre.skip();
+        while (pre.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
+                std.debug.print("ptctl v{s}\n", .{build_options.version});
+                return;
+            }
+            if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+                std.debug.print(
+                    \\ptctl — btunnel control client
+                    \\
+                    \\Usage:
+                    \\  ptctl status                     Show daemon status (health, peers, counters).
+                    \\  ptctl policy show                Print the active policy tree.
+                    \\  ptctl policy add --src X --dst Y --action forward --target Z
+                    \\  ptctl save                       Snapshot the active policy to disk.
+                    \\  ptctl --version | --help
+                    \\
+                    \\Environment:
+                    \\  BTUNNEL_SOCK  Control socket path (default /var/run/btunnel.sock).
+                    \\
+                , .{});
+                return;
+            }
+        }
+    }
 
     var it = std.process.Args.Iterator.init(init.args);
     _ = it.skip(); // skip argv[0]

@@ -89,6 +89,10 @@ docker run -d --name btunnel \
     ghcr.io/jamiesun/btunnel:latest
 ```
 
+镜像内置 Docker `HEALTHCHECK`（`ptctl status`），因此 `docker ps`／Compose／
+Kubernetes 会在守护进程开始对外提供控制套接字后标记为 `healthy`，停止响应时标记为
+`unhealthy`。
+
 amd64、arm64 与 arm/v7 镜像基于 `busybox:musl` 构建，包含两个静态二进制、
 `config.example.json`，以及一个极小的 BusyBox shell 和核心工具，方便在容器内
 排障；守护进程本身完全静态、不依赖基础镜像。由于没有任何 musl 版 BusyBox 发布
