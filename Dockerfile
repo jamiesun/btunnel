@@ -2,16 +2,20 @@
 #
 # This is the SHIPPING image, distinct from .devcontainer/Dockerfile (which is a
 # fat dev/test box). The product contract is unchanged: a single static musl
-# binary with zero third-party dependencies. The final stage is a minimal
-# `busybox:uclibc` base, so the image carries our two static binaries plus a
-# tiny BusyBox shell + core utilities for in-container debugging (the daemon
-# itself still needs nothing from the base — it is fully static). The uclibc
-# variant is chosen because it is the busybox tag that publishes ALL four
-# architectures we ship, including arm/v5 (the musl tag omits arm/v5).
+# binary with zero third-party dependencies. The final stage layers our two
+# binaries onto $RUNTIME_BASE (default `busybox:musl`), which adds a tiny shell +
+# core utilities for in-container debugging. The daemon itself needs nothing from
+# the base — it is fully static.
+#
+# musl is mandatory. busybox:musl publishes amd64, arm64 and arm/v7 but NOT
+# arm/v5, so arm/v5 is built INDEPENDENTLY with RUNTIME_BASE=scratch (a musl-pure
+# image with no shell) and stitched into the same manifest by release.yml. Do not
+# point RUNTIME_BASE at a glibc/uclibc busybox just to get an arm/v5 shell — that
+# would break the "static musl, no third-party libc" contract.
 #
 # Multi-arch is produced WITHOUT qemu: the build stage is pinned to the native
 # BUILDPLATFORM and Zig cross-compiles to the requested TARGETARCH. The final
-# stage only copies files onto the matching-arch BusyBox layer, so it needs no
+# stage only copies files onto the matching-arch base layer, so it needs no
 # emulation either.
 #
 # Runtime requirements (the binary is an L3 tunnel daemon):
@@ -19,6 +23,10 @@
 #     --cap-add=NET_ADMIN --device=/dev/net/tun \
 #     -v "$PWD/config.json:/etc/btunnel/config.json:ro" \
 #     ghcr.io/jamiesun/btunnel:latest
+
+# Runtime base for the final stage. Overridable so arm/v5 (which busybox:musl
+# does not publish) can build independently with RUNTIME_BASE=scratch.
+ARG RUNTIME_BASE=busybox:1.37.0-musl
 
 # --- build stage: cross-compile the static binaries with Zig -----------------
 FROM --platform=$BUILDPLATFORM debian:stable-slim AS build
@@ -80,22 +88,20 @@ RUN set -eux; \
     esac; \
     zig build -Dtarget="${ZIG_TARGET}" ${ZIG_CPU} -Doptimize=ReleaseSmall
 
-# --- final stage: minimal BusyBox base + the static binaries -----------------
-# BusyBox (uclibc variant) is a few MB and is the busybox tag that ships every
-# arch we target (amd64, arm64, arm/v7, arm/v5), giving the image a shell + core
-# utilities for debugging while the daemon stays fully static and
-# dependency-free. NOTE: do not switch this to busybox:*-musl — that tag does
-# not publish a linux/arm/v5 image and would break the arm/v5 release build.
-FROM busybox:1.37.0-uclibc
+# --- final stage: runtime base + the static binaries -------------------------
+# $RUNTIME_BASE defaults to busybox:1.37.0-musl (shell + core utils on
+# amd64/arm64/arm/v7); release.yml overrides it to `scratch` for the independent
+# arm/v5 build. Either base is tiny and the daemon stays fully static.
+FROM ${RUNTIME_BASE}
 
 COPY --from=build /src/zig-out/bin/btunnel /usr/local/bin/btunnel
 COPY --from=build /src/zig-out/bin/ptctl /usr/local/bin/ptctl
 COPY --from=build /src/config.example.json /etc/btunnel/config.example.json
 
 # The daemon reads ./config.json from its working directory; mount the real
-# config at /etc/btunnel/config.json. The busybox:uclibc base is a minimal tree
-# that ships no /var/run, so create it (via WORKDIR) for the default control
-# socket /var/run/btunnel.sock, then settle the working dir at /etc/btunnel.
+# config at /etc/btunnel/config.json. Neither busybox:musl nor scratch ships a
+# /var/run, so create it (via WORKDIR) for the default control socket
+# /var/run/btunnel.sock, then settle the working dir at /etc/btunnel.
 WORKDIR /var/run
 WORKDIR /etc/btunnel
 

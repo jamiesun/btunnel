@@ -195,20 +195,58 @@ jobs:
       - name: Log in to GHCR
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build and push (amd64, arm64, arm/v7, arm/v5)
+      # busybox:musl publishes amd64, arm64 and arm/v7 — push those three as one
+      # manifest list to an intermediate tag. arm/v5 is built separately below
+      # (busybox:musl has no arm/v5), then both are stitched into :version/:latest.
+      - name: Build and push busybox/musl image (amd64, arm64, arm/v7)
         run: |
           set -euo pipefail
           image="${{ steps.img.outputs.image }}"
           version="${{ steps.img.outputs.version }}"
           docker buildx build \
-            --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v5 \
-            --tag "${image}:${version}" \
-            --tag "${image}:latest" \
+            --platform linux/amd64,linux/arm64,linux/arm/v7 \
+            --provenance=false \
+            --tag "${image}:${version}-musl3" \
             --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
             --label "org.opencontainers.image.revision=${{ github.sha }}" \
             --label "org.opencontainers.image.version=${version}" \
             --push \
             .
+
+      # arm/v5 INDEPENDENT build: no musl busybox publishes arm/v5, and musl is
+      # mandatory, so this arch ships on a musl-pure `scratch` base (static binary
+      # only, no debug shell). RUNTIME_BASE=scratch overrides the Dockerfile default.
+      - name: Build and push arm/v5 image (independent, scratch base)
+        run: |
+          set -euo pipefail
+          image="${{ steps.img.outputs.image }}"
+          version="${{ steps.img.outputs.version }}"
+          docker buildx build \
+            --platform linux/arm/v5 \
+            --provenance=false \
+            --build-arg RUNTIME_BASE=scratch \
+            --tag "${image}:${version}-armv5" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${version}" \
+            --push \
+            .
+
+      # Stitch the 3-arch musl list and the independent arm/v5 image into the
+      # single user-facing :version and :latest manifest lists spanning all four
+      # architectures.
+      - name: Assemble unified multi-arch manifest (:version, :latest)
+        run: |
+          set -euo pipefail
+          image="${{ steps.img.outputs.image }}"
+          version="${{ steps.img.outputs.version }}"
+          for tag in "${version}" latest; do
+            docker buildx imagetools create \
+              --tag "${image}:${tag}" \
+              "${image}:${version}-musl3" \
+              "${image}:${version}-armv5"
+          done
+          docker buildx imagetools inspect "${image}:${version}"
 
       # Air-gapped / registry-less devices: export each arch as a standalone
       # `docker load`-able archive. Built from the same buildx cache as the push
@@ -219,10 +257,13 @@ jobs:
           image="${{ steps.img.outputs.image }}"
           version="${{ steps.img.outputs.version }}"
           mkdir -p images
-          for entry in "amd64:linux/amd64" "arm64:linux/arm64" "armv7:linux/arm/v7" "armv5:linux/arm/v5"; do
-            arch="${entry%%:*}"; plat="${entry#*:}"
+          for entry in "amd64:linux/amd64:" "arm64:linux/arm64:" "armv7:linux/arm/v7:" "armv5:linux/arm/v5:scratch"; do
+            arch="${entry%%:*}"; rest="${entry#*:}"; plat="${rest%%:*}"; base="${rest#*:}"
+            base_arg=()
+            [ -n "$base" ] && base_arg=(--build-arg "RUNTIME_BASE=${base}")
             docker buildx build \
               --platform "$plat" \
+              "${base_arg[@]}" \
               --tag "${image}:${version}" \
               --output "type=docker,dest=images/btunnel-image-${version}-${arch}.tar" \
               .

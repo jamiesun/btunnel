@@ -110,12 +110,15 @@ docker run -d --name btunnel \
     ghcr.io/jamiesun/btunnel:latest
 ```
 
-The image is built `FROM busybox:uclibc` and contains the two static binaries
-plus `config.example.json` and a tiny BusyBox shell + core utilities for
-in-container debugging. The daemon itself is fully static and needs nothing from
-the base. The build stage cross-compiles with Zig pinned to `$BUILDPLATFORM`, so
-no QEMU emulation is needed. See [`Dockerfile`](Dockerfile) for the runtime image
-and [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) for the dev/test toolchain.
+The image is built `FROM busybox:musl` for amd64, arm64 and arm/v7: it carries the
+two static binaries plus `config.example.json` and a tiny BusyBox shell + core
+utilities for in-container debugging. The daemon itself is fully static and needs
+nothing from the base. Because no musl BusyBox publishes `linux/arm/v5`, the arm/v5
+image is built independently `FROM scratch` (still static musl, but without a debug
+shell) and stitched into the same `:latest`/`:version` manifest. The build stage
+cross-compiles with Zig pinned to `$BUILDPLATFORM`, so no QEMU emulation is needed.
+See [`Dockerfile`](Dockerfile) for the runtime image and
+[`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) for the dev/test toolchain.
 
 ### Offline / air-gapped install
 
