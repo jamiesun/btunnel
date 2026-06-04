@@ -176,8 +176,11 @@ smoke-runs the daemon (`btunnel --check`), cross-builds the other musl arch,
 runs the unit tests, and then runs the **multi-point + relay end-to-end test**:
 a 3-node hub-and-spoke star across network namespaces (one Hub relay + two
 Spokes). It asserts end-to-end delivery spoke-A → Hub(relay) → spoke-B, on-wire
-encryption (no plaintext marker leaks onto the underlay), and a non-stalling RCU
-policy hot-update under load. It needs `--privileged` + `--device=/dev/net/tun`.
+encryption (no plaintext marker leaks onto the underlay), a non-stalling RCU
+policy hot-update under load, honest drop-counter observability, resilience under
+underlay packet loss (netem) with full recovery, and endpoint roaming / NAT remap
+(the Hub relearns a spoke that moves to a new underlay address, no handshake or
+restart). It needs `--privileged` + `--device=/dev/net/tun`.
 
 ## 🚀 Usage
 

@@ -147,8 +147,10 @@ docker run --rm --privileged --device=/dev/net/tun \
 交叉编译另一个 musl 架构，运行单元测试，最后运行**多点 + 中继端到端测试**：
 在网络命名空间中搭建 3 节点 Hub-and-Spoke 星型拓扑（一个 Hub 中继 + 两个
 Spoke），断言端到端投递 spoke-A → Hub（中继）→ spoke-B、链路加密（明文标记
-不会泄漏到底层）、以及负载下 RCU 策略热更新不阻塞数据面。该测试需要
-`--privileged` + `--device=/dev/net/tun`。
+不会泄漏到底层）、负载下 RCU 策略热更新不阻塞数据面、丢弃计数器的可观测性真实
+（未路由的 overlay 包会让 `tun: no_route` 自增）、底层丢包（netem）下的韧性与完整
+恢复，以及端点漫游 / NAT 重映射（Hub 在 spoke 迁移到新底层地址后无需握手或重启即可
+重新学习）。该测试需要 `--privileged` + `--device=/dev/net/tun`。
 
 ## 🚀 使用
 
