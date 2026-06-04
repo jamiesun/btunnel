@@ -1,0 +1,240 @@
+{
+  "protocol": "btunnel",
+  "wire_version": 1,
+  "header_len": 20,
+  "tag_len": 16,
+  "max_plaintext": 1452,
+  "aead": "ChaCha20-Poly1305",
+  "kdf": "Blake2b-256 (keyed)",
+  "vectors": [
+    {
+      "name": "v1-basic-link-1-to-2",
+      "input": {
+        "psk": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "from_id": 1,
+        "to_id": 2,
+        "epoch": 1704067200000000000,
+        "seq": 1,
+        "plaintext": "4500001400004000401100000a0000020a000003"
+      },
+      "output": {
+        "link_key": "6b9b5d6f603359710fddd04e10ac772bd0e33aedab75b236d871ec936bea522a",
+        "session_key": "0f0404b8e2405e37a3504e51bcf70f912b81f92fba5d99581510cf52950c871e",
+        "datagram": "01000000000065011710a61701000000000000004fba071d3bd9e4361222810624af5d9c0073837fa4cbc8fb1444fe30d79165a25b450e2a"
+      }
+    },
+    {
+      "name": "v2-distinct-ids-and-epoch",
+      "input": {
+        "psk": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "from_id": 7,
+        "to_id": 3,
+        "epoch": 1893456000000000000,
+        "seq": 42,
+        "plaintext": "deadbeefcafebabe"
+      },
+      "output": {
+        "link_key": "75affb8f3906aa44605530933f38671ee0ef23a9aa67e2202620d42cfd1d2421",
+        "session_key": "363052653e855fa2e3f4f1343c52cfc63622f79d0e761b1eca3f0bb214ca0191",
+        "datagram": "010000000000d53533e8461a2a000000000000003c623ea71b6eb6e90a0bb99bb8a513b1ce8838e46b87400e"
+      }
+    },
+    {
+      "name": "v3-high-seq-empty-payload",
+      "input": {
+        "psk": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "from_id": 2,
+        "to_id": 1,
+        "epoch": 1924992000000000000,
+        "seq": 4294967296,
+        "plaintext": ""
+      },
+      "output": {
+        "link_key": "9a3f0ef05929cd20f1c42a780361ba493be648e9e9cfcbd23a0d54a2f31875ff",
+        "session_key": "c606ed38ef008a238a743e005028dba3086a671e7e550b86746fb7f85d6bdb37",
+        "datagram": "010000000000786306f2b61a00000000010000004a82ec3f59101aa750613834e1b4cc70"
+      }
+    },
+    {
+      "name": "v4-larger-payload",
+      "input": {
+        "psk": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        "from_id": 10,
+        "to_id": 20,
+        "epoch": 1704067200123456789,
+        "seq": 2,
+        "plaintext": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f"
+      },
+      "output": {
+        "link_key": "53fb3df5ea2930591f5fbdb21f4c0ba3f78be4407df284d7e4c3cd5e800af677",
+        "session_key": "177732f9119aff8e02c3406fbc95a46f8eb308d2c069bd570246079e5ecb58a9",
+        "datagram": "0100000015cdc0081710a617020000000000000058b337c75c0c84343d61e9fea8b2da9f04aeda8520b20fd859ab1e02813dd123c7c35c3fb5bb4357d23a52d1c3e0e7689d839230d77d2202cf8b94285c6cf801707055cab8f3cacbe1d46bbe2ea202a1"
+      }
+    },
+    {
+      "name": "v5-mtu-boundary-1452B-payload",
+      "input": {
+        "psk": "1111111111111111111111111111111111111111111111111111111111111111",
+        "from_id": 4,
+        "to_id": 5,
+        "epoch": 1735689600000000000,
+        "seq": 7,
+        "plaintext": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaab"
+      },
+      "output": {
+        "link_key": "eb690395570a1fb7c52d2f1d10ed57ea09f8423b9de21bbe21f99115df5403fa",
+        "session_key": "144858d12ea141329af914108110943091027f828e38f3bf4ae6eb32088688e8",
+        "datagram": "01000000000057c07e6816180700000000000000cea1e8ace47302d03668f7e8ff36fa62daf6c4a8ace010f1d26808873dfbf7583fd568167e2af433dd4754b7bf8af18bbf75e2ffad60e8adbcd42061fcfb32ee9ad05f63e92b4835ac96a09908c4edb769791059521a94182fcee03897aba29c5f9df68c5cff894f9ed15f348eb1600fac8ffe9644f55cd410b2b9f9d251e9a9ee1abc5546a27796ffef6d1cbff631ccc256c663cf1c07330c1c71b4e352901c1897c90e73b4ed66d0f330e0e67b9ace7e5ac88f65c7e7fe6db2d1073c52b60b8605499abf14dc5345f43dfec8da7ceff5a20a49f8bcd09f7110d657d831a71ebac0196ae18e0066b84c20cf7015c28d3e3f7e42997d80e3af89f74b58189a48360d49c3e4599662b0feaecd0c6c6d4e79dca568b26b104a41ee7701e7a49ea2e47052c521370dcc462c97a418e985970fd7d41e198aaced94ac33ee7a01b08388828f2562c306a0bf6cbb63191852295c10c131f0ce6d90294a1428f53c96783b15ba98221143744c1f82775a279abae38803cc75b17c3c39d426e9786d47d26b2276c019b6d4873829441d31542ec74f54cee45858fefa633ca0ae9974007b65ccc0252bbcaa69e24912bed5a936f017f2aeb98a99998cdde3d0790ddaca83acd704d4d03a6d7958e07c621f0957332b1fa11d1fb5ade80e4105f9ed3faabb69f93f87300ff226c789c0607cc5f5cb876855b951ebcf850eec98f467400980f9f620ca3915595e95ce2851252242c37f7effbd09416e7cf3c4815fed01b455324499eb17bc12f4ebb0f7738efd4b8407ab5e20af07a45034c8d17d177839ac216b555105ce94cb2c9c7dd92caf2b8f1331050d76f73051d1880e940f267ba6ffb65f411dfe32f63822a1331ed33b59d23e015d2f9304e7a45442e5090fc835a9f69925f5c58713ba6a1051652521a28eed66783f01697662a853094bcbc31bb108aeda0bd2409281fed7034e3ea14acaf9df9210e44608f72bfabf8cbbcfb8534784e0c9e97a54039fdcefd2abe8a2a0aa4614e00f39590c7e1581ae553a70f7ba55c19d9eaf73f40bb184429511a64776da457e3b147801225c52ca47fd7db7e4a4443b38791ebbe5f835cc2c56e7a487ad34fd7fcadcf4f37060207d1f5837a49b0cd24444b54c336c8049f9e52203313b7d9a69bf3e62513b52e1d997b2e25a2b695b1dc05c2227808f263dba998c799bac3a4f011449928516e7b2463b41c4b28a82b0e92b44236a26c44d444b86a7da0e26b34992774320b72bd04baac123e46ea97476dff6f27092673e1d47cbf8333be0326506489669c13a6fce69d68a6f26ad4f1bf397723db8dca61d573b23cfc09c4f66cffaa7d61e6d1e5aa916bff4ad57c02131ae68d267510fb402eb3543b11225e10bf72de922b26df86e4b24981346506a8fe03ce253e7f0da9a88623e40bd9d4269073876ba112c8eda3b7d50d1cf48a40a4fadd7d80ecd341d31078ca728373b27a74281dad0dcc334f6e5dc01d803fa213d80bf34209f595252dfd515537f90c941875ff9a5dbbc19f5d204441caae4d7017676db5f2ea05dd1efc0a6246bcc1a871a99c33b687a8c0f911dce15011522bb5c5fddafd84705aee1def3ee2bae071e5266a779c336b0fd4908a209acc8efb70fd4bc387711fc56dd6ed96bdd5da2a1afe0bd0c552bdc453ddb846f1446c89a756646e56006ebe6291992924f898eee8fb5555822d092ea094c7e942701e9daedb6c52364ac1ddea821cfac05825b83f83909b109f2c86491f45c6f416f256ce74f48b47adbaa985f49e6eb7194241e77da7bb10214a99a8df45baa0189c82a7eb56301af7f102050756bd2f99f52c5d542d9f0883ae742e744c666154d05a58c240bd3b622b94dbcaff8017955e1743c8c1ff783da03111dd34902ee1e3fd89fd542019880221aecc8a1f1c633cc594678d65b4a11dbe6b70f8539036cbb2976d3d86769f18772e3e034daf66f6b9d1531d9e133d438dc1b68fdf2d4bdd36675ac9f0bf22b6473771508b3f14eaaa0776f9390cea5d41f79e91c7282455c8cbc4f27fce21f0fab524fde5797e5eb3a9c32aa"
+      }
+    }
+  ],
+  "receiver_cases": [
+    {
+      "name": "accept-then-replay",
+      "link": { "psk": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a", "from_id": 1, "to_id": 2 },
+      "init_epoch": 0,
+      "steps": [
+        {
+          "note": "valid datagram is accepted and adopts its epoch",
+          "datagram": "01000000000065011710a6170500000000000000674414e140287c2be57ab603397ec621c2630f4bcb1b41299692572ca09a4a0223c71b91",
+          "expect": "accept",
+          "plaintext": "4500001400004000401100000a0000020a000003",
+          "epoch_after": 1704067200000000000
+        },
+        {
+          "note": "byte-identical replay of the same seq is dropped",
+          "datagram": "01000000000065011710a6170500000000000000674414e140287c2be57ab603397ec621c2630f4bcb1b41299692572ca09a4a0223c71b91",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 1704067200000000000
+        },
+        {
+          "note": "in-window reorder (lower unseen seq) is accepted",
+          "datagram": "01000000000065011710a61703000000000000008ef88775eca76941f89ed728477ca5d213cdc7f326cdbf7b82654c6b5542b5942da5d9c7",
+          "expect": "accept",
+          "plaintext": "4500001400004000401100000a0000020a000003",
+          "epoch_after": 1704067200000000000
+        },
+        {
+          "note": "replay of the reordered seq is dropped",
+          "datagram": "01000000000065011710a61703000000000000008ef88775eca76941f89ed728477ca5d213cdc7f326cdbf7b82654c6b5542b5942da5d9c7",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 1704067200000000000
+        }
+      ]
+    },
+    {
+      "name": "header-and-auth-rejections",
+      "link": { "psk": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff", "from_id": 7, "to_id": 3 },
+      "init_epoch": 0,
+      "steps": [
+        {
+          "note": "wrong version is dropped",
+          "datagram": "02000000000065011710a61701000000000000008ab2a3fe1f34cbd68b2639a1818cac0bd6aaea015162aece55b015fabbe84b0c764e6d7a",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 0
+        },
+        {
+          "note": "non-zero flags is dropped",
+          "datagram": "01010000000065011710a61701000000000000008ab2a3fe1f34cbd68b2639a1818cac0bd6aaea015162aece55b015fabbe84b0c764e6d7a",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 0
+        },
+        {
+          "note": "non-zero reserved is dropped",
+          "datagram": "01000100000065011710a61701000000000000008ab2a3fe1f34cbd68b2639a1818cac0bd6aaea015162aece55b015fabbe84b0c764e6d7a",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 0
+        },
+        {
+          "note": "zero epoch is dropped",
+          "datagram": "01000000000000000000000001000000000000008ab2a3fe1f34cbd68b2639a1818cac0bd6aaea015162aece55b015fabbe84b0c764e6d7a",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 0
+        },
+        {
+          "note": "datagram shorter than the header is dropped",
+          "datagram": "01000000000065011710a61701000000000000",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 0
+        },
+        {
+          "note": "tampered tag fails authentication and is dropped",
+          "datagram": "01000000000065011710a61701000000000000008ab2a3fe1f34cbd68b2639a1818cac0bd6aaea015162aece55b015fabbe84b0c764e6d85",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 0
+        },
+        {
+          "note": "tampered ciphertext fails authentication and is dropped",
+          "datagram": "01000000000065011710a61701000000000000008bb2a3fe1f34cbd68b2639a1818cac0bd6aaea015162aece55b015fabbe84b0c764e6d7a",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 0
+        },
+        {
+          "note": "after all drops a clean datagram is still accepted (state uncorrupted)",
+          "datagram": "01000000000065011710a61701000000000000008ab2a3fe1f34cbd68b2639a1818cac0bd6aaea015162aece55b015fabbe84b0c764e6d7a",
+          "expect": "accept",
+          "plaintext": "4500001400004000401100000a0000020a000003",
+          "epoch_after": 1704067200000000000
+        }
+      ]
+    },
+    {
+      "name": "forward-only-epoch-ordering",
+      "link": { "psk": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0", "from_id": 10, "to_id": 20 },
+      "init_epoch": 0,
+      "steps": [
+        {
+          "note": "first epoch E1 accepted",
+          "datagram": "01000000e80365011710a6170100000000000000b7143f5ab258a85d3b3489db79156d03f17c7f8b89151362f63df9a8ddddc455abb8c18c",
+          "expect": "accept",
+          "plaintext": "4500001400004000401100000a0000020a000003",
+          "epoch_after": 1704067200000001000
+        },
+        {
+          "note": "strictly older epoch E0 < E1 dropped before crypto",
+          "datagram": "01000000f40165011710a61701000000000000007b8d5d4e63ff73e64d04cb0da08b81798e653a268f2b45fced7484486d02b1689781edc1",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 1704067200000001000
+        },
+        {
+          "note": "newer epoch E2 > E1 accepted; window reset lets seq 1 through again",
+          "datagram": "01000000d00765011710a6170100000000000000306714c6264a647871f9b9be69cc6a50325e04467979cd02f6d5809ba69bcf0ce2fa5d33",
+          "expect": "accept",
+          "plaintext": "4500001400004000401100000a0000020a000003",
+          "epoch_after": 1704067200000002000
+        }
+      ]
+    },
+    {
+      "name": "preloaded-session-rejects-stale-epoch",
+      "link": { "psk": "1111111111111111111111111111111111111111111111111111111111111111", "from_id": 4, "to_id": 5 },
+      "init_epoch": 1704067200000010000,
+      "steps": [
+        {
+          "note": "datagram from an epoch older than the preloaded session is dropped",
+          "datagram": "01000000010065011710a61701000000000000002be99cf04c4e2de6b239259f8c7c157f8219ae680de12ecbbf8fe8b2c015f195edf58cde",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 1704067200000010000
+        },
+        {
+          "note": "datagram at the preloaded epoch authenticates and is accepted",
+          "datagram": "01000000102765011710a617010000000000000035e035d70fbe36985bc012fdf04e3aaa75d7b9ca74182c3e0385fda38651165a507b454a",
+          "expect": "accept",
+          "plaintext": "4500001400004000401100000a0000020a000003",
+          "epoch_after": 1704067200000010000
+        }
+      ]
+    }
+  ]
+}
