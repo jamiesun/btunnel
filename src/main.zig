@@ -84,28 +84,35 @@ fn validateArgs(args: std.process.Args) !void {
 }
 
 /// Resolve the config path from --config, then BTUNNEL_CONFIG, then the default.
-/// Returns a NUL-terminated slice usable directly with the open(2) syscall.
-fn resolveConfigPath(args: std.process.Args, environ: anytype, buf: []u8) ![:0]const u8 {
+/// Returns a NUL-terminated slice usable directly with the open(2) syscall and
+/// whether it was given explicitly (so a missing explicit path fails loudly
+/// instead of silently falling back to the compile-time default).
+fn resolveConfigPath(args: std.process.Args, environ: anytype, buf: []u8) !struct { path: [:0]const u8, explicit: bool } {
+    var explicit = true;
     const p: []const u8 = if (flagValue(args, "--config")) |v|
         v
     else if (std.process.Environ.getPosix(environ, "BTUNNEL_CONFIG")) |s|
         s
-    else
-        CONFIG_PATH;
+    else blk: {
+        explicit = false;
+        break :blk CONFIG_PATH;
+    };
     if (p.len + 1 > buf.len) return error.PathTooLong;
     @memcpy(buf[0..p.len], p);
     buf[p.len] = 0;
-    return buf[0..p.len :0];
+    return .{ .path = buf[0..p.len :0], .explicit = explicit };
 }
 
 /// Read and parse the config at `path` with raw syscalls (consistent with the
-/// rest of the data path). A missing file falls back to the compile-time
-/// default; malformed JSON or an unreadable file is propagated so startup aborts.
-fn loadConfig(allocator: std.mem.Allocator, path: [:0]const u8) !bt.config.Config {
+/// rest of the data path). A missing DEFAULT file falls back to the compile-time
+/// default; a missing EXPLICIT path (--config/BTUNNEL_CONFIG) is an error so a
+/// typo'd path never silently runs on built-in defaults. Malformed JSON or an
+/// unreadable file is propagated so startup aborts.
+fn loadConfig(allocator: std.mem.Allocator, path: [:0]const u8, explicit: bool) !bt.config.Config {
     const orc = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
     switch (linux.errno(orc)) {
         .SUCCESS => {},
-        .NOENT => return bt.config.Config.default(),
+        .NOENT => return if (explicit) error.ConfigNotFound else bt.config.Config.default(),
         else => return error.ConfigOpenFailed,
     }
     const fd: i32 = @intCast(orc);
@@ -182,12 +189,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     validateArgs(init.args) catch |err| return err;
 
     var cfg_path_buf: [4096]u8 = undefined;
-    const cfg_path = resolveConfigPath(init.args, init.environ, &cfg_path_buf) catch |err| {
+    const resolved = resolveConfigPath(init.args, init.environ, &cfg_path_buf) catch |err| {
         std.debug.print("config path invalid: {s}\n", .{@errorName(err)});
         return err;
     };
-    const cfg = loadConfig(std.heap.page_allocator, cfg_path) catch |err| {
-        std.debug.print("config load failed ({s}): {s}\n", .{ cfg_path, @errorName(err) });
+    const cfg = loadConfig(std.heap.page_allocator, resolved.path, resolved.explicit) catch |err| {
+        std.debug.print("config load failed ({s}): {s}\n", .{ resolved.path, @errorName(err) });
         return err;
     };
     cfg.validate(&.{}) catch |err| {
