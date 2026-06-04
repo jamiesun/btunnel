@@ -1,5 +1,7 @@
 # BTunnel production deployment guide
 
+> A Chinese translation is kept in sync at [`deployment.zh-CN.md`](deployment.zh-CN.md).
+
 This guide deploys a public **Hub** and two NATed **Spokes** so that hosts on the
 spokes' private LANs can reach each other through the Hub relay. BTunnel ships as
 a single static binary with no runtime dependencies, so deployment is mostly
