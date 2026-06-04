@@ -5,6 +5,10 @@ spokes' private LANs can reach each other through the Hub relay. BTunnel ships a
 a single static binary with no runtime dependencies, so deployment is mostly
 about config, capabilities, and host networking.
 
+For MikroTik/RouterOS Container deployments, read
+[`routeros-container.md`](routeros-container.md) in addition to this guide. The
+RouterOS model needs dedicated veth routing and container-side forwarding.
+
 > Topology (v1): single-hub hub-and-spoke. The Hub relays between spokes; spokes
 > do not relay. Peer endpoints are **statically configured** in v1 — a NATed
 > spoke must be able to reach the Hub's public `ip:port`, and the Hub must have a
