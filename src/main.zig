@@ -187,6 +187,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     defer _ = linux.close(udp_fd);
 
+    // Data-plane counters (issue #24): shared by reference between the reactor
+    // (writer) and the control plane (reader for `ptctl status`). Single-threaded
+    // reactor, so plain increments are race-free.
+    var counters = bt.stats.Counters{};
+
     // The policy tree starts empty; operators install rules at runtime via
     // ptctl. The Control owns the double-buffered tree and publishes it here.
     var empty = bt.policy.PolicyTree{ .entries = &.{} };
@@ -197,6 +202,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return err;
     };
     defer control.deinit();
+    control.bindStatus(.{
+        .version = build_options.version,
+        .mode = @tagName(bt.reactor.EgressMode.raw_direct),
+        .listen_port = cfg.listen_port,
+        .tun_name = tun.ifname(),
+        .local_id = cfg.local_id,
+    }, &registry, &counters);
 
     std.debug.print(
         "btunnel v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) tun={s} sock={s} [ready]\n",
@@ -204,6 +216,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     );
 
     var reactor = bt.reactor.Reactor.init(tun.fd, udp_fd, &control, &active, &registry);
+    reactor.counters = &counters;
     reactor.run() catch |err| {
         std.debug.print("reactor exited: {s}\n", .{@errorName(err)});
         return err;

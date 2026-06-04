@@ -58,7 +58,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const cmd = bt.uds.parseCommand(line) catch |err| {
         std.debug.print("ptctl: failed to parse command ({s})\n", .{@errorName(err)});
         std.debug.print("usage: ptctl policy add --src X --dst Y --action forward --target Z\n", .{});
-        std.debug.print("       ptctl policy show | ptctl save\n", .{});
+        std.debug.print("       ptctl policy show | ptctl status | ptctl save\n", .{});
         std.process.exit(2);
     };
 
@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .policy_add => {
             bt.uds.send(path, line) catch |err| failRequest(err, path);
         },
-        .policy_show, .save => {
+        .policy_show, .save, .status => {
             var out: [4096]u8 = undefined;
             const reply = bt.uds.request(path, line, &out, REQUEST_TIMEOUT_MS) catch |err| failRequest(err, path);
             writeStdout(reply);

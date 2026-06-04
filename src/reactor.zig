@@ -35,6 +35,7 @@ const policy = @import("policy.zig");
 const crypto = @import("crypto.zig");
 const peer = @import("peer.zig");
 const uds = @import("uds.zig");
+const stats = @import("stats.zig");
 
 /// Private wire header (packed struct, physically aligned): 1B version + 1B
 /// flags + 2B reserved negotiation field + 8B boot epoch (issue #14, identifies
@@ -205,6 +206,10 @@ pub const Reactor = struct {
     mode: EgressMode = .raw_direct,
     /// Multi-peer endpoint + crypto registry (per-peer keys, counters, windows).
     registry: *peer.PeerRegistry,
+    /// Optional runtime counters (issue #24). Null in unit tests that don't care
+    /// about observability; set by `main` so `ptctl status` can read them. Plain
+    /// increments are safe under the single-threaded reactor (no atomics).
+    counters: ?*stats.Counters = null,
     rx: [BUF_LEN]u8 = undefined,
     tx: [BUF_LEN]u8 = undefined,
     /// Third resident buffer for hub relay: an inbound datagram decoded into
@@ -278,6 +283,14 @@ pub const Reactor = struct {
         }
     }
 
+    inline fn cInc(self: *Reactor, comptime field: []const u8) void {
+        if (self.counters) |c| c.inc(field);
+    }
+
+    inline fn cAdd(self: *Reactor, comptime field: []const u8, n: u64) void {
+        if (self.counters) |c| c.add(field, n);
+    }
+
     /// Drain the TUN fd (locally-originated traffic): read each IP packet, look
     /// up its destination in the policy tree to find the target peer, seal it
     /// with that peer's key, and forward. Packets with no route, a DROP rule, a
@@ -292,17 +305,45 @@ pub const Reactor = struct {
             if (e != .SUCCESS) return; // transient read error: yield this round
             if (rc == 0) return;
             const pkt = self.rx[0..rc];
+            self.cInc("tun_rx_packets");
+            self.cAdd("tun_rx_bytes", @intCast(rc));
 
-            const dst = ipv4Dst(pkt) orelse continue; // non-IPv4/malformed -> drop
-            const entry = self.active.load().match(dst) orelse continue; // no route -> drop
-            if (entry.action == .drop) continue;
-            if (entry.target == peer.LOCAL_TARGET) continue; // local-origin to local -> drop
-            const dst_peer = self.registry.findById(entry.target) orelse continue; // unknown target
-            if (pkt.len > MAX_PLAINTEXT) continue; // oversized -> drop
-            egress(self.mode, pkt) catch continue; // v2 modes not yet shipped -> drop
+            const dst = ipv4Dst(pkt) orelse {
+                self.cInc("drop_tun_not_ipv4");
+                continue; // non-IPv4/malformed -> drop
+            };
+            const entry = self.active.load().match(dst) orelse {
+                self.cInc("drop_tun_no_route");
+                continue; // no route -> drop
+            };
+            if (entry.action == .drop) {
+                self.cInc("drop_tun_drop_rule");
+                continue;
+            }
+            if (entry.target == peer.LOCAL_TARGET) {
+                self.cInc("drop_tun_local_loop");
+                continue; // local-origin to local -> drop
+            }
+            const dst_peer = self.registry.findById(entry.target) orelse {
+                self.cInc("drop_tun_unknown_target");
+                continue; // unknown target
+            };
+            if (pkt.len > MAX_PLAINTEXT) {
+                self.cInc("drop_tun_oversized");
+                continue; // oversized -> drop
+            }
+            egress(self.mode, pkt) catch {
+                self.cInc("drop_tun_egress_err");
+                continue; // v2 modes not yet shipped -> drop
+            };
 
             const wire_len = encodeEgress(&dst_peer.tx, pkt, &self.tx);
-            self.sendTo(dst_peer.endpoint, self.tx[0..wire_len]);
+            if (self.sendTo(dst_peer.endpoint, self.tx[0..wire_len])) {
+                self.cInc("udp_tx_packets");
+                self.cAdd("udp_tx_bytes", wire_len);
+            } else {
+                self.cInc("drop_tun_send_err");
+            }
         }
     }
 
@@ -320,37 +361,82 @@ pub const Reactor = struct {
             if (e == .INTR) continue;
             if (e != .SUCCESS) return;
             const dgram = self.rx[0..rc];
+            self.cInc("udp_rx_packets");
+            self.cAdd("udp_rx_bytes", @intCast(rc));
 
             // Source-endpoint filter: only a configured peer is admitted.
-            const src_peer = self.registry.findByAddr(src.addr, src.port) orelse continue;
+            const src_peer = self.registry.findByAddr(src.addr, src.port) orelse {
+                self.cInc("drop_udp_unknown_peer");
+                continue;
+            };
 
-            const plen = decodeIngress(&src_peer.rx, dgram, &self.tx) orelse continue;
+            const plen = decodeIngress(&src_peer.rx, dgram, &self.tx) orelse {
+                self.cInc("drop_udp_auth_or_invalid");
+                continue;
+            };
             const pkt = self.tx[0..plen];
 
             // Inner-source binding: the decoded source IP must belong to the
             // source peer's allowed prefix (anti-spoofing).
-            const isrc = ipv4Src(pkt) orelse continue;
-            if (!src_peer.allowed_src.contains(isrc)) continue;
+            const isrc = ipv4Src(pkt) orelse {
+                self.cInc("drop_udp_not_ipv4");
+                continue;
+            };
+            if (!src_peer.allowed_src.contains(isrc)) {
+                self.cInc("drop_udp_spoof");
+                continue;
+            }
 
-            const dst = ipv4Dst(pkt) orelse continue;
-            const entry = self.active.load().match(dst) orelse continue; // no route -> drop
-            if (entry.action == .drop) continue;
+            const dst = ipv4Dst(pkt) orelse {
+                self.cInc("drop_udp_not_ipv4");
+                continue;
+            };
+            const entry = self.active.load().match(dst) orelse {
+                self.cInc("drop_udp_no_route");
+                continue; // no route -> drop
+            };
+            if (entry.action == .drop) {
+                self.cInc("drop_udp_drop_rule");
+                continue;
+            }
 
             if (entry.target == peer.LOCAL_TARGET) {
-                self.writeTun(pkt);
+                if (self.writeTun(pkt)) {
+                    self.cInc("tun_tx_packets");
+                    self.cAdd("tun_tx_bytes", @intCast(plen));
+                } else {
+                    self.cInc("drop_udp_send_err");
+                }
                 continue;
             }
 
             // Relay to another peer (hub forwarding).
-            const dst_peer = self.registry.findById(entry.target) orelse continue; // unknown target
-            if (dst_peer.id == src_peer.id) continue; // no-reflect guard
-            if (pkt.len > MAX_PLAINTEXT) continue;
+            const dst_peer = self.registry.findById(entry.target) orelse {
+                self.cInc("drop_udp_unknown_target");
+                continue; // unknown target
+            };
+            if (dst_peer.id == src_peer.id) {
+                self.cInc("drop_udp_no_reflect");
+                continue; // no-reflect guard
+            }
+            if (pkt.len > MAX_PLAINTEXT) {
+                self.cInc("drop_udp_oversized");
+                continue;
+            }
             const wire_len = encodeEgress(&dst_peer.tx, pkt, &self.relay);
-            self.sendTo(dst_peer.endpoint, self.relay[0..wire_len]);
+            if (self.sendTo(dst_peer.endpoint, self.relay[0..wire_len])) {
+                self.cInc("relay_packets");
+                self.cAdd("relay_bytes", wire_len);
+            } else {
+                self.cInc("drop_udp_send_err");
+            }
         }
     }
 
-    fn sendTo(self: *Reactor, endpoint: linux.sockaddr.in, buf: []const u8) void {
+    /// Send `buf` to `endpoint`. Returns true if the datagram was handed to the
+    /// kernel without error, false otherwise (so the caller can count send
+    /// errors honestly rather than assuming success).
+    fn sendTo(self: *Reactor, endpoint: linux.sockaddr.in, buf: []const u8) bool {
         var ep = endpoint;
         while (true) {
             const rc = linux.sendto(
@@ -362,15 +448,17 @@ pub const Reactor = struct {
                 @sizeOf(linux.sockaddr.in),
             );
             if (linux.errno(rc) == .INTR) continue;
-            return; // success or silent drop on error
+            return linux.errno(rc) == .SUCCESS;
         }
     }
 
-    fn writeTun(self: *Reactor, buf: []const u8) void {
+    /// Write `buf` to the local TUN. Returns true on success, false on a write
+    /// error (counted by the caller).
+    fn writeTun(self: *Reactor, buf: []const u8) bool {
         while (true) {
             const rc = linux.write(self.tun_fd, buf.ptr, buf.len);
             if (linux.errno(rc) == .INTR) continue;
-            return; // success or silent drop on error
+            return linux.errno(rc) == .SUCCESS;
         }
     }
 };
@@ -542,11 +630,18 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     var active = policy.ActiveTree.init(&tree);
 
     var r = Reactor.init(pipe_fds[0], udp_hub, null, &active, &reg);
+    var ctr = stats.Counters{};
+    r.counters = &ctr;
 
     const ip_pkt = ipPkt(.{ 10, 0, 0, 1 }, .{ 10, 0, 0, 2 });
     _ = linux.write(pipe_fds[1], &ip_pkt, ip_pkt.len);
 
     r.pumpTunToUdp();
+
+    // Issue #24: a forwarded packet bumps the rx-from-tun and tx-to-udp counters.
+    try std.testing.expectEqual(@as(u64, 1), ctr.tun_rx_packets);
+    try std.testing.expectEqual(@as(u64, 1), ctr.udp_tx_packets);
+    try std.testing.expect(ctr.udp_tx_bytes > 0);
 
     var buf: [MAX_WIRE]u8 = undefined;
     const rc = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
@@ -565,6 +660,9 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     r.pumpTunToUdp();
     const rc2 = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
     try std.testing.expect(linux.errno(rc2) == .AGAIN);
+    // The no-route packet was read but dropped: the drop counter records it.
+    try std.testing.expectEqual(@as(u64, 2), ctr.tun_rx_packets);
+    try std.testing.expectEqual(@as(u64, 1), ctr.drop_tun_no_route);
 }
 
 test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {

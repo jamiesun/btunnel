@@ -50,6 +50,7 @@ src/
   reactor.zig  Packed private wire header + egress dispatch + epoll reactor
   tun.zig      TUN device system driver
   netplan.zig  --print-network-plan: host TUN address/route/MTU/MSS command emitter
+  stats.zig    data-plane counters (rx/tx, per-reason drops) for `ptctl status`
   uds.zig      Control-plane Unix domain socket + command tokenizer
   main.zig     btunnel daemon entry point
   ptctl.zig    ptctl control tool entry point
@@ -184,6 +185,11 @@ cp config.example.json config.json
 # Inject a policy dynamically (hot-updated over the UDS, no restart needed)
 ./ptctl policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3
 ./ptctl policy show
+
+# Runtime status & diagnostics: peers, traffic counters, and drop reasons.
+# Exits non-zero when the daemon is not running, so scripts can detect it.
+./ptctl status
+
 ./ptctl save
 ```
 
@@ -217,6 +223,36 @@ the classic cause of "small packets work, large transfers stall". It emits:
 - an optional TCP MSS clamp hint (nftables / iptables) to avoid PMTU blackholes
 
 Output is deterministic and print-only; nothing on the host is modified.
+
+### Observability & troubleshooting (`ptctl status`)
+
+The data plane drops malformed, unauthenticated, replayed, spoofed, unrouted,
+or oversized packets *silently by design* (stealth). `ptctl status` makes those
+silent drops countable so you can tell *why* traffic is not flowing:
+
+```text
+btunnel v0.1.0 [running]
+mode=raw_direct local_id=1 udp_port=51820 tun=btun0 peers=2
+peers:
+  id=2 endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
+  id=3 endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
+traffic:
+  tun_rx packets=... bytes=...
+  udp_tx packets=... bytes=...
+  udp_rx packets=... bytes=...
+  tun_tx packets=... bytes=...
+  relay  packets=... bytes=...
+drops:
+  tun: not_ipv4=.. no_route=.. drop_rule=.. local_loop=.. unknown_target=.. oversized=.. egress_err=.. send_err=..
+  udp: unknown_peer=.. auth_or_invalid=.. not_ipv4=.. spoof=.. no_route=.. drop_rule=.. unknown_target=.. no_reflect=.. oversized=.. send_err=..
+```
+
+Common signals: a rising `udp: unknown_peer` means datagrams are arriving from
+an endpoint that is not a configured peer (wrong IP/port, or a NAT remap — note
+v1 uses statically-configured endpoints); `auth_or_invalid` means the PSK/epoch
+or wire format does not match; `spoof` means a peer sent an inner source outside
+its `allowed_src`; `no_route` means no policy rule matches the destination. PSKs
+and derived keys are never printed.
 
 ## 📊 Development status
 

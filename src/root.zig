@@ -13,6 +13,7 @@ pub const peer = @import("peer.zig");
 pub const reactor = @import("reactor.zig");
 pub const uds = @import("uds.zig");
 pub const netplan = @import("netplan.zig");
+pub const stats = @import("stats.zig");
 
 test {
     // Pull in every submodule's test blocks.

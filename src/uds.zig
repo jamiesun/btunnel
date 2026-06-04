@@ -15,6 +15,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
 const policy = @import("policy.zig");
+const peer = @import("peer.zig");
+const stats = @import("stats.zig");
 
 pub const SOCKET_PATH = "/var/run/btunnel.sock";
 
@@ -84,6 +86,7 @@ pub const Command = union(enum) {
     policy_add: policy.PolicyEntry,
     policy_show,
     save,
+    status,
 };
 
 fn nextValue(it: *std.mem.TokenIterator(u8, .scalar)) ParseError![]const u8 {
@@ -97,6 +100,7 @@ pub fn parseCommand(line: []const u8) ParseError!Command {
     const verb = it.next() orelse return ParseError.UnknownCommand;
 
     if (std.mem.eql(u8, verb, "save")) return .save;
+    if (std.mem.eql(u8, verb, "status")) return .status;
 
     if (!std.mem.eql(u8, verb, "policy")) return ParseError.UnknownCommand;
 
@@ -287,6 +291,74 @@ fn formatEntry(e: policy.PolicyEntry, buf: []u8) []const u8 {
 }
 
 
+/// Static daemon identity surfaced by `ptctl status`. Passed in from `main` so
+/// the control plane never imports `build_options` or other executable-context
+/// modules (keeps `uds` unit-testable and reusable).
+pub const DaemonMeta = struct {
+    version: []const u8 = "?",
+    mode: []const u8 = "?",
+    listen_port: u16 = 0,
+    tun_name: []const u8 = "?",
+    local_id: u32 = 0,
+};
+
+/// Render a human-readable status report into `out` from the daemon meta, the
+/// peer registry, and the data-plane counters. Pure formatting (no I/O) so it is
+/// unit-testable. Sensitive material (PSKs, derived keys) is NEVER printed.
+pub fn formatStatus(
+    out: []u8,
+    meta: DaemonMeta,
+    registry: *const peer.PeerRegistry,
+    counters: *const stats.Counters,
+) []const u8 {
+    var len: usize = 0;
+    const W = struct {
+        fn p(buf: []u8, off: *usize, comptime fmt: []const u8, args: anytype) void {
+            const s = std.fmt.bufPrint(buf[off.*..], fmt, args) catch return;
+            off.* += s.len;
+        }
+    };
+
+    W.p(out, &len, "btunnel v{s} [running]\n", .{meta.version});
+    W.p(out, &len, "mode={s} local_id={d} udp_port={d} tun={s} peers={d}\n", .{
+        meta.mode, meta.local_id, meta.listen_port, meta.tun_name, registry.len,
+    });
+
+    W.p(out, &len, "peers:\n", .{});
+    var i: usize = 0;
+    while (i < registry.len) : (i += 1) {
+        const pr = &registry.peers[i];
+        const a: u32 = std.mem.bigToNative(u32, pr.endpoint.addr);
+        const port: u16 = std.mem.bigToNative(u16, pr.endpoint.port);
+        const src: u32 = pr.allowed_src.network;
+        W.p(out, &len, "  id={d} endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d}\n", .{
+            pr.id,
+            (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
+            (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
+        });
+    }
+
+    const c = counters;
+    W.p(out, &len, "traffic:\n", .{});
+    W.p(out, &len, "  tun_rx packets={d} bytes={d}\n", .{ c.tun_rx_packets, c.tun_rx_bytes });
+    W.p(out, &len, "  udp_tx packets={d} bytes={d}\n", .{ c.udp_tx_packets, c.udp_tx_bytes });
+    W.p(out, &len, "  udp_rx packets={d} bytes={d}\n", .{ c.udp_rx_packets, c.udp_rx_bytes });
+    W.p(out, &len, "  tun_tx packets={d} bytes={d}\n", .{ c.tun_tx_packets, c.tun_tx_bytes });
+    W.p(out, &len, "  relay  packets={d} bytes={d}\n", .{ c.relay_packets, c.relay_bytes });
+    W.p(out, &len, "drops:\n", .{});
+    W.p(out, &len, "  tun: not_ipv4={d} no_route={d} drop_rule={d} local_loop={d} unknown_target={d} oversized={d} egress_err={d} send_err={d}\n", .{
+        c.drop_tun_not_ipv4,      c.drop_tun_no_route,  c.drop_tun_drop_rule, c.drop_tun_local_loop,
+        c.drop_tun_unknown_target, c.drop_tun_oversized, c.drop_tun_egress_err, c.drop_tun_send_err,
+    });
+    W.p(out, &len, "  udp: unknown_peer={d} auth_or_invalid={d} not_ipv4={d} spoof={d} no_route={d} drop_rule={d} unknown_target={d} no_reflect={d} oversized={d} send_err={d}\n", .{
+        c.drop_udp_unknown_peer, c.drop_udp_auth_or_invalid, c.drop_udp_not_ipv4,       c.drop_udp_spoof,
+        c.drop_udp_no_route,     c.drop_udp_drop_rule,       c.drop_udp_unknown_target, c.drop_udp_no_reflect,
+        c.drop_udp_oversized,    c.drop_udp_send_err,
+    });
+
+    return out[0..len];
+}
+
 /// Control-plane listener. Owns the AF_UNIX datagram socket and the live policy
 /// tree storage.
 ///
@@ -319,6 +391,13 @@ pub const Control = struct {
     /// Filesystem path `save` persists the snapshot to (copied in at bind time).
     save_path_buf: [108]u8 = undefined,
     save_path_len: usize = 0,
+    /// Optional status sources (issue #24), wired by `bindStatus`. When any is
+    /// unset, `status` replies "status unavailable" rather than dereferencing a
+    /// null — so a `Control` built without status wiring (e.g. in unit tests)
+    /// stays safe.
+    status_meta: ?DaemonMeta = null,
+    status_registry: ?*const peer.PeerRegistry = null,
+    status_counters: ?*const stats.Counters = null,
 
     /// Bind the control socket and install `initial` as the starting policy
     /// tree (swapped into `active`). `save_path` is the file `save` snapshots to.
@@ -348,6 +427,20 @@ pub const Control = struct {
         self.trees[0] = .{ .entries = self.bufs[0][0..initial.len] };
         self.active = active;
         _ = active.swap(&self.trees[0]);
+    }
+
+    /// Wire the optional status sources for `ptctl status` (issue #24). Call
+    /// after `bindInPlace`. The pointers must outlive the Control (they live in
+    /// `main`'s frame alongside it).
+    pub fn bindStatus(
+        self: *Control,
+        meta: DaemonMeta,
+        registry: *const peer.PeerRegistry,
+        counters: *const stats.Counters,
+    ) void {
+        self.status_meta = meta;
+        self.status_registry = registry;
+        self.status_counters = counters;
     }
 
     pub fn deinit(self: *Control) void {
@@ -471,6 +564,14 @@ pub const Control = struct {
                     self.reply(src, slen, msg);
                 }
             },
+            .status => {
+                if (!addressable) return;
+                const msg = if (self.status_meta != null and self.status_registry != null and self.status_counters != null)
+                    formatStatus(&self.txbuf, self.status_meta.?, self.status_registry.?, self.status_counters.?)
+                else
+                    "status unavailable\n";
+                self.reply(src, slen, msg);
+            },
         }
     }
 
@@ -511,11 +612,44 @@ test "parseCommand: policy add" {
     try std.testing.expectEqual(@as(u32, 3), e.target);
 }
 
-test "parseCommand: show / save / errors" {
+test "parseCommand: show / save / status / errors" {
     try std.testing.expect(try parseCommand("policy show") == .policy_show);
     try std.testing.expect(try parseCommand("save") == .save);
+    try std.testing.expect(try parseCommand("status") == .status);
     try std.testing.expectError(ParseError.UnknownCommand, parseCommand("bogus"));
     try std.testing.expectError(ParseError.MissingArgument, parseCommand("policy add --src 10.0.0.0/24"));
+}
+
+test "formatStatus: renders meta, peers, and counters; never prints secrets" {
+    var reg = peer.PeerRegistry.init(1);
+    const psk: @import("crypto.zig").Key = [_]u8{0xAB} ** 32;
+    const ep = try @import("config.zig").parseEndpoint("203.0.113.7:51820");
+    _ = try reg.add(psk, 2, ep, try @import("config.zig").parseCidr("10.0.0.2/32"), 1_700_000_000_000_000_000);
+
+    var c = stats.Counters{};
+    c.tun_rx_packets = 5;
+    c.udp_tx_bytes = 1234;
+    c.drop_udp_spoof = 2;
+
+    const meta = DaemonMeta{
+        .version = "9.9.9",
+        .mode = "raw_direct",
+        .listen_port = 51820,
+        .tun_name = "btun0",
+        .local_id = 1,
+    };
+
+    var buf: [4096]u8 = undefined;
+    const s = formatStatus(&buf, meta, &reg, &c);
+
+    try std.testing.expect(std.mem.indexOf(u8, s, "btunnel v9.9.9 [running]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "local_id=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "id=2 endpoint=203.0.113.7:51820 allowed_src=10.0.0.2/32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "tun_rx packets=5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "udp_tx packets=0 bytes=1234") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "spoof=2") != null);
+    // The PSK byte 0xAB must never appear in the rendered status.
+    try std.testing.expect(std.mem.indexOf(u8, s, &[_]u8{0xAB}) == null);
 }
 
 /// Send one command datagram to a bound control socket at `path`.
@@ -635,6 +769,55 @@ test "control: policy show replies with replayable rules to an addressable clien
     try std.testing.expect(linux.errno(rrc) == .SUCCESS);
     const reply = out[0..rrc];
     try std.testing.expect(std.mem.indexOf(u8, reply, "policy add --src 0.0.0.0/0 --dst 192.168.9.0/24 --action forward --target 5") != null);
+}
+
+test "control: status replies 'unavailable' until bound, then a full report" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-status-{d}.sock", .{linux.getpid()});
+
+    var empty = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&empty);
+
+    var ctl: Control = undefined;
+    try ctl.bindInPlace(path, "/tmp/btunnel-status.policy", &active, &.{});
+    defer ctl.deinit();
+    defer unlinkPath(path);
+
+    // Addressable client socket (abstract autobind return address).
+    const cs = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    try std.testing.expect(linux.errno(cs) == .SUCCESS);
+    const cfd: linux.fd_t = @intCast(cs);
+    defer _ = linux.close(cfd);
+    var ba = linux.sockaddr.un{ .path = undefined };
+    ba.family = linux.AF.UNIX;
+    try std.testing.expect(linux.errno(linux.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
+
+    var sa = linux.sockaddr.un{ .path = undefined };
+    @memset(&sa.path, 0);
+    @memcpy(sa.path[0..path.len], path);
+    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+
+    // Before bindStatus: status is gracefully unavailable (no null deref).
+    _ = linux.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
+    ctl.handle();
+    var out: [1024]u8 = undefined;
+    var rrc = linux.recvfrom(cfd, &out, out.len, 0, null, null);
+    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "status unavailable") != null);
+
+    // After bindStatus: a full report is served.
+    var reg = peer.PeerRegistry.init(1);
+    var c = stats.Counters{};
+    ctl.bindStatus(.{ .version = "1.2.3", .mode = "raw_direct", .listen_port = 51820, .tun_name = "btun0", .local_id = 1 }, &reg, &c);
+
+    _ = linux.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
+    ctl.handle();
+    rrc = linux.recvfrom(cfd, &out, out.len, 0, null, null);
+    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "btunnel v1.2.3 [running]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "traffic:") != null);
 }
 
 test "control: save persists a replayable snapshot and acks" {
