@@ -36,6 +36,36 @@ jobs:
             exit 1
           fi
 
+  release-gate:
+    name: Release gate (privileged netns e2e — issue #26)
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Load tun module
+        run: sudo modprobe tun
+
+      # BTUNNEL_RELEASE_GATE=1 makes any SKIP a HARD FAILURE: the release is only
+      # certified if the live privileged netns relay e2e actually runs and passes.
+      # Evidence is appended to the job summary by the harness.
+      - name: Run privileged release gate
+        run: |
+          sudo --preserve-env=PATH,BTUNNEL_RELEASE_GATE,GITHUB_STEP_SUMMARY \
+            env "PATH=$PATH" BTUNNEL_RELEASE_GATE=1 \
+            bash test/integration/run.sh
+
   binaries:
     name: Build static binaries (${{ matrix.arch }})
     needs: guard
@@ -109,7 +139,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [binaries, image]
+    needs: [binaries, image, release-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
@@ -140,7 +170,7 @@ jobs:
 
   image:
     name: Build + push multi-arch image (GHCR)
-    needs: binaries
+    needs: [binaries, release-gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

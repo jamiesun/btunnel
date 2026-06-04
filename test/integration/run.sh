@@ -28,10 +28,21 @@ set -euo pipefail
 readonly SIZE_BUDGET=524288   # 512 KiB, iron law #6
 PASS=0
 SKIP=0
+# Release-gate mode (issue #26): when BTUNNEL_RELEASE_GATE=1 the harness is
+# guarding a release candidate, so a SKIP is a HARD FAILURE — a release must be
+# proven by the live privileged e2e, never by an absent prerequisite.
+RELEASE_GATE="${BTUNNEL_RELEASE_GATE:-0}"
+E2E_RAN=0          # set to 1 once the live netns relay e2e actually executes
+EV_UNIT="not-run"  # unit-test result captured for the release evidence block
 
 log()  { printf '\033[1;34m[ii]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m[ok]\033[0m %s\n' "$*"; PASS=$((PASS + 1)); }
-skip() { printf '\033[1;33m[skip]\033[0m %s\n' "$*"; SKIP=$((SKIP + 1)); }
+skip() {
+  if [ "$RELEASE_GATE" = "1" ]; then
+    die "release gate: required step was SKIPPED, which is not acceptable for a release candidate: $*"
+  fi
+  printf '\033[1;33m[skip]\033[0m %s\n' "$*"; SKIP=$((SKIP + 1));
+}
 die()  { printf '\033[1;31m[fail]\033[0m %s\n' "$*" >&2; exit 1; }
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo /workspace)"
@@ -106,6 +117,7 @@ ok "foreign binary is static and ${fsize} bytes (<= ${SIZE_BUDGET})"
 # --- 5: unit tests ---------------------------------------------------------
 log "running unit tests (zig build test) ..."
 zig build test >/dev/null || die "zig build test failed"
+EV_UNIT="pass"
 ok "unit tests green"
 
 # --- 6: end-to-end netns tunnel test ---------------------------------------
@@ -347,6 +359,7 @@ e2e_netns() {
   else
     die "policy hot-update stalled the data plane (${recv:-0}/20 received)\n$(cat "$ping_log")"
   fi
+  E2E_RAN=1   # the live privileged relay e2e actually executed (release evidence)
 }
 e2e_netns
 
@@ -437,6 +450,50 @@ EOF
   fi
 }
 e2e_netns_role
+
+# --- release gate + evidence (issue #26) -----------------------------------
+# In release-gate mode every SKIP already aborts via skip(); this is the final
+# backstop: a release MUST have actually run the live privileged e2e.
+if [ "$RELEASE_GATE" = "1" ]; then
+  [ "$SKIP" -eq 0 ] || die "release gate: ${SKIP} step(s) skipped — not acceptable for a release"
+  [ "$E2E_RAN" -eq 1 ] || die "release gate: the live netns relay e2e did not run — cannot certify this release"
+fi
+
+# Machine-readable evidence block: native build, foreign cross-build,
+# static-link status, sizes, unit tests, and the live e2e result.
+git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+zig_ver=$(zig version 2>/dev/null || echo unknown)
+e2e_result=$([ "$E2E_RAN" -eq 1 ] && echo pass || echo skipped)
+evidence=$(cat <<EOF
+release_gate=${RELEASE_GATE}
+git_commit=${git_commit}
+zig_version=${zig_ver}
+native_target=${NATIVE_TARGET}
+native_size_bytes=${nsize}
+native_static=yes
+foreign_target=${FOREIGN_TARGET}
+foreign_size_bytes=${fsize}
+foreign_static=yes
+size_budget_bytes=${SIZE_BUDGET}
+unit_tests=${EV_UNIT}
+netns_e2e=${e2e_result}
+EOF
+)
+
+printf '\n'
+log "release evidence (issue #26):"
+printf '%s\n' "$evidence" | sed 's/^/    /'
+
+# Surface the same evidence in the GitHub Actions job summary when present.
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "## BTunnel release-gate evidence"
+    echo ""
+    echo '```'
+    printf '%s\n' "$evidence"
+    echo '```'
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
 
 # --- summary ---------------------------------------------------------------
 printf '\n'
