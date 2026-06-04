@@ -89,9 +89,10 @@ docker run -d --name btunnel \
     ghcr.io/jamiesun/btunnel:latest
 ```
 
-镜像基于 `FROM scratch` 构建，只包含两个静态二进制和 `config.example.json`——
-没有 shell、没有 libc、没有包管理器。构建阶段使用锁定到 `$BUILDPLATFORM` 的
-Zig 交叉编译，因此无需 QEMU 模拟。运行时镜像见 [`Dockerfile`](Dockerfile)，
+镜像基于 `busybox:uclibc` 构建，包含两个静态二进制、`config.example.json`，
+以及一个极小的 BusyBox shell 和核心工具，方便在容器内排障；守护进程本身
+完全静态、不依赖基础镜像。构建阶段使用锁定到 `$BUILDPLATFORM` 的 Zig
+交叉编译，因此无需 QEMU 模拟。运行时镜像见 [`Dockerfile`](Dockerfile)，
 开发/测试工具链见 [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)。
 
 ### 离线 / 内网隔离安装

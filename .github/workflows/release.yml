@@ -185,7 +185,7 @@ jobs:
 
       # Multi-platform output needs the docker-container buildx driver. No qemu
       # is required: the Dockerfile build stage is pinned to BUILDPLATFORM and
-      # Zig cross-compiles, while the final `scratch` stage only copies files.
+      # Zig cross-compiles, while the final busybox stage only copies files.
       - name: Set up buildx (docker-container driver)
         run: |
           set -euo pipefail
