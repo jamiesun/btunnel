@@ -1170,3 +1170,29 @@ test "pump: an authenticated non-IPv4 inner packet is dropped before endpoint le
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, fakeAddr(9)));
 }
+
+fn fuzzIngressDecode(_: void, smith: *std.testing.Smith) anyerror!void {
+    // A fixed receive session: the fuzzer drives the datagram bytes, not the key.
+    // The decode path must never crash, read out of bounds, or report a length
+    // larger than the output buffer for ANY input — well-formed or hostile.
+    const psk: crypto.Key = [_]u8{0xAB} ** crypto.KEY_LEN;
+    var rx = crypto.RxSession.init(crypto.deriveLinkKey(psk, 1, 2));
+
+    var dgram: [MAX_WIRE]u8 = undefined;
+    const n = smith.slice(&dgram);
+    const input = dgram[0..n];
+
+    // parseKeyId is a pure header read: null iff too short, never otherwise.
+    const kid = parseKeyId(input);
+    try std.testing.expectEqual(input.len < HEADER_LEN, kid == null);
+
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    if (decodeIngress(&rx, input, &out)) |plen| {
+        // A returned length must be a valid slice of the output buffer.
+        try std.testing.expect(plen <= out.len);
+    }
+}
+
+test "fuzz: UDP ingress decode path tolerates arbitrary datagrams (#40)" {
+    try std.testing.fuzz({}, fuzzIngressDecode, .{});
+}
