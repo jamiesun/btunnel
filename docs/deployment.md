@@ -215,6 +215,34 @@ sudo systemctl restart btunnel
   from its next authenticated datagram (issue #34), so replies follow it
   automatically. Keep the **Hub** endpoint stable; spokes always initiate.
 
+### Hub on a dynamic IP (DDNS)
+
+Endpoint config is a numeric `IP:port`, and endpoint learning is **one-way** — the
+Hub learns a roaming spoke, but a spoke cannot discover a Hub that moved (it needs
+a correct destination to send its first packet). The daemon therefore does **not**
+resolve hostnames or re-resolve them at runtime: a live in-daemon DNS client would
+pull a resolver/threads/state into the deliberately minimal, zero-dependency,
+single-threaded data plane (iron laws #1/#3).
+
+The normal answer is to give the Hub a **stable public IP** (a small VPS). If you
+must run the Hub behind a **dynamic** address, solve it operationally on each spoke
+with a tiny DDNS watcher — no daemon changes. A restart is **stateless and cheap**
+(a fresh session epoch is derived each lifetime), so re-pointing is just a config
+edit plus restart:
+
+```bash
+# /usr/local/bin/btunnel-ddns.sh  — run from a systemd timer every ~60s on each spoke
+new=$(getent hosts hub.example.com | awk '{print $1}')
+cur=$(grep -oE '[0-9.]+:[0-9]+' /etc/btunnel/config.json | head -1 | cut -d: -f1)
+[ -n "$new" ] && [ "$new" != "$cur" ] && {
+  sed -i "s/$cur/$new/" /etc/btunnel/config.json
+  systemctl restart btunnel        # stateless restart: a fresh epoch is derived
+}
+```
+
+Resolving the name only once at boot would **not** be DDNS — it would miss any
+address change after startup, which is exactly the case this watcher handles.
+
 ## 8. Cross-ISP / cross-region traffic shaping (运营商跨区整形)
 
 On long, cross-ISP or cross-region links, the dominant cause of jitter and loss is
