@@ -42,6 +42,7 @@ producing a single, fully statically linked binary.
 build.zig            Dual-binary build (btunnel daemon + ptctl control tool), static musl cross-compile
 build.zig.zon        Package manifest
 config.example.json  Example config (copy to config.json to use)
+deploy/              systemd unit + example hub/spoke configs (see docs/deployment.md)
 src/
   root.zig     Core library, aggregates all modules
   config.zig   Config parsing + sanity check (MTU range / subnet overlap)
@@ -49,11 +50,14 @@ src/
   crypto.zig   ChaCha20-Poly1305 + monotonic nonce + sliding-window anti-replay
   reactor.zig  Packed private wire header + egress dispatch + epoll reactor
   tun.zig      TUN device system driver
+  netplan.zig  --print-network-plan: host TUN address/route/MTU/MSS command emitter
+  stats.zig    data-plane counters (rx/tx, per-reason drops) for `ptctl status`
   uds.zig      Control-plane Unix domain socket + command tokenizer
   main.zig     btunnel daemon entry point
   ptctl.zig    ptctl control tool entry point
 docs/
   btunnel-develop.md  System requirements & architecture design (PRD & Architecture)
+  deployment.md       Hub + two-spoke production deployment walkthrough (systemd, secrets, upgrade)
 ```
 
 ## 🛠 Build
@@ -183,10 +187,83 @@ cp config.example.json config.json
 # Inject a policy dynamically (hot-updated over the UDS, no restart needed)
 ./ptctl policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3
 ./ptctl policy show
+
+# Runtime status & diagnostics: peers, traffic counters, and drop reasons.
+# Exits non-zero when the daemon is not running, so scripts can detect it.
+./ptctl status
+
 ./ptctl save
 ```
 
 See [`config.example.json`](config.example.json) for a config example.
+
+### Host network setup (`--print-network-plan`)
+
+btunnel creates the TUN device but does **not** configure host addressing,
+routes, or MTU itself (auto-apply is intentionally out of scope to preserve the
+zero-dependency single-binary guarantee). Instead it can *print* the exact
+commands for the loaded config so you can review and run them:
+
+```bash
+# Print the host networking plan for this node (defaults to a 1500-byte underlay).
+./zig-out/bin/btunnel --print-network-plan
+
+# Override the underlay path MTU (e.g. behind a PPPoE/VPN underlay):
+./zig-out/bin/btunnel --print-network-plan --path-mtu 1420
+```
+
+The plan computes the safe tunnel MTU from the real wire overhead
+(`header 20 + AEAD tag 16 + outer IPv4/UDP 28 = 64`, so max tunnel MTU =
+`path_mtu − 64`) and **warns** if the configured `local_tun_mtu` exceeds it —
+the classic cause of "small packets work, large transfers stall". It emits:
+
+- `ip link set <tun> mtu <local_tun_mtu> up`
+- `ip addr add <local_tun_ip> dev <tun>` (set the optional `local_tun_ip` config
+  field, e.g. `"local_tun_ip": "10.0.0.2/24"`; otherwise a placeholder is shown)
+- `ip route add <subnet> dev <tun>` for each peer's `allowed_src` (a permissive
+  `0.0.0.0/0` is skipped so you never blackhole the default route)
+- an optional TCP MSS clamp hint (nftables / iptables) to avoid PMTU blackholes
+
+Output is deterministic and print-only; nothing on the host is modified.
+
+### Observability & troubleshooting (`ptctl status`)
+
+The data plane drops malformed, unauthenticated, replayed, spoofed, unrouted,
+or oversized packets *silently by design* (stealth). `ptctl status` makes those
+silent drops countable so you can tell *why* traffic is not flowing:
+
+```text
+btunnel v0.1.0 [running]
+mode=raw_direct local_id=1 udp_port=51820 tun=btun0 peers=2
+peers:
+  id=2 endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
+  id=3 endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
+traffic:
+  tun_rx packets=... bytes=...
+  udp_tx packets=... bytes=...
+  udp_rx packets=... bytes=...
+  tun_tx packets=... bytes=...
+  relay  packets=... bytes=...
+drops:
+  tun: not_ipv4=.. no_route=.. drop_rule=.. local_loop=.. unknown_target=.. oversized=.. egress_err=.. send_err=..
+  udp: unknown_peer=.. auth_or_invalid=.. not_ipv4=.. spoof=.. no_route=.. drop_rule=.. unknown_target=.. no_reflect=.. oversized=.. send_err=..
+```
+
+Common signals: a rising `udp: unknown_peer` means datagrams are arriving from
+an endpoint that is not a configured peer (wrong IP/port, or a NAT remap — note
+v1 uses statically-configured endpoints); `auth_or_invalid` means the PSK/epoch
+or wire format does not match; `spoof` means a peer sent an inner source outside
+its `allowed_src`; `no_route` means no policy rule matches the destination. PSKs
+and derived keys are never printed.
+
+### Production deployment (systemd)
+
+For a complete hub + two-spoke production walkthrough — systemd unit with the
+right capabilities and sandboxing, secrets handling, host networking, relay
+policy install, upgrade/rollback, and firewall/NAT requirements — see
+[`docs/deployment.md`](docs/deployment.md). Ready-to-edit artifacts live in
+[`deploy/`](deploy/) (`btunnel.service`, `hub.json`, `spoke-a.json`,
+`spoke-b.json`).
 
 ## 📊 Development status
 
