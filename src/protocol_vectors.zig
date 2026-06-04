@@ -167,10 +167,10 @@ fn hexEncode(out: []u8, bytes: []const u8) []u8 {
 /// Build the on-wire datagram for `(link_key, epoch, seq, plaintext)` via the
 /// real egress path, writing into `out` and returning its length. The transmit
 /// counter is pinned to `seq` so the header is deterministic.
-fn buildDatagram(link_key: crypto.Key, epoch: u64, seq: u64, plaintext: []const u8, out: []u8) usize {
+fn buildDatagram(link_key: crypto.Key, key_id: u16, epoch: u64, seq: u64, plaintext: []const u8, out: []u8) usize {
     var tx = crypto.TxSession.init(link_key, epoch);
     tx.counter.value = seq;
-    return reactor.encodeEgress(&tx, plaintext, out);
+    return reactor.encodeEgress(&tx, key_id, plaintext, out);
 }
 
 /// Computed sender outputs for a vector, all as lowercase hex.
@@ -194,7 +194,7 @@ pub fn compute(v: Vector) !Output {
     const session = crypto.deriveSessionKey(link, v.epoch);
 
     var wire: [reactor.MAX_WIRE]u8 = undefined;
-    const n = buildDatagram(link, v.epoch, v.seq, plaintext, &wire);
+    const n = buildDatagram(link, @intCast(v.from_id), v.epoch, v.seq, plaintext, &wire);
 
     var out: Output = .{
         .link_key = undefined,
@@ -218,7 +218,6 @@ const Mutation = enum {
     none,
     bad_version, // byte 0 := 2
     bad_flags, // byte 1 := 1
-    bad_reserved, // byte 2 := 1
     zero_epoch, // epoch field := 0
     truncate_header, // cut to HEADER_LEN-1 bytes
     flip_tag, // flip the last byte (AEAD auth failure)
@@ -270,7 +269,6 @@ pub const RX_CASES = [_]RxCase{
         .steps = &.{
             .{ .note = "wrong version is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .bad_version },
             .{ .note = "non-zero flags is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .bad_flags },
-            .{ .note = "non-zero reserved is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .bad_reserved },
             .{ .note = "zero epoch is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .zero_epoch },
             .{ .note = "datagram shorter than the header is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .truncate_header },
             .{ .note = "tampered tag fails authentication and is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .flip_tag },
@@ -303,15 +301,14 @@ pub const RX_CASES = [_]RxCase{
 };
 
 /// Build a (possibly mutated) datagram for a receiver step. Returns the slice.
-fn buildRxDatagram(link_key: crypto.Key, step: RxStep, out: []u8) ![]u8 {
+fn buildRxDatagram(link_key: crypto.Key, key_id: u16, step: RxStep, out: []u8) ![]u8 {
     var plain_buf: [reactor.MAX_PLAINTEXT]u8 = undefined;
     const plaintext = try hexDecode(&plain_buf, step.plaintext_hex);
-    var n = buildDatagram(link_key, step.epoch, step.seq, plaintext, out);
+    var n = buildDatagram(link_key, key_id, step.epoch, step.seq, plaintext, out);
     switch (step.mutation) {
         .none => {},
         .bad_version => out[0] = 2,
         .bad_flags => out[1] = 1,
-        .bad_reserved => out[2] = 1,
         .zero_epoch => @memset(out[4..12], 0),
         .truncate_header => n = reactor.HEADER_LEN - 1,
         .flip_tag => out[n - 1] ^= 0xff,
@@ -330,9 +327,9 @@ const RxResult = struct {
     epoch_after: u64,
 };
 
-fn runRxStep(rx: *crypto.RxSession, link_key: crypto.Key, step: RxStep) !RxResult {
+fn runRxStep(rx: *crypto.RxSession, link_key: crypto.Key, key_id: u16, step: RxStep) !RxResult {
     var dgram: [reactor.MAX_WIRE]u8 = undefined;
-    const wire = try buildRxDatagram(link_key, step, &dgram);
+    const wire = try buildRxDatagram(link_key, key_id, step, &dgram);
     var out: [reactor.MAX_PLAINTEXT]u8 = undefined;
     const r = reactor.decodeIngress(rx, wire, &out);
     var res: RxResult = .{ .accepted = r != null, .plaintext = undefined, .plaintext_len = 0, .epoch_after = rx.epoch };
@@ -444,8 +441,8 @@ pub fn writeJson(out: []u8) ![]const u8 {
 
         for (c.steps, 0..) |step, si| {
             var dgram: [reactor.MAX_WIRE]u8 = undefined;
-            const wire = try buildRxDatagram(link, step, &dgram);
-            const res = try runRxStep(&rx, link, step);
+            const wire = try buildRxDatagram(link, @intCast(c.from_id), step, &dgram);
+            const res = try runRxStep(&rx, link, @intCast(c.from_id), step);
 
             try w.print(
                 "        {{\n" ++
@@ -507,6 +504,9 @@ test "sender datagram decodes back to the input plaintext" {
 
         try std.testing.expectEqual(reactor.WIRE_VERSION, wire[0]);
         try std.testing.expectEqual(@as(u8, 0), wire[1]);
+        // Bytes [2..4] carry the sender's mesh id as the little-endian key_id
+        // selector (issue #34).
+        try std.testing.expectEqual(@as(u16, @intCast(v.from_id)), std.mem.readInt(u16, wire[2..][0..2], .little));
         try std.testing.expectEqual(v.epoch, std.mem.readInt(u64, wire[4..][0..8], .little));
         try std.testing.expectEqual(v.seq, std.mem.readInt(u64, wire[12..][0..8], .little));
 
@@ -530,17 +530,17 @@ test "receiver: accept, replay, reorder semantics" {
     const link = try rxLink(c);
     var rx = crypto.RxSession.init(link);
 
-    const r0 = try runRxStep(&rx, link, c.steps[0]);
+    const r0 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[0]);
     try std.testing.expect(r0.accepted); // first valid accepted
     try std.testing.expectEqual(c.steps[0].epoch, r0.epoch_after);
 
-    const r1 = try runRxStep(&rx, link, c.steps[1]);
+    const r1 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[1]);
     try std.testing.expect(!r1.accepted); // byte-identical replay dropped
 
-    const r2 = try runRxStep(&rx, link, c.steps[2]);
+    const r2 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[2]);
     try std.testing.expect(r2.accepted); // in-window reorder accepted
 
-    const r3 = try runRxStep(&rx, link, c.steps[3]);
+    const r3 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[3]);
     try std.testing.expect(!r3.accepted); // its replay dropped
 }
 
@@ -549,16 +549,16 @@ test "receiver: header/auth rejections never corrupt session state" {
     const link = try rxLink(c);
     var rx = crypto.RxSession.init(link);
 
-    // Steps 0..6 are all malformed/tampered and MUST drop without adopting an
+    // Steps 0..5 are all malformed/tampered and MUST drop without adopting an
     // epoch (state stays pristine).
     var i: usize = 0;
-    while (i < 7) : (i += 1) {
-        const r = try runRxStep(&rx, link, c.steps[i]);
+    while (i < 6) : (i += 1) {
+        const r = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[i]);
         try std.testing.expect(!r.accepted);
         try std.testing.expectEqual(@as(u64, 0), rx.epoch); // never mutated
     }
-    // Step 7 is clean and must still be accepted.
-    const last = try runRxStep(&rx, link, c.steps[7]);
+    // Step 6 is clean and must still be accepted.
+    const last = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[6]);
     try std.testing.expect(last.accepted);
 }
 
@@ -567,15 +567,15 @@ test "receiver: forward-only epoch ordering and window reset" {
     const link = try rxLink(c);
     var rx = crypto.RxSession.init(link);
 
-    const r0 = try runRxStep(&rx, link, c.steps[0]);
+    const r0 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[0]);
     try std.testing.expect(r0.accepted);
     try std.testing.expectEqual(c.steps[0].epoch, rx.epoch);
 
-    const r1 = try runRxStep(&rx, link, c.steps[1]); // older epoch
+    const r1 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[1]); // older epoch
     try std.testing.expect(!r1.accepted);
     try std.testing.expectEqual(c.steps[0].epoch, rx.epoch); // unchanged
 
-    const r2 = try runRxStep(&rx, link, c.steps[2]); // newer epoch, seq 1 again
+    const r2 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[2]); // newer epoch, seq 1 again
     try std.testing.expect(r2.accepted);
     try std.testing.expectEqual(c.steps[2].epoch, rx.epoch); // adopted
 }
@@ -587,9 +587,9 @@ test "receiver: preloaded session rejects a stale epoch" {
     rx.epoch = c.init_epoch;
     rx.skey = crypto.deriveSessionKey(link, c.init_epoch);
 
-    const r0 = try runRxStep(&rx, link, c.steps[0]); // older than preload
+    const r0 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[0]); // older than preload
     try std.testing.expect(!r0.accepted);
 
-    const r1 = try runRxStep(&rx, link, c.steps[1]); // at preloaded epoch
+    const r1 = try runRxStep(&rx, link, @intCast(c.from_id), c.steps[1]); // at preloaded epoch
     try std.testing.expect(r1.accepted);
 }

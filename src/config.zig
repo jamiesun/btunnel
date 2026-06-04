@@ -53,6 +53,9 @@ pub const SanityError = error{
     /// role=spoke: a `local_routes` entry is 0.0.0.0/0, which would tie the
     /// default hub route and trap ALL traffic locally — almost always a mistake.
     SpokeLocalRouteTooBroad,
+    /// A mesh id (this node's `local_id` or a peer's `id`) exceeds 65535 and so
+    /// cannot fit the 16-bit on-wire `key_id` selector (issue #34).
+    PeerIdOutOfRange,
 };
 
 /// CIDR string parse errors (canonical home; re-exported by `policy.zig`).
@@ -237,6 +240,13 @@ pub const Config = struct {
         if (self.local_tun_mtu < MTU_MIN or self.local_tun_mtu > MTU_MAX) {
             return SanityError.MtuOutOfRange;
         }
+        // Mesh ids ride the 16-bit on-wire key_id selector (issue #34), so this
+        // node's id and every peer id must fit u16.
+        if (self.local_id > 0xFFFF) return SanityError.PeerIdOutOfRange;
+        i = 0;
+        while (i < self.peer_count) : (i += 1) {
+            if (self.peers[i].id > 0xFFFF) return SanityError.PeerIdOutOfRange;
+        }
         for (host_subnets) |hs| {
             if (self.virtual_subnet.overlaps(hs)) return SanityError.SubnetOverlap;
         }
@@ -392,6 +402,21 @@ test "validate: MTU out of range is rejected" {
 
     cfg.local_tun_mtu = 1452;
     try cfg.validate(&.{});
+}
+
+test "validate: a peer or local id beyond the u16 key_id range is rejected (issue #34)" {
+    var cfg = Config.default();
+    cfg.peer_count = 1;
+    cfg.peers[0] = .{ .id = 0x1_0000, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
+    try std.testing.expectError(SanityError.PeerIdOutOfRange, cfg.validate(&.{}));
+
+    // The maximum in-range id clears the gate.
+    cfg.peers[0].id = 0xFFFF;
+    try cfg.validate(&.{});
+
+    // An out-of-range local_id (the egress key_id) is rejected too.
+    cfg.local_id = 0x1_0000;
+    try std.testing.expectError(SanityError.PeerIdOutOfRange, cfg.validate(&.{}));
 }
 
 test "validate: virtual/host subnet overlap is rejected" {

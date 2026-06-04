@@ -331,10 +331,11 @@ pub fn formatStatus(
         const a: u32 = std.mem.bigToNative(u32, pr.endpoint.addr);
         const port: u16 = std.mem.bigToNative(u16, pr.endpoint.port);
         const src: u32 = pr.allowed_src.network;
-        W.p(out, &len, "  id={d} endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d}\n", .{
+        W.p(out, &len, "  id={d} endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d} last_seen_wall_ns={d}\n", .{
             pr.id,
             (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
             (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
+            pr.last_seen_wall_ns,
         });
     }
 
@@ -345,6 +346,7 @@ pub fn formatStatus(
     W.p(out, &len, "  udp_rx packets={d} bytes={d}\n", .{ c.udp_rx_packets, c.udp_rx_bytes });
     W.p(out, &len, "  tun_tx packets={d} bytes={d}\n", .{ c.tun_tx_packets, c.tun_tx_bytes });
     W.p(out, &len, "  relay  packets={d} bytes={d}\n", .{ c.relay_packets, c.relay_bytes });
+    W.p(out, &len, "  endpoint_learned={d}\n", .{c.udp_endpoint_learned});
     W.p(out, &len, "drops:\n", .{});
     W.p(out, &len, "  tun: not_ipv4={d} no_route={d} drop_rule={d} local_loop={d} unknown_target={d} oversized={d} egress_err={d} send_err={d}\n", .{
         c.drop_tun_not_ipv4,      c.drop_tun_no_route,  c.drop_tun_drop_rule, c.drop_tun_local_loop,
