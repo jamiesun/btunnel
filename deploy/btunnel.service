@@ -1,8 +1,14 @@
 [Unit]
 Description=BTunnel pure-Zig L3 UDP tunnel
 Documentation=https://github.com/jamiesun/btunnel
-After=network-online.target
-Wants=network-online.target
+# network-online: the underlay must be up before the daemon binds its UDP socket.
+# time-sync: the session key is derived from a CLOCK_REALTIME boot epoch and peers
+# order sessions forward-only, so a clock that runs backward across a restart makes
+# the new (lower) epoch be rejected until peers' clocks catch up. Ordering after
+# time-sync.target keeps the clock monotonic across restarts on RTC-less hardware
+# (see "Time synchronization (required)" in docs/deployment.md).
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 Type=simple

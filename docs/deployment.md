@@ -181,6 +181,23 @@ sudo install -m 0755 zig-out/bin/btunnel /usr/local/bin/btunnel
 sudo systemctl restart btunnel
 ```
 
+> **Time synchronization (required).** The fresh-epoch-per-restart property above
+> relies on a sane wall clock: the session key is derived from a boot epoch
+> sampled from `CLOCK_REALTIME` at startup, and a receiver orders sessions
+> **forward-only** (a newer epoch supersedes an older one). The daemon fails
+> closed if the clock reads earlier than 2024-01-01, but it **cannot** detect a
+> clock that runs *backward across a restart*. If a node restarts with a wall
+> clock earlier than its previous boot (e.g. no battery-backed RTC and NTP has
+> not synced yet), its new, lower epoch is rejected by every peer until their
+> clocks advance past the old value — the link silently blackholes and the peer's
+> `auth_or_invalid` drop counter (above) climbs. **Mitigation:** run a time
+> daemon (`chrony` / `systemd-timesyncd`); on hardware without an RTC, order
+> `btunnel.service` after `time-sync.target` (`After=time-sync.target` +
+> `Wants=time-sync.target`) so the clock is monotonic across restarts. If a clock
+> did jump backward, restart **both** ends of the affected link to force a fresh
+> epoch on each side. A symmetric, clock-independent fix (epoch exchange) is
+> deferred to the v2 handshake.
+
 ## 7. Firewall / NAT requirements
 
 - The **Hub** must accept inbound UDP on its `listen_port` (default `51820`) from
