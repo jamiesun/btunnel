@@ -49,6 +49,11 @@ src/
   uds.zig      控制面 Unix 域套接字 + 指令分词器
   main.zig     btunnel 守护进程入口
   ptctl.zig    ptctl 控制工具入口
+tools/               独立辅助工具，绝不打进守护进程二进制（见 tools/README.md）
+  keygen.zig         生成每条链路的 64 位十六进制 PSK（zig build tool:keygen）
+  config-lint.zig    离线校验 config.json，不依赖系统时钟（zig build tool:config-lint）
+  wire-decode.zig    离线只读数据报解码器（zig build tool:wire-decode）
+  doctor.sh          环境预检：/dev/net/tun、CAP_NET_ADMIN、ip、时钟
 docs/
   btunnel-develop.md  系统需求与架构设计说明书（PRD & Architecture）
 ```

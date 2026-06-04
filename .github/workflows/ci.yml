@@ -40,6 +40,18 @@ jobs:
       - name: zig build test
         run: zig build test --summary all
 
+      - name: zig build tools-test
+        run: zig build tools-test --summary all
+
+      - name: Enforce one-way tools dependency (src/ must not import tools/)
+        run: |
+          set -euo pipefail
+          if grep -rn '@import("[^"]*tools/' src/; then
+            echo "ERROR: the data plane under src/ must not import anything from tools/ (issue #57)." >&2
+            exit 1
+          fi
+          echo "OK: no src/ -> tools/ imports."
+
   cross-build:
     name: Cross-build ${{ matrix.arch }} (static + size budget)
     runs-on: ubuntu-latest
