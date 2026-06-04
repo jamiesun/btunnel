@@ -2,7 +2,19 @@
 
 **纯 Zig 编写、零依赖的三层 UDP 隧道，最终产出一个小于 512KB 的静态单二进制文件。**
 
+[![CI](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml)
+[![Release](https://github.com/jamiesun/btunnel/actions/workflows/release.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/jamiesun/btunnel?sort=semver)](https://github.com/jamiesun/btunnel/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/jamiesun/btunnel)](LICENSE)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+![Binary size](https://img.shields.io/badge/binary-%E2%89%A4512KB-44cc11)
+[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5-2b90d9)](https://github.com/jamiesun/btunnel/releases/latest)
+
 [English](README.md) · **简体中文**
+
+<p align="center">
+  <img src="btunnel.png" alt="BTunnel — 三层 UDP 隧道，纯 Zig，静态单二进制：TUN 入口、加密封装、星型中继、策略路由、Spoke 出口" width="100%">
+</p>
 
 > 用**纯 Zig**（锁定 2026 最新标准库 `std.posix`）编写的虚拟三层（Layer 3）自适应组网工具。
 > 面向通用 Linux 环境（含轻量级容器如 BusyBox / Container），零依赖、零动态分配、强隐蔽。

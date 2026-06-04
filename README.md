@@ -2,7 +2,19 @@
 
 **A pure-Zig, zero-dependency Layer-3 UDP tunnel that ships as a single static binary under 512KB.**
 
+[![CI](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml)
+[![Release](https://github.com/jamiesun/btunnel/actions/workflows/release.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/jamiesun/btunnel?sort=semver)](https://github.com/jamiesun/btunnel/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/jamiesun/btunnel)](LICENSE)
+[![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
+![Binary size](https://img.shields.io/badge/binary-%E2%89%A4512KB-44cc11)
+[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5-2b90d9)](https://github.com/jamiesun/btunnel/releases/latest)
+
 **English** · [简体中文](README.zh-CN.md)
+
+<p align="center">
+  <img src="btunnel.png" alt="BTunnel — Layer-3 UDP tunnel, pure Zig, static binary: TUN ingress, encrypt &amp; seal, star relay, policy routing, spoke egress" width="100%">
+</p>
 
 > A virtual Layer-3 adaptive networking tool written in **pure Zig** (pinned to the
 > 2026 latest standard library `std.posix`).
