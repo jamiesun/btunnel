@@ -65,6 +65,7 @@ RUN set -eux; \
 WORKDIR /src
 COPY build.zig build.zig.zon ./
 COPY src ./src
+COPY tests ./tests
 COPY config.example.json ./
 
 # Map the Docker TARGETARCH/TARGETVARIANT to a Zig musl triple + CPU model and
