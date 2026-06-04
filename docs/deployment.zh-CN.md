@@ -187,6 +187,30 @@ sudo systemctl restart btunnel
 - 如果某个 spoke 的 NAT 映射发生变化，Hub 会从它下一个已认证数据报中重新学习该 spoke 的新端点
   （issue #34），因此回包会自动跟随。保持 **Hub** 端点稳定；始终由 spoke 发起。
 
+### Hub 使用动态 IP（DDNS）
+
+端点配置是数字 `IP:port`，且 endpoint learning 是**单向**的——Hub 能学到漫游的 spoke，
+但 spoke 无法发现一个换了地址的 Hub（它要发出第一个包必须先有正确的目的地址）。因此守护进程
+**不**解析主机名、也不在运行时重解析：一个守护进程内的实时 DNS 客户端会把解析器/线程/状态
+拉进刻意保持极简、零依赖、单线程的数据面（铁律 #1/#3）。
+
+常规答案是给 Hub 一个**稳定的公网 IP**（一台小 VPS）。如果你必须让 Hub 跑在**动态**地址后面，
+就在每个 spoke 上用一个极小的 DDNS 监视脚本从运维层解决——无需任何守护进程改动。重启是
+**无状态且廉价的**（每个生命周期都派生一个全新的 session epoch），所以"重新指向"只是改配置 + 重启：
+
+```bash
+# /usr/local/bin/btunnel-ddns.sh —— 在每个 spoke 上用 systemd timer 每约 60s 运行一次
+new=$(getent hosts hub.example.com | awk '{print $1}')
+cur=$(grep -oE '[0-9.]+:[0-9]+' /etc/btunnel/config.json | head -1 | cut -d: -f1)
+[ -n "$new" ] && [ "$new" != "$cur" ] && {
+  sed -i "s/$cur/$new/" /etc/btunnel/config.json
+  systemctl restart btunnel        # 无状态重启：派生一个全新 epoch
+}
+```
+
+只在启动时解析一次主机名**并不是** DDNS——它会漏掉启动之后的任何地址变化，而这正是本监视脚本
+处理的情况。
+
 ## 8. 运营商跨区整形（Cross-ISP / cross-region traffic shaping）
 
 在长距离、跨运营商或跨地域的链路上，抖动和丢包的主要成因**不是**隧道“被识别”，而是 underlay：
