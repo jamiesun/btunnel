@@ -1,0 +1,159 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # create the GitHub Release + upload assets
+  packages: write   # push the container image to GHCR
+
+env:
+  ZIG_VERSION: "0.16.0"
+  # Pinned upstream SHA256 (x86_64-linux), see https://ziglang.org/download/index.json
+  ZIG_SHA256_X86_64: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+
+jobs:
+  binaries:
+    name: Build static binaries (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-linux-musl
+            cpu: ""
+          - arch: arm64
+            target: aarch64-linux-musl
+            cpu: ""
+          - arch: armv7
+            target: arm-linux-musleabihf
+            cpu: "generic+v7a"
+          - arch: armv5
+            target: arm-linux-musleabi
+            cpu: "arm926ej_s"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Cross-build static musl binaries (ReleaseSmall)
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          size_budget=524288   # 512 KiB, iron law #6
+          cpu_arg=""
+          if [ -n "${{ matrix.cpu }}" ]; then cpu_arg="-Dcpu=${{ matrix.cpu }}"; fi
+          zig build -Dtarget="${{ matrix.target }}" $cpu_arg -Doptimize=ReleaseSmall
+          for bin in btunnel ptctl; do
+            path="zig-out/bin/${bin}"
+            # Iron law #6: each artifact must be static and within budget.
+            if readelf -d "$path" 2>/dev/null | grep -q NEEDED; then
+              echo "ERROR: ${path} (${{ matrix.target }}) is dynamically linked" >&2
+              exit 1
+            fi
+            size=$(stat -c%s "$path")
+            echo "${bin} (${{ matrix.arch }}): ${size} bytes"
+            if [ "$size" -gt "$size_budget" ]; then
+              echo "ERROR: ${path} ${size} bytes exceeds ${size_budget} budget" >&2
+              exit 1
+            fi
+          done
+          stage="btunnel-${version}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$stage"
+          cp zig-out/bin/btunnel zig-out/bin/ptctl "dist/$stage/"
+          cp config.example.json README.md README.zh-CN.md LICENSE "dist/$stage/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
+          rm -rf "dist/$stage"
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: btunnel-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect assets + combined checksums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -name '*.tar.gz' -exec cp {} dist/ \;
+          ( cd dist && sha256sum *.tar.gz > SHA256SUMS.txt )
+          ls -l dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" \
+            --repo "$REPO" \
+            --title "BTunnel ${VERSION}" \
+            --generate-notes \
+            dist/*.tar.gz dist/SHA256SUMS.txt
+
+  image:
+    name: Build + push multi-arch image (GHCR)
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve lowercase image name
+        id: img
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/btunnel" >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      # Multi-platform output needs the docker-container buildx driver. No qemu
+      # is required: the Dockerfile build stage is pinned to BUILDPLATFORM and
+      # Zig cross-compiles, while the final `scratch` stage only copies files.
+      - name: Set up buildx (docker-container driver)
+        run: |
+          set -euo pipefail
+          docker buildx create --name btbuilder --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      - name: Log in to GHCR
+        run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push (amd64, arm64, arm/v7, arm/v5)
+        run: |
+          set -euo pipefail
+          image="${{ steps.img.outputs.image }}"
+          version="${{ steps.img.outputs.version }}"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v5 \
+            --tag "${image}:${version}" \
+            --tag "${image}:latest" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --label "org.opencontainers.image.revision=${{ github.sha }}" \
+            --label "org.opencontainers.image.version=${version}" \
+            --push \
+            .

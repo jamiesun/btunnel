@@ -16,6 +16,19 @@ const std = @import("std");
 const linux = std.os.linux;
 const bt = @import("btunnel");
 
+// Pre-ARMv6 targets (e.g. armv5te) lack hardware atomics, so the standard
+// library's threaded primitives leave undefined `__sync_*` references. BTunnel
+// is single-threaded (iron law #3), so a plain in-house shim resolves them
+// safely. Only linked in for arm CPUs without the v6 feature.
+const builtin = @import("builtin");
+comptime {
+    if (builtin.cpu.arch == .arm and
+        !std.Target.arm.featureSetHas(builtin.cpu.features, .has_v6))
+    {
+        _ = @import("atomic_shim.zig");
+    }
+}
+
 const CONFIG_PATH = "config.json";
 const CONFIG_MAX = 64 * 1024;
 const DEFAULT_TUN = "btun0";
