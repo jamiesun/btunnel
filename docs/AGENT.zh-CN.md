@@ -69,7 +69,25 @@
 - **先验证再宣称完成。** 在声明某任务完成前，先构建、跑 `zig build test`，并确认二进制仍为
   静态链接且体积在预算内。
 
-## 6. 本文件的同步规则
+## 6. 发布与版本规范
+
+发布版本号只存在于**唯一一处**：[`build.zig.zon`](build.zig.zon) 的 `.version`
+字段。它在构建期通过 `build_options` 模块注入守护进程横幅——**绝不要在 `src/`
+中硬编码版本字符串。**
+
+发布前：
+
+1. 将 `build.zig.zon` 的 `.version` 升到新的 `X.Y.Z`（语义化版本）。
+2. 通过正常 PR 流程把该改动提交到 `main`。
+3. 给该 commit 打标签 `vX.Y.Z`——标签**必须**等于 `v` + `build.zig.zon` 中的版本。
+   发布工作流有一个守卫作业，二者不一致时会让发布失败，因此错配的标签永远不会发布。
+4. 推送 `v*` 标签会触发 `.github/workflows/release.yml`，构建四架构静态二进制、
+   GHCR 多架构镜像，以及可 `docker load` 的离线分架构镜像包，并连同合并的
+   `SHA256SUMS.txt` 一起发布到 GitHub Release。
+
+未先把 `build.zig.zon` 升到对应版本，不得创建 `v*` 标签。
+
+## 7. 本文件的同步规则
 
 **每当你修改 `AGENT.md`，必须在同一次改动中同步更新本文件
 [`docs/AGENT.zh-CN.md`](AGENT.zh-CN.md)，使两者语义完全一致；反之亦然。**

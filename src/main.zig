@@ -15,6 +15,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const bt = @import("btunnel");
+const build_options = @import("build_options");
 
 // Pre-ARMv6 targets (e.g. armv5te) lack hardware atomics, so the standard
 // library's threaded primitives leave undefined `__sync_*` references. BTunnel
@@ -115,8 +116,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (hasFlag(init.args, "--check")) {
         std.debug.print(
-            "btunnel v0.1.0 (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) [config ok]\n",
-            .{ cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len },
+            "btunnel v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) [config ok]\n",
+            .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len },
         );
         return;
     }
@@ -167,8 +168,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer control.deinit();
 
     std.debug.print(
-        "btunnel v0.1.0 (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) tun={s} sock={s} [ready]\n",
-        .{ cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len, tun.ifname(), sock_path },
+        "btunnel v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) tun={s} sock={s} [ready]\n",
+        .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len, tun.ifname(), sock_path },
     );
 
     var reactor = bt.reactor.Reactor.init(tun.fd, udp_fd, &control, &active, &registry);

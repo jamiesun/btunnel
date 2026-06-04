@@ -94,6 +94,28 @@ docker run -d --name btunnel \
 Zig 交叉编译，因此无需 QEMU 模拟。运行时镜像见 [`Dockerfile`](Dockerfile)，
 开发/测试工具链见 [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)。
 
+### 离线 / 内网隔离安装
+
+无法访问镜像仓库的设备，可使用每个 GitHub Release 附带的分架构
+`docker load` 镜像包（`btunnel-image-<版本>-<架构>.tar.gz`）：
+
+```bash
+# 把对应架构的 tar 包拷贝到目标设备，然后：
+docker load < btunnel-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/btunnel:v0.1.0
+docker run -d --name btunnel \
+    --cap-add=NET_ADMIN --device=/dev/net/tun \
+    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
+    ghcr.io/jamiesun/btunnel:v0.1.0
+```
+
+加载前请用 Release 中的 `SHA256SUMS.txt` 校验文件完整性。
+
+### 发布流程
+
+版本号单一来源于 [`build.zig.zon`](build.zig.zon) 的 `.version`，在构建期注入
+守护进程横幅。发布 `vX.Y.Z`：把 `.version` 升到 `X.Y.Z`，合并到 `main`，再推送
+对应的 `vX.Y.Z` 标签。若标签与 `build.zig.zon` 不一致，发布工作流会拒绝发布。
+
 ## 🧪 本地集成测试（开发容器）
 
 系统调用密集的数据通路（TUN 设备、epoll 反应堆、AF_UNIX 控制套接字）只能在

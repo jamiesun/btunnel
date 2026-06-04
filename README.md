@@ -112,6 +112,30 @@ cross-compiles with Zig pinned to `$BUILDPLATFORM`, so no QEMU emulation is
 needed. See [`Dockerfile`](Dockerfile) for the runtime image and
 [`.devcontainer/Dockerfile`](.devcontainer/Dockerfile) for the dev/test toolchain.
 
+### Offline / air-gapped install
+
+Devices that cannot reach a container registry can use the per-arch
+`docker load`-able image tarballs attached to each GitHub Release
+(`btunnel-image-<version>-<arch>.tar.gz`):
+
+```bash
+# Copy the tarball for the target arch to the device, then:
+docker load < btunnel-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/btunnel:v0.1.0
+docker run -d --name btunnel \
+    --cap-add=NET_ADMIN --device=/dev/net/tun \
+    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
+    ghcr.io/jamiesun/btunnel:v0.1.0
+```
+
+Verify any asset against the release's `SHA256SUMS.txt` before loading.
+
+### Cutting a release
+
+The version is single-sourced in [`build.zig.zon`](build.zig.zon) (`.version`)
+and injected into the daemon banner at build time. To publish `vX.Y.Z`: bump
+`.version` to `X.Y.Z`, merge to `main`, then push a matching `vX.Y.Z` tag. The
+release workflow refuses to publish if the tag and `build.zig.zon` disagree.
+
 ## 🧪 Local integration testing (dev container)
 
 The syscall-heavy data path (TUN device, epoll reactor, AF_UNIX control socket)

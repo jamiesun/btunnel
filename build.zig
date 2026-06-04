@@ -1,7 +1,17 @@
 const std = @import("std");
 
+// Single source of truth for the release version: `build.zig.zon`'s `.version`.
+// It is injected into the daemon banner via the `build_options` module below,
+// so the string is never duplicated in source. Bump it there before tagging
+// (see AGENT.md §6).
+const version = @import("build.zig.zon").version;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+
+    // Expose the package version to the daemon as `@import("build_options")`.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
     // Default to ReleaseSmall per the design doc (≤ 512KB static binary target).
     // Unlike `standardOptimizeOption`, this makes a bare `zig build` (no flags)
     // resolve to ReleaseSmall instead of Debug, while still honoring explicit
@@ -37,6 +47,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(btunnel);
+    btunnel.root_module.addOptions("build_options", build_options);
 
     // ptctl: the lightweight UDS control client.
     const ptctl = b.addExecutable(.{

@@ -24,7 +24,7 @@ jobs:
     name: Unit tests (zig build test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
@@ -60,7 +60,7 @@ jobs:
             target: arm-linux-musleabi
             cpu: "arm926ej_s"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
@@ -95,7 +95,7 @@ jobs:
     name: Integration + e2e (static binary, size budget, netns relay)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
