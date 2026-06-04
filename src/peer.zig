@@ -74,12 +74,14 @@ const MIN_BOOT_EPOCH_NS: u64 = 1_704_067_200 * std.time.ns_per_s;
 /// a zero/low epoch would be catastrophic. On a non-Linux host (unit tests only;
 /// never a real deployment) a fixed in-range constant is returned.
 ///
-/// Residual limitation (documented): if a node's wall clock runs BACKWARD across
-/// a restart (e.g. no RTC and not yet NTP-synced), its new epoch may be lower
-/// than a peer's last-seen epoch, and that peer will reject the new session
-/// until wall time advances past the old epoch. Operators must keep the clock
-/// monotonic across restarts (RTC/NTP) or restart both ends. The symmetric fix
-/// is deferred to the v2 handshake.
+/// Residual limitation (accepted by design, not deferred): if a node's wall clock
+/// runs BACKWARD across a restart (e.g. no RTC and not yet NTP-synced), its new
+/// epoch may be lower than a peer's last-seen epoch, and that peer will reject the
+/// new session until wall time advances past the old epoch. Operators must keep
+/// the clock monotonic across restarts (RTC/NTP) or restart both ends. There is
+/// no in-protocol symmetric fix: BTunnel performs no handshake by design (AGENT.md
+/// iron law #8), so this is mitigated operationally (see docs/deployment.md),
+/// never by an epoch-exchange handshake.
 pub fn bootEpoch() RegistryError!u64 {
     if (builtin.os.tag != .linux) return MIN_BOOT_EPOCH_NS;
     var ts: linux.timespec = undefined;
