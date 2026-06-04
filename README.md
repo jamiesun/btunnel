@@ -67,6 +67,11 @@ src/
   uds.zig      Control-plane Unix domain socket + command tokenizer
   main.zig     btunnel daemon entry point
   ptctl.zig    ptctl control tool entry point
+tools/               Out-of-tree helper utilities, never shipped in the daemon (see tools/README.md)
+  keygen.zig         Generate per-link 64-hex PSKs (zig build tool:keygen)
+  config-lint.zig    Offline config.json validation, clock-independent (zig build tool:config-lint)
+  wire-decode.zig    Offline read-only datagram inspector (zig build tool:wire-decode)
+  doctor.sh          Environment preflight: /dev/net/tun, CAP_NET_ADMIN, ip, clock
 docs/
   btunnel-develop.md  System requirements & architecture design (PRD & Architecture)
   PROTOCOL.md         Normative wire-protocol spec (v1) — the cross-impl interoperability contract

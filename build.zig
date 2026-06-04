@@ -85,6 +85,51 @@ pub fn build(b: *std.Build) void {
     const vectors_run = b.addRunArtifact(gen_vectors);
     vectors_step.dependOn(&vectors_run.step);
 
+    // ------------------------------------------------------------------
+    // tools/: out-of-tree auxiliary utilities (issue #57). Each tool is a
+    // standalone executable exposed via its own `tool:<name>` step and is
+    // **never** part of the default `zig build` install, so a bare `zig build`
+    // keeps shipping only `btunnel` + `ptctl` and the static-size budget is
+    // untouched. Building a tool explicitly drops its binary under
+    // `zig-out/tools/`. Tools MAY import the `btunnel` core module to reuse
+    // config / crypto / protocol; the data plane (src/) must NEVER import
+    // anything under tools/ — the dependency is strictly one-way.
+    const tools_test_step = b.step("tools-test", "Run unit tests for the tools/ utilities");
+    const ToolSpec = struct { name: []const u8, src: []const u8, needs_core: bool };
+    const tool_specs = [_]ToolSpec{
+        .{ .name = "keygen", .src = "tools/keygen.zig", .needs_core = false },
+        .{ .name = "config-lint", .src = "tools/config-lint.zig", .needs_core = true },
+        .{ .name = "wire-decode", .src = "tools/wire-decode.zig", .needs_core = true },
+    };
+    for (tool_specs) |spec| {
+        const core_import = [_]std.Build.Module.Import{.{ .name = "btunnel", .module = core }};
+        const tool_mod = b.createModule(.{
+            .root_source_file = b.path(spec.src),
+            .target = target,
+            .optimize = optimize,
+            .imports = if (spec.needs_core) &core_import else &.{},
+        });
+        tool_mod.addOptions("build_options", build_options);
+
+        const tool_exe = b.addExecutable(.{ .name = spec.name, .root_module = tool_mod });
+        // Install only under the explicit step, into zig-out/tools/ — not the
+        // default install step, so `zig build` never ships these.
+        const tool_install = b.addInstallArtifact(tool_exe, .{
+            .dest_dir = .{ .override = .{ .custom = "tools" } },
+        });
+        const tool_step = b.step(
+            b.fmt("tool:{s}", .{spec.name}),
+            b.fmt("Build the {s} tool into zig-out/tools/ (not installed by default)", .{spec.name}),
+        );
+        tool_step.dependOn(&tool_install.step);
+
+        // Tool unit tests live behind `zig build tools-test`, kept out of the
+        // main `test` step so dev-only diagnostics never enter the shipped
+        // daemon's verification path.
+        const tool_tests = b.addTest(.{ .root_module = tool_mod });
+        tools_test_step.dependOn(&b.addRunArtifact(tool_tests).step);
+    }
+
     // `zig build run` runs the daemon.
     const run_step = b.step("run", "Run the btunnel daemon");
     const run_cmd = b.addRunArtifact(btunnel);
