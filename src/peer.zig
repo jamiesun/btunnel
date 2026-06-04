@@ -35,6 +35,9 @@ pub const Peer = struct {
     tx: crypto.TxSession,
     /// Receive session: forward-only epoch + per-session anti-replay window.
     rx: crypto.RxSession,
+    /// Wall-clock ns of the last authenticated datagram from this peer (issue
+    /// #34). Observability only (`ptctl status`); never drives protocol logic.
+    last_seen_wall_ns: u64 = 0,
 };
 
 pub const RegistryError = error{
@@ -44,8 +47,14 @@ pub const RegistryError = error{
     ReservedPeerId,
     SelfReference,
     MissingLocalId,
+    /// A mesh id (this node's or a peer's) does not fit the 16-bit on-wire
+    /// `key_id` selector (issue #34). Ids must be in 1..65535.
+    PeerIdOutOfRange,
     ClockUnavailable,
 };
+
+/// Largest mesh id that fits the 16-bit wire `key_id` selector (issue #34).
+pub const MAX_MESH_ID: u32 = 0xFFFF;
 
 /// Earliest plausible boot epoch: 2024-01-01T00:00:00Z in nanoseconds. A clock
 /// reporting an earlier wall time has not been set (no RTC / pre-NTP), which
@@ -106,6 +115,8 @@ pub const PeerRegistry = struct {
     ) RegistryError!*Peer {
         if (id == LOCAL_TARGET) return error.ReservedPeerId;
         if (id == self.local_id) return error.SelfReference;
+        // Both ids ride the 16-bit on-wire key_id selector (issue #34).
+        if (id > MAX_MESH_ID or self.local_id > MAX_MESH_ID) return error.PeerIdOutOfRange;
         if (self.len >= MAX_PEERS) return error.TooManyPeers;
         if (self.findById(id) != null) return error.DuplicateId;
         if (self.findByAddr(endpoint.addr, endpoint.port) != null) return error.DuplicateEndpoint;
@@ -214,6 +225,23 @@ test "registry: rejects reserved id, self-reference, duplicates, and overflow" {
     var ep_last = testEndpoint("10.1.0.1:1");
     ep_last.port = std.mem.nativeToBig(u16, port);
     try std.testing.expectError(RegistryError.TooManyPeers, reg2.add(psk, 999, ep_last, any, epoch));
+}
+
+test "registry: enforces the u16 key_id range for peer and local ids (issue #34)" {
+    const psk: crypto.Key = [_]u8{0x5a} ** crypto.KEY_LEN;
+    const any = config.Cidr{ .network = 0, .prefix = 0 };
+    const epoch: u64 = 1_700_000_000_000_000_000;
+
+    // The maximum in-range id (0xFFFF) is accepted: it still fits the wire key_id.
+    var reg = PeerRegistry.init(1);
+    _ = try reg.add(psk, MAX_MESH_ID, testEndpoint("10.0.0.9:1"), any, epoch);
+
+    // One past the range (0x10000) overflows the u16 selector and is rejected.
+    try std.testing.expectError(RegistryError.PeerIdOutOfRange, reg.add(psk, MAX_MESH_ID + 1, testEndpoint("10.0.0.8:1"), any, epoch));
+
+    // An out-of-range LOCAL id is likewise rejected (it becomes the egress key_id).
+    var reg_local = PeerRegistry.init(MAX_MESH_ID + 1);
+    try std.testing.expectError(RegistryError.PeerIdOutOfRange, reg_local.add(psk, 2, testEndpoint("10.0.0.7:1"), any, epoch));
 }
 
 test "registry: fromConfig requires a local_id when peers are present" {

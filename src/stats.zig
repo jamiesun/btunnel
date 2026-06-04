@@ -31,6 +31,9 @@ pub const Counters = struct {
     /// Authenticated inner packets relayed on to another peer (hub forwarding).
     relay_packets: u64 = 0,
     relay_bytes: u64 = 0,
+    /// Times a peer's UDP endpoint was relearned from an authenticated datagram
+    /// arriving from a new source endpoint (issue #34 roaming).
+    udp_endpoint_learned: u64 = 0,
 
     // --- TUN egress drops ---
     drop_tun_not_ipv4: u64 = 0,
@@ -43,10 +46,12 @@ pub const Counters = struct {
     drop_tun_send_err: u64 = 0,
 
     // --- UDP ingress drops ---
-    /// Source endpoint not a configured peer (admitted-source filter).
+    /// Header `key_id` selector matched no configured peer (issue #34). Identity
+    /// is now keyed on `key_id`, not the source endpoint, so a roaming spoke is
+    /// no longer dropped here merely for arriving from a new endpoint.
     drop_udp_unknown_peer: u64 = 0,
-    /// Authentication failure, replay, stale/zero epoch, or malformed header
-    /// (collapsed: see the module note).
+    /// Malformed header (incl. too short to parse), authentication failure,
+    /// replay, or stale/zero epoch (collapsed: see the module note).
     drop_udp_auth_or_invalid: u64 = 0,
     drop_udp_not_ipv4: u64 = 0,
     /// Inner source outside the peer's allowed_src prefix (anti-spoofing).

@@ -19,9 +19,9 @@
 > datagram bytes, the KAT `vectors` are authoritative — if this prose disagrees
 > with them, the vectors win. Receiver accept/drop behaviour is normative in §5
 > and is mechanically exercised by `receiver_cases`; the inner-source filter,
-> source-endpoint filter, and no-reflect relay guard (§5 steps 1, 7, 8) are
-> normative prose that the reference implementation enforces in its reactor loop
-> but that the cross-implementation KAT does not yet encode.
+> `key_id` peer selection, endpoint learning, and no-reflect relay guard (§5
+> steps 1, 7, 8, 9) are normative prose that the reference implementation enforces
+> in its reactor loop but that the cross-implementation KAT does not yet encode.
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are used as in
 RFC 2119.
@@ -32,9 +32,10 @@ RFC 2119.
 
 BTunnel forwards raw IPv4 packets between mesh nodes over an encrypted UDP
 underlay in a **single-hub hub-and-spoke** topology. Each node has a numeric
-mesh **id** (`u32`, non-zero). Every directional link `(from_id → to_id)` has
-its own keys, so a node's transmit key to a peer equals that peer's receive key
-for traffic from the node.
+mesh **id** that is non-zero and **MUST** fit a `u16` (`0 < id ≤ 65535`), so it
+can serve as the on-wire `key_id` selector (§3.1, §5). Every directional link
+`(from_id → to_id)` has its own keys, so a node's transmit key to a peer equals
+that peer's receive key for traffic from the node.
 
 This specification covers the **on-wire datagram**: how a plaintext inner IP
 packet becomes a UDP payload, and the rules a receiver applies to accept or
@@ -131,9 +132,17 @@ A BTunnel UDP payload is:
 |-------:|-----:|------------|------------|------------------------------------------------------|
 | 0      | 1    | `version`  | u8         | **MUST be `1`**                                      |
 | 1      | 1    | `flags`    | u8         | **MUST be `0`** in v1 (reserved)                    |
-| 2      | 2    | `reserved` | u16 **LE** | **MUST be `0`** in v1 (reserved for v2 negotiation) |
+| 2      | 2    | `key_id`   | u16 **LE** | sender's mesh id — the receiver's peer selector (§5) |
 | 4      | 8    | `epoch`    | u64 **LE** | sender boot epoch (§2.3); never `0`                 |
 | 12     | 8    | `seq`      | u64 **LE** | per-session monotonic sequence number / nonce basis |
+
+> **`key_id` is an *unauthenticated* selector.** It is **not** covered by the AEAD
+> (AAD is empty, §2.2), so an on-path attacker can flip it freely. This is safe by
+> construction: `key_id` only chooses *which* peer's link key the receiver tries.
+> A wrong or forged `key_id` selects the wrong key, authentication fails, and the
+> datagram is dropped (fail-closed). It never weakens authentication; it only lets
+> a roaming/NATed sender be recognised by identity rather than by source endpoint
+> (§5). A peer's mesh id therefore **MUST** fit `u16` (`0 < id ≤ 65535`).
 
 > **Endianness trap (read carefully):** the header fields `epoch` and `seq` are
 > **little-endian**, but the *same* `epoch` value fed into the session KDF
@@ -157,7 +166,7 @@ To send inner IPv4 packet `P` to peer `D`:
 1. `key = session_key(link_key(psk, local_id, D.id), local_epoch)`.
 2. `seq = ` next value of this link's monotonic counter (starts at `1`, strictly
    increasing, **MUST NOT** repeat within a session/epoch).
-3. Emit header (§3.1) with `version=1, flags=0, reserved=0, epoch=local_epoch,
+3. Emit header (§3.1) with `version=1, flags=0, key_id=local_id, epoch=local_epoch,
    seq`.
 4. Append `ChaCha20-Poly1305-Seal(key, nonce(seq), "", P)`.
 5. Send the datagram to `D`'s UDP endpoint.
@@ -172,13 +181,16 @@ absolute. On any event that could reset the counter (e.g. process restart) it
 
 On a received UDP datagram from source endpoint `S`:
 
-1. **Source-endpoint filter.** Look up `S` (source IP + UDP port) in the peer
-   table. If unknown, **drop silently** (§7). This binds `S` to a known link key.
+1. **Identity selection (by `key_id`, not by endpoint).** Read `key_id` from the
+   header and look up the peer `P` whose mesh id equals it. If no peer matches,
+   **drop silently** (§7). The source endpoint `S` is **not** the identity here — a
+   NATed or roaming peer may legitimately arrive from an unexpected `S`. `key_id`
+   is only a *hint* until the datagram authenticates in step 4; a forged `key_id`
+   selects the wrong key and fails there.
 2. **Header validation** — drop silently if **any** of:
    - `len(datagram) < 20`;
    - `version != 1`;
    - `flags != 0`;
-   - `reserved != 0`;
    - `epoch == 0`.
 3. **Epoch ordering (forward-only).** Let `cur` be the highest epoch already
    accepted on this link (`0` if none).
@@ -187,22 +199,45 @@ On a received UDP datagram from source endpoint `S`:
    - If `epoch == cur`: use the cached `session_key`.
    - If `epoch > cur`: derive a **candidate** `session_key(link_key, epoch)` but
      do **not** commit it yet.
-4. **Authenticate & decrypt** with the selected key and `nonce(seq)`. On
+4. **Authenticate & decrypt** with `P`'s link key and `nonce(seq)`. On
    authentication failure or truncation, **drop silently**. (No state has been
-   mutated yet — a forged higher `epoch` cannot poison the session.)
+   mutated yet — a forged higher `epoch` or a wrong `key_id` cannot poison the
+   session.)
 5. **Commit a newer epoch.** Only now, if `epoch > cur`, adopt it: set
    `cur = epoch`, cache its key, and **reset** the anti-replay window.
 6. **Anti-replay.** Apply the 64-entry sliding window (§6) to `seq`. If the
    sequence is a replay or older than the window, **drop silently**.
 7. **Inner source check.** The decrypted IPv4 packet's **source address MUST**
-   fall within the `allowed_src` prefix bound to `S`. Otherwise **drop
-   silently** (defeats inner-source spoofing by an authenticated peer).
-8. **Route.** Look up the inner destination. Deliver to the local node, or (hub
+   fall within `P`'s `allowed_src` prefix. Otherwise **drop silently** (defeats
+   inner-source spoofing by an authenticated peer).
+8. **Endpoint learning (roaming).** The datagram has now fully authenticated
+   (steps 4–6) **and** passed the inner-source check (step 7), so it is genuinely
+   `P`. The receiver **MAY** record `S` as `P`'s current endpoint so that replies
+   and hub relays follow a roamed/NATed peer without operator intervention. This
+   step **MUST** come strictly after steps 4–7, so a replayed, forged, or
+   inner-source-spoofed datagram can never move an endpoint. Learning is runtime
+   state only — it is never written back to configuration.
+9. **Route.** Look up the inner destination. Deliver to the local node, or (hub
    only) relay to another peer. A hub **MUST NOT** reflect a packet back to its
    source peer.
 
-The order of steps 3–5 (authenticate **before** mutating any receive state) is
-**normative** and security-critical.
+The order of steps 3–5 (authenticate **before** mutating any receive state) and
+of step 8 (learn the endpoint **only after** steps 4–7) is **normative** and
+security-critical.
+
+> **Endpoint uniqueness is not an invariant.** Because peers are selected by
+> `key_id`, two peers may transiently share a learned endpoint (e.g. behind the
+> same NAT) with no loss of correctness — selection never depends on `S`. An
+> implementation **MAY** reject duplicate endpoints at *configuration* load as a
+> sanity check, but **MUST NOT** rely on endpoint uniqueness at runtime.
+>
+> **Residual risk — pre-observation epoch replay.** An on-path attacker who
+> captures an authenticated datagram for epoch `E` and replays it *before* the
+> receiver has observed `E` (`cur < E`) will pass steps 3–7 (adopt-epoch, reset
+> window, accept) and thus also *learn the attacker's endpoint*. This requires
+> on-path capture; an off-path attacker cannot forge an authenticator. It is the
+> standard trade-off of stateless-epoch establishment plus endpoint learning; a
+> handshake/challenge that closes it is deferred to v2 and is out of scope here.
 
 ---
 
@@ -224,7 +259,7 @@ The window is **reset** whenever a strictly newer epoch is adopted (§5.5).
 
 ## 7. Stealth / failure handling
 
-On **any** rejection — unknown source, malformed header, reserved bits set,
+On **any** rejection — unknown `key_id`, malformed header, non-zero `flags`,
 stale/zero epoch, authentication failure, replay, or inner-source violation —
 the endpoint **MUST silently drop** the datagram. It **MUST NOT** emit a TCP
 RST, an ICMP error, or any other observable response. The ciphertext **MUST
@@ -253,8 +288,10 @@ byte underlay path the largest safe inner MTU is `1500 - 64 = 1436`; operators
 - This document specifies **`wire_version = 1`**. A v1 receiver **MUST** drop any
   datagram whose `version` byte is not `1` (there is no in-band negotiation in
   v1).
-- The `flags` byte and the 2-byte `reserved` field are **reserved for the v2
-  handshake negotiation** and **MUST be zero** in v1, on both send and receive.
+- The `flags` byte is **reserved for the v2 handshake negotiation** and **MUST be
+  zero** in v1, on both send and receive. Header bytes [2..4] carry the `key_id`
+  selector (§3.1) — in v1 this is the sender's mesh id; it is **not** a free
+  negotiation field.
 - Two egress modes are reserved for v2 and are **not** part of the v1 wire
   contract: `kcp_arq` (in-house ARQ, MTU 1428) and `fec_xor` (forward error
   correction). A v1 implementation does not implement them.
