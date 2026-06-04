@@ -59,6 +59,7 @@ docs/
   btunnel-develop.md  System requirements & architecture design (PRD & Architecture)
   PROTOCOL.md         Normative wire-protocol spec (v1) — the cross-impl interoperability contract
   deployment.md       Hub + two-spoke production deployment walkthrough (systemd, secrets, upgrade)
+  routeros-container.md RouterOS Container deployment guide (veth, routes, LAN publishing)
 ```
 
 ## 🛠 Build
