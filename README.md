@@ -295,17 +295,19 @@ traffic:
   udp_rx packets=... bytes=...
   tun_tx packets=... bytes=...
   relay  packets=... bytes=...
+  endpoint_learned=..
 drops:
   tun: not_ipv4=.. no_route=.. drop_rule=.. local_loop=.. unknown_target=.. oversized=.. egress_err=.. send_err=..
   udp: unknown_peer=.. auth_or_invalid=.. not_ipv4=.. spoof=.. no_route=.. drop_rule=.. unknown_target=.. no_reflect=.. oversized=.. send_err=..
 ```
 
-Common signals: a rising `udp: unknown_peer` means datagrams are arriving from
-an endpoint that is not a configured peer (wrong IP/port, or a NAT remap — note
-v1 uses statically-configured endpoints); `auth_or_invalid` means the PSK/epoch
-or wire format does not match; `spoof` means a peer sent an inner source outside
-its `allowed_src`; `no_route` means no policy rule matches the destination. PSKs
-and derived keys are never printed.
+Common signals: a rising `udp: unknown_peer` means datagrams carry a header
+`key_id` that matches no configured peer (the sender's mesh id is wrong, or the
+traffic is unsolicited); `auth_or_invalid` means the PSK/epoch or wire format
+does not match; `spoof` means a peer sent an inner source outside its
+`allowed_src`; `no_route` means no policy rule matches the destination. A rising
+`endpoint_learned` is benign — it counts authenticated peers seen at a new UDP
+endpoint (roaming/NAT remap, issue #34). PSKs and derived keys are never printed.
 
 ### Production deployment (systemd)
 

@@ -194,10 +194,16 @@ fn ipv4Dst(pkt: []const u8) ?u32 {
     return std.mem.readInt(u32, pkt[16..][0..4], .big);
 }
 
-/// Extract the IPv4 source address (host byte order). Assumes the packet has
-/// already passed `ipv4Dst` validation (same header length guarantees).
+/// Extract the IPv4 source address (host byte order) after validating the
+/// header. Applies the **same** version/IHL/length checks as `ipv4Dst` so that
+/// the inner-source binding check and endpoint learning (issue #34) only ever
+/// run on a well-formed IPv4 packet, regardless of evaluation order.
 fn ipv4Src(pkt: []const u8) ?u32 {
     if (pkt.len < 20) return null;
+    if ((pkt[0] >> 4) != 4) return null; // version
+    const ihl = pkt[0] & 0x0f;
+    if (ihl < 5) return null;
+    if (pkt.len < @as(usize, ihl) * 4) return null;
     return std.mem.readInt(u32, pkt[12..][0..4], .big);
 }
 
@@ -1107,4 +1113,60 @@ test "pump: relay learns the source's endpoint, leaves the destination's untouch
     try std.testing.expectEqual(@as(u64, 1), ctr.udp_endpoint_learned);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, a_addr));
     try std.testing.expect(sameEndpoint(reg.findById(3).?.endpoint, b_addr));
+}
+test "pump: an authenticated non-IPv4 inner packet is dropped before endpoint learning (#41)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
+
+    var pipe_fds: [2]i32 = undefined;
+    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
+    defer _ = linux.close(pipe_fds[0]);
+    defer _ = linux.close(pipe_fds[1]);
+
+    const udp_hub = try makeUdpLoopback();
+    defer _ = linux.close(udp_hub);
+    const udp_a = try makeUdpLoopback();
+    defer _ = linux.close(udp_a);
+    const hub_addr = try addrOf(udp_hub);
+
+    // A is configured at a stale endpoint; if learning ran it would move to udp_a.
+    var reg = peer.PeerRegistry.init(1);
+    _ = try reg.add(psk, 2, fakeAddr(9), try policy.parseCidr("10.0.0.2/32"), TEST_EPOCH);
+
+    const entries = [_]policy.PolicyEntry{.{
+        .src = try policy.parseCidr("0.0.0.0/0"),
+        .dst = try policy.parseCidr("10.0.0.1/32"),
+        .action = .forward,
+        .target = peer.LOCAL_TARGET,
+    }};
+    var tree = policy.PolicyTree{ .entries = &entries };
+    var active = policy.ActiveTree.init(&tree);
+
+    var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
+    var ctr = stats.Counters{};
+    r.counters = &ctr;
+
+    const a_tx_key = crypto.deriveLinkKey(psk, 2, 1);
+    var a_tx = crypto.TxSession.init(a_tx_key, TEST_EPOCH);
+
+    // Authenticated but malformed inner: version nibble is 0 (not 4). Bytes
+    // [12..16] hold 10.0.0.2, which WOULD satisfy allowed_src if the source
+    // parser skipped IPv4 validation — so this packet must be dropped at the
+    // not_ipv4 gate, before any endpoint learning.
+    var bad = [_]u8{0} ** 28;
+    bad[12] = 10;
+    bad[13] = 0;
+    bad[14] = 0;
+    bad[15] = 2;
+    var wire: [MAX_WIRE]u8 = undefined;
+    const wl = encodeEgress(&a_tx, 2, &bad, &wire);
+    _ = linux.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    r.pumpUdpIngress();
+
+    var buf: [MAX_PLAINTEXT]u8 = undefined;
+    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_not_ipv4);
+    try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
+    try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, fakeAddr(9)));
 }

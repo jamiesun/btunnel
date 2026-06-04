@@ -10,9 +10,12 @@ For MikroTik/RouterOS Container deployments, read
 RouterOS model needs dedicated veth routing and container-side forwarding.
 
 > Topology (v1): single-hub hub-and-spoke. The Hub relays between spokes; spokes
-> do not relay. Peer endpoints are **statically configured** in v1 — a NATed
-> spoke must be able to reach the Hub's public `ip:port`, and the Hub must have a
-> stable, reachable endpoint.
+> do not relay. Peer **identity** is the per-peer PSK selected by the header
+> `key_id` (issue #34), not the source endpoint: a spoke's UDP endpoint is the
+> configured **bootstrap** value but is re-learned at runtime once an
+> authenticated datagram arrives, so a NATed/roaming spoke recovers without
+> operator action. The Hub must still have a stable, reachable endpoint that
+> every spoke can reach.
 
 ## 0. Components
 
@@ -162,9 +165,11 @@ sudo -E ptctl status      # peers, traffic counters, and per-reason drop counter
 ```
 
 `ptctl status` exits non-zero if the daemon is down. Rising drop counters point
-straight at the cause: `unknown_peer` (wrong endpoint / NAT remap),
-`auth_or_invalid` (PSK/epoch/wire mismatch), `spoof` (inner source outside
-`allowed_src`), or `no_route` (no matching policy). PSKs are never printed.
+straight at the cause: `unknown_peer` (header `key_id` matches no configured
+peer), `auth_or_invalid` (PSK/epoch/wire mismatch), `spoof` (inner source outside
+`allowed_src`), or `no_route` (no matching policy). The `endpoint_learned`
+counter rises whenever an authenticated peer is observed at a new UDP endpoint
+(roaming/NAT remap — see issue #34). PSKs are never printed.
 
 **Upgrade / rollback:** install the new binary and restart; the on-wire format is
 versioned and the data path is stateless across restarts (a fresh session epoch
@@ -182,6 +187,6 @@ sudo systemctl restart btunnel
   the internet.
 - Each **Spoke** only needs **outbound** UDP reachability to the Hub's
   `ip:port`; no inbound port-forwarding is required (the spoke initiates).
-- If a spoke's NAT mapping changes, v1 may keep sending to a stale endpoint
-  (static endpoints). Keep the Hub endpoint stable; dynamic spoke-endpoint
-  learning is tracked separately and not part of v1.
+- If a spoke's NAT mapping changes, the Hub re-learns the spoke's new endpoint
+  from its next authenticated datagram (issue #34), so replies follow it
+  automatically. Keep the **Hub** endpoint stable; spokes always initiate.
