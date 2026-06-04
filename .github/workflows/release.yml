@@ -15,8 +15,30 @@ env:
   ZIG_SHA256_X86_64: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
 
 jobs:
+  guard:
+    name: Verify tag matches build.zig.zon version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Assert git tag == build.zig.zon .version
+        run: |
+          set -euo pipefail
+          zon_ver=$(sed -n 's/^[[:space:]]*\.version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' build.zig.zon | head -1)
+          tag_ver="${GITHUB_REF_NAME#v}"
+          echo "build.zig.zon version = ${zon_ver}"
+          echo "git tag             = ${GITHUB_REF_NAME} (-> ${tag_ver})"
+          if [ -z "$zon_ver" ]; then
+            echo "ERROR: could not parse .version from build.zig.zon" >&2; exit 1
+          fi
+          if [ "$zon_ver" != "$tag_ver" ]; then
+            echo "ERROR: tag ${GITHUB_REF_NAME} does not match build.zig.zon version ${zon_ver}." >&2
+            echo "Bump .version in build.zig.zon to ${tag_ver} before tagging (see AGENT.md §6)." >&2
+            exit 1
+          fi
+
   binaries:
     name: Build static binaries (${{ matrix.arch }})
+    needs: guard
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -35,7 +57,7 @@ jobs:
             target: arm-linux-musleabi
             cpu: "arm926ej_s"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Zig ${{ env.ZIG_VERSION }}
         run: |
@@ -79,7 +101,7 @@ jobs:
           ls -l dist
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: btunnel-${{ matrix.arch }}
           path: dist/*.tar.gz
@@ -87,11 +109,11 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: binaries
+    needs: [binaries, image]
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
 
@@ -121,7 +143,7 @@ jobs:
     needs: binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve lowercase image name
         id: img
@@ -157,3 +179,30 @@ jobs:
             --label "org.opencontainers.image.version=${version}" \
             --push \
             .
+
+      # Air-gapped / registry-less devices: export each arch as a standalone
+      # `docker load`-able archive. Built from the same buildx cache as the push
+      # above, so the contents are identical to the published per-arch image.
+      - name: Export per-arch offline image tarballs
+        run: |
+          set -euo pipefail
+          image="${{ steps.img.outputs.image }}"
+          version="${{ steps.img.outputs.version }}"
+          mkdir -p images
+          for entry in "amd64:linux/amd64" "arm64:linux/arm64" "armv7:linux/arm/v7" "armv5:linux/arm/v5"; do
+            arch="${entry%%:*}"; plat="${entry#*:}"
+            docker buildx build \
+              --platform "$plat" \
+              --tag "${image}:${version}" \
+              --output "type=docker,dest=images/btunnel-image-${version}-${arch}.tar" \
+              .
+            gzip -9 "images/btunnel-image-${version}-${arch}.tar"
+          done
+          ls -l images
+
+      - name: Upload offline image artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: btunnel-images
+          path: images/*.tar.gz
+          retention-days: 1

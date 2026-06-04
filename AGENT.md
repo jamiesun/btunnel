@@ -87,7 +87,28 @@ reservation points.
   binary still links statically and stays under the size budget before declaring a
   task complete.
 
-## 6. Sync rule for this file
+## 6. Release & versioning discipline
+
+The release version lives in **exactly one place**: the `.version` field of
+[`build.zig.zon`](build.zig.zon). It is injected into the daemon banner at build
+time via the `build_options` module — **never hard-code a version string in
+`src/`.**
+
+Before publishing a release:
+
+1. Bump `.version` in `build.zig.zon` to the new `X.Y.Z` (semantic versioning).
+2. Commit that bump on `main` (via the normal PR flow).
+3. Tag the commit `vX.Y.Z` — the tag **must** equal `v` + the `build.zig.zon`
+   version. The release workflow has a guard job that fails the release if they
+   disagree, so a mismatched tag never ships.
+4. Pushing the `v*` tag triggers `.github/workflows/release.yml`, which builds
+   the four-arch static binaries, the GHCR multi-arch image, and the offline
+   `docker load`-able per-arch image tarballs, and publishes them all to the
+   GitHub Release with a combined `SHA256SUMS.txt`.
+
+Do not create a `v*` tag without first bumping `build.zig.zon` to match.
+
+## 7. Sync rule for this file
 
 **Whenever you edit `AGENT.md`, you MUST update
 [`docs/AGENT.zh-CN.md`](docs/AGENT.zh-CN.md) in the same change so the two stay
