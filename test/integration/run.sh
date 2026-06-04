@@ -16,8 +16,12 @@
 #   6. The multi-point + relay tunnel test: a 3-node hub-and-spoke star across
 #      network namespaces (one Hub relay + two Spokes). It asserts end-to-end
 #      delivery spoke-A -> Hub(relay) -> spoke-B, on-wire encryption (no
-#      plaintext marker on the underlay), and a non-stalling RCU policy
-#      hot-update under load. Requires --privileged + /dev/net/tun + tcpdump.
+#      plaintext marker on the underlay), a non-stalling RCU policy hot-update
+#      under load, honest drop-counter observability (an unrouted overlay packet
+#      bumps `tun: no_route`), resilience under underlay packet loss (netem) with
+#      full recovery, and endpoint roaming / NAT remap (the Hub relearns a spoke
+#      that moves to a new underlay address, with no handshake or restart).
+#      Requires --privileged + /dev/net/tun + tcpdump (netem step needs tc).
 #
 # Usage (from repo root, on the host):
 #   docker build -t btunnel-dev -f .devcontainer/Dockerfile .
@@ -204,6 +208,15 @@ ptctl_in() { # ptctl_in <ns> <sock> <args...>
   ip netns exec "$ns" env BTUNNEL_SOCK="$sock" "$PTCTL" "$@"
 }
 
+# Extract a `<key>=<number>` value from the ptctl-status line matched by a fixed
+# string. Echoes the number (empty if absent). The line filter disambiguates
+# keys that recur across sections (e.g. `no_route=` on both the tun and udp
+# drop lines).
+status_counter() { # status_counter <ns> <sock> <line-match> <key>
+  ip netns exec "$1" env BTUNNEL_SOCK="$2" "$PTCTL" status 2>/dev/null \
+    | grep -F "$3" | grep -oE "$4=[0-9]+" | head -n1 | cut -d= -f2
+}
+
 write_config() { # write_config <dir> <local_id> <peers-json>
   cat > "$1/config.json" <<EOF
 { "local_id": $2, "peers": $3 }
@@ -359,6 +372,79 @@ e2e_netns() {
   else
     die "policy hot-update stalled the data plane (${recv:-0}/20 received)\n$(cat "$ping_log")"
   fi
+
+  # --- assertion 4: observability — drop counters are honest ----------------
+  # An overlay packet to a destination with NO policy route must be dropped AND
+  # increment exactly the `tun: no_route` counter operators rely on for triage.
+  # Delta vs. a baseline (the counter may already be nonzero from earlier retries).
+  local nr_base nr_now
+  nr_base=$(status_counter bt_a "$a_sock" "tun:" "no_route"); nr_base=${nr_base:-0}
+  ip netns exec bt_a ping -c1 -W1 10.0.0.99 >/dev/null 2>&1 || true
+  no_route_rose() { local v; v=$(status_counter bt_a "$a_sock" "tun:" "no_route"); [ "${v:-0}" -gt "$nr_base" ]; }
+  if wait_until 5 no_route_rose; then
+    nr_now=$(status_counter bt_a "$a_sock" "tun:" "no_route")
+    ok "observability: unrouted overlay packet bumped tun:no_route ${nr_base} -> ${nr_now}"
+  else
+    die "tun:no_route did not increment for an unrouted overlay destination (counter broken?)"
+  fi
+
+  # --- assertion 5: resilience under underlay packet loss --------------------
+  # raw_direct has NO ARQ (iron law: stateless transport), so loss IS expected to
+  # cost packets — we only assert the tunnel keeps delivering under impairment and
+  # fully recovers once it clears. Lenient threshold + SKIP when tc/netem absent so
+  # the gate never flakes on a kernel without sch_netem.
+  if command -v tc >/dev/null 2>&1 && \
+     ip netns exec bt_hub tc qdisc add dev veth_ha root netem loss 10% delay 20ms 2>/dev/null; then
+    local loss_log="$E2E_TMP/loss.log" lrecv
+    ip netns exec bt_a ping -i0.1 -c20 -W2 10.0.0.3 >"$loss_log" 2>&1 || true
+    ip netns exec bt_hub tc qdisc del dev veth_ha root 2>/dev/null || true
+    lrecv=$(grep -oE '[0-9]+ (packets )?received' "$loss_log" | grep -oE '^[0-9]+' | head -n1 || true)
+    if [ "${lrecv:-0}" -ge 10 ]; then
+      ok "resilience: ${lrecv}/20 pings delivered under 10% underlay loss + 20ms delay"
+    else
+      die "tunnel delivered only ${lrecv:-0}/20 under modest underlay loss\n$(cat "$loss_log")"
+    fi
+    if ip netns exec bt_a ping -c3 -W2 10.0.0.3 >/dev/null 2>&1; then
+      ok "resilience: clean delivery resumes after the impairment is removed"
+    else
+      die "tunnel wedged after the netem qdisc was removed\nhub:$(cat "$E2E_TMP/hub/daemon.log")"
+    fi
+  else
+    skip "resilience under loss: tc/netem unavailable"
+  fi
+
+  # --- assertion 6: endpoint roaming / NAT remap (issue #34) -----------------
+  # Move spoke-A's underlay source 10.100.1.2 -> .3 (same /24; the Hub stays at
+  # .1). The spoke daemon's UDP socket is bound to 0.0.0.0, so its next datagram
+  # carries the new source. The Hub must RELEARN spoke-A's endpoint from the
+  # authenticated datagram (identity is keyed on header key_id, not the address)
+  # and resume delivery — with no handshake and no restart.
+  local lrn_base lrn_now
+  lrn_base=$(status_counter bt_hub "$hub_sock" "endpoint_learned" "endpoint_learned"); lrn_base=${lrn_base:-0}
+  ip netns exec bt_a ip addr flush dev veth_ah
+  ip netns exec bt_a ip addr add 10.100.1.3/24 dev veth_ah
+  ip netns exec bt_a ip link set veth_ah up
+  ip netns exec bt_a   ip neigh flush dev veth_ah >/dev/null 2>&1 || true
+  ip netns exec bt_hub ip neigh flush dev veth_ha >/dev/null 2>&1 || true
+  # Generate fresh A->B traffic so the Hub sees spoke-A at its new endpoint.
+  ip netns exec bt_a ping -i0.2 -c10 -W2 10.0.0.3 >/dev/null 2>&1 || true
+  hub_relearned() {
+    ptctl_in bt_hub "$hub_sock" status 2>/dev/null | grep -qF "id=2 endpoint=10.100.1.3:51820"
+  }
+  if wait_until 5 hub_relearned; then
+    lrn_now=$(status_counter bt_hub "$hub_sock" "endpoint_learned" "endpoint_learned"); lrn_now=${lrn_now:-0}
+    [ "${lrn_now}" -gt "${lrn_base}" ] || die "Hub endpoint reads .3 but endpoint_learned did not rise (${lrn_base} -> ${lrn_now})"
+    ok "roaming: Hub relearned spoke-A at 10.100.1.3 (endpoint_learned ${lrn_base} -> ${lrn_now})"
+  else
+    die "Hub never relearned spoke-A's roamed endpoint\nhub:$(ptctl_in bt_hub "$hub_sock" status 2>/dev/null)\n$(cat "$E2E_TMP/hub/daemon.log")"
+  fi
+  # Delivery must work end-to-end over the new endpoint.
+  if ip netns exec bt_a ping -c3 -W2 10.0.0.3 >/dev/null 2>&1; then
+    ok "roaming: end-to-end delivery resumes after the endpoint move"
+  else
+    die "delivery did not resume after spoke-A roamed to 10.100.1.3"
+  fi
+
   E2E_RAN=1   # the live privileged relay e2e actually executed (release evidence)
 }
 e2e_netns
