@@ -49,6 +49,7 @@ src/
   crypto.zig   ChaCha20-Poly1305 + monotonic nonce + sliding-window anti-replay
   reactor.zig  Packed private wire header + egress dispatch + epoll reactor
   tun.zig      TUN device system driver
+  netplan.zig  --print-network-plan: host TUN address/route/MTU/MSS command emitter
   uds.zig      Control-plane Unix domain socket + command tokenizer
   main.zig     btunnel daemon entry point
   ptctl.zig    ptctl control tool entry point
@@ -187,6 +188,35 @@ cp config.example.json config.json
 ```
 
 See [`config.example.json`](config.example.json) for a config example.
+
+### Host network setup (`--print-network-plan`)
+
+btunnel creates the TUN device but does **not** configure host addressing,
+routes, or MTU itself (auto-apply is intentionally out of scope to preserve the
+zero-dependency single-binary guarantee). Instead it can *print* the exact
+commands for the loaded config so you can review and run them:
+
+```bash
+# Print the host networking plan for this node (defaults to a 1500-byte underlay).
+./zig-out/bin/btunnel --print-network-plan
+
+# Override the underlay path MTU (e.g. behind a PPPoE/VPN underlay):
+./zig-out/bin/btunnel --print-network-plan --path-mtu 1420
+```
+
+The plan computes the safe tunnel MTU from the real wire overhead
+(`header 20 + AEAD tag 16 + outer IPv4/UDP 28 = 64`, so max tunnel MTU =
+`path_mtu − 64`) and **warns** if the configured `local_tun_mtu` exceeds it —
+the classic cause of "small packets work, large transfers stall". It emits:
+
+- `ip link set <tun> mtu <local_tun_mtu> up`
+- `ip addr add <local_tun_ip> dev <tun>` (set the optional `local_tun_ip` config
+  field, e.g. `"local_tun_ip": "10.0.0.2/24"`; otherwise a placeholder is shown)
+- `ip route add <subnet> dev <tun>` for each peer's `allowed_src` (a permissive
+  `0.0.0.0/0` is skipped so you never blackhole the default route)
+- an optional TCP MSS clamp hint (nftables / iptables) to avoid PMTU blackholes
+
+Output is deterministic and print-only; nothing on the host is modified.
 
 ## 📊 Development status
 

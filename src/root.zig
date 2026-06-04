@@ -12,6 +12,7 @@ pub const tun = @import("tun.zig");
 pub const peer = @import("peer.zig");
 pub const reactor = @import("reactor.zig");
 pub const uds = @import("uds.zig");
+pub const netplan = @import("netplan.zig");
 
 test {
     // Pull in every submodule's test blocks.

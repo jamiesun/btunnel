@@ -147,6 +147,11 @@ pub const Config = struct {
     listen_port: u16 = 51820,
     /// Virtual subnet (default 10.0.0.0/24).
     virtual_subnet: Cidr = .{ .network = 0x0A00_0000, .prefix = 24 },
+    /// Optional local TUN interface address (host address + prefix), used only
+    /// to emit `--print-network-plan` host setup commands. The daemon does NOT
+    /// configure host addressing itself; this is operator guidance. `null` when
+    /// unset (config field omitted), in which case the plan emits a placeholder.
+    local_tun_ip: ?Cidr = null,
     /// This node's own mesh id, used to derive directional per-link keys. Must
     /// be non-zero and distinct from every peer id when `peers` is non-empty
     /// (issue #5). Zero means "single-node / no mesh configured".
@@ -206,6 +211,7 @@ pub const Config = struct {
         local_tun_mtu: u16 = 1452,
         listen_port: u16 = 51820,
         virtual_subnet: []const u8 = "10.0.0.0/24",
+        local_tun_ip: []const u8 = "",
         local_id: u32 = 0,
         peers: []const WirePeer = &.{},
     };
@@ -240,6 +246,10 @@ pub const Config = struct {
             .local_tun_mtu = w.local_tun_mtu,
             .listen_port = w.listen_port,
             .virtual_subnet = parseCidr(w.virtual_subnet) catch return error.InvalidCidr,
+            .local_tun_ip = if (w.local_tun_ip.len == 0)
+                null
+            else
+                parseCidr(w.local_tun_ip) catch return error.InvalidCidr,
             .local_id = w.local_id,
         };
 

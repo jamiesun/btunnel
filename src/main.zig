@@ -89,6 +89,21 @@ fn hasFlag(args: std.process.Args, flag: []const u8) bool {
     return false;
 }
 
+/// Return the value following `flag` in argv (e.g. `--path-mtu 1400`), or null
+/// if the flag is absent or has no following token.
+fn flagValue(args: std.process.Args, flag: []const u8) ?[]const u8 {
+    var it = args.iterate();
+    _ = it.skip(); // argv[0]
+    while (it.next()) |a| {
+        if (std.mem.eql(u8, a, flag)) return it.next();
+    }
+    return null;
+}
+
+fn envTunName(environ: anytype) []const u8 {
+    return if (std.process.Environ.getPosix(environ, "BTUNNEL_TUN")) |s| s else DEFAULT_TUN;
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     const cfg = loadConfig(std.heap.page_allocator) catch |err| {
         std.debug.print("config load failed: {s}\n", .{@errorName(err)});
@@ -122,14 +137,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
+    // `--print-network-plan` (issue #23): emit the host networking commands for
+    // this config and exit. Print-only — the daemon never mutates host state.
+    if (hasFlag(init.args, "--print-network-plan")) {
+        const path_mtu: u16 = if (flagValue(init.args, "--path-mtu")) |v|
+            std.fmt.parseInt(u16, v, 10) catch {
+                std.debug.print("invalid --path-mtu value: {s}\n", .{v});
+                return error.InvalidArgument;
+            }
+        else
+            bt.netplan.DEFAULT_PATH_MTU;
+        var plan_buf: [8192]u8 = undefined;
+        const plan = bt.netplan.render(&plan_buf, cfg, envTunName(init.environ), path_mtu) catch |err| {
+            std.debug.print("network plan render failed: {s}\n", .{@errorName(err)});
+            return err;
+        };
+        std.debug.print("{s}", .{plan});
+        return;
+    }
+
     const sock_path: []const u8 = if (std.process.Environ.getPosix(init.environ, "BTUNNEL_SOCK")) |s|
         s
     else
         bt.uds.SOCKET_PATH;
-    const tun_name: []const u8 = if (std.process.Environ.getPosix(init.environ, "BTUNNEL_TUN")) |s|
-        s
-    else
-        DEFAULT_TUN;
+    const tun_name: []const u8 = envTunName(init.environ);
 
     // Snapshot path for `ptctl save`: derive `<sock>.policy` so coexisting
     // daemons (shared mount ns) never collide on the snapshot file.
