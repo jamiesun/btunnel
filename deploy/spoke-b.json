@@ -1,0 +1,11 @@
+{
+  "negotiation_version": 1,
+  "local_tun_mtu": 1400,
+  "listen_port": 51820,
+  "virtual_subnet": "10.0.0.0/24",
+  "local_id": 3,
+  "local_tun_ip": "10.0.0.3/24",
+  "peers": [
+    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+  ]
+}

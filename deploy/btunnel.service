@@ -1,0 +1,58 @@
+[Unit]
+Description=BTunnel pure-Zig L3 UDP tunnel
+Documentation=https://github.com/jamiesun/btunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# The daemon reads ./config.json from its working directory. Keep the per-node
+# config (with its private PSKs) here, root-owned and mode 0600 (see the
+# deployment guide). The control socket and policy snapshot live under /run.
+WorkingDirectory=/etc/btunnel
+RuntimeDirectory=btunnel
+Environment=BTUNNEL_SOCK=/run/btunnel/btunnel.sock
+
+# Fail fast on a bad config instead of crash-looping the data plane.
+ExecStartPre=/usr/local/bin/btunnel --check
+ExecStart=/usr/local/bin/btunnel
+
+# btunnel only PRINTS the host network plan (`--print-network-plan`); it never
+# mutates routes itself. The TUN device exists only while the daemon runs, so
+# configure addressing/routes AFTER start. Replace the commands below with the
+# output of `btunnel --print-network-plan` for this node (spokes only; a relay
+# hub usually needs no overlay address). Uncomment to enable:
+# ExecStartPost=/sbin/ip link set btun0 mtu 1400 up
+# ExecStartPost=/sbin/ip addr add 10.0.0.2/24 dev btun0
+# ExecStartPost=/sbin/ip route add 192.168.31.0/24 dev btun0
+
+Restart=on-failure
+RestartSec=2
+
+# --- Privileges: the ONLY capability btunnel needs is CAP_NET_ADMIN (create the
+# TUN device and, if you enable the ExecStartPost hooks, configure routes). ---
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+DeviceAllow=/dev/net/tun rw
+
+# --- Sandboxing: btunnel is a single static binary with no dynamic allocation
+# on the data path and no need to touch the filesystem beyond its config + /run. ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# Allow only the address families btunnel uses (UDP/IP + the AF_UNIX control plane).
+RestrictAddressFamilies=AF_INET AF_UNIX
+# /run/btunnel is writable via RuntimeDirectory; everything else stays read-only.
+
+[Install]
+WantedBy=multi-user.target

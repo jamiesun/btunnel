@@ -42,6 +42,7 @@ producing a single, fully statically linked binary.
 build.zig            Dual-binary build (btunnel daemon + ptctl control tool), static musl cross-compile
 build.zig.zon        Package manifest
 config.example.json  Example config (copy to config.json to use)
+deploy/              systemd unit + example hub/spoke configs (see docs/deployment.md)
 src/
   root.zig     Core library, aggregates all modules
   config.zig   Config parsing + sanity check (MTU range / subnet overlap)
@@ -56,6 +57,7 @@ src/
   ptctl.zig    ptctl control tool entry point
 docs/
   btunnel-develop.md  System requirements & architecture design (PRD & Architecture)
+  deployment.md       Hub + two-spoke production deployment walkthrough (systemd, secrets, upgrade)
 ```
 
 ## 🛠 Build
@@ -253,6 +255,15 @@ v1 uses statically-configured endpoints); `auth_or_invalid` means the PSK/epoch
 or wire format does not match; `spoof` means a peer sent an inner source outside
 its `allowed_src`; `no_route` means no policy rule matches the destination. PSKs
 and derived keys are never printed.
+
+### Production deployment (systemd)
+
+For a complete hub + two-spoke production walkthrough — systemd unit with the
+right capabilities and sandboxing, secrets handling, host networking, relay
+policy install, upgrade/rollback, and firewall/NAT requirements — see
+[`docs/deployment.md`](docs/deployment.md). Ready-to-edit artifacts live in
+[`deploy/`](deploy/) (`btunnel.service`, `hub.json`, `spoke-a.json`,
+`spoke-b.json`).
 
 ## 📊 Development status
 
