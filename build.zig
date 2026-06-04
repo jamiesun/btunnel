@@ -33,6 +33,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    // The wire-protocol golden lives under tests/ (human-visible, diffable) but
+    // is outside the module's package path, so expose it as an embeddable import
+    // for the conformance sentinel (`src/protocol_conformance.zig`).
+    core.addAnonymousImport("protocol_golden", .{
+        .root_source_file = b.path("tests/protocol-vectors.json"),
+    });
 
     // btunnel: the single-threaded epoll reactor daemon.
     const btunnel = b.addExecutable(.{
@@ -62,6 +68,21 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(ptctl);
+
+    // gen-vectors: emits the canonical wire-protocol KAT set as JSON. Used to
+    // (re)generate the committed golden `tests/protocol-vectors.json`, which the
+    // conformance test pins against the live protocol code.
+    const gen_vectors = b.addExecutable(.{
+        .name = "gen-vectors",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gen_vectors.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const vectors_step = b.step("vectors", "Print the wire-protocol conformance vectors (JSON) to stdout");
+    const vectors_run = b.addRunArtifact(gen_vectors);
+    vectors_step.dependOn(&vectors_run.step);
 
     // `zig build run` runs the daemon.
     const run_step = b.step("run", "Run the btunnel daemon");

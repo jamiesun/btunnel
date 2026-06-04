@@ -57,6 +57,7 @@ src/
   ptctl.zig    ptctl control tool entry point
 docs/
   btunnel-develop.md  System requirements & architecture design (PRD & Architecture)
+  PROTOCOL.md         Normative wire-protocol spec (v1) — the cross-impl interoperability contract
   deployment.md       Hub + two-spoke production deployment walkthrough (systemd, secrets, upgrade)
 ```
 
@@ -331,10 +332,11 @@ and exercised end-to-end in the dev container.
 | 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
 | 8 Control tool | `ptctl.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
 | 9 Daemon main loop + e2e | `main.zig`, `test/integration/run.sh` | ✅ Done (wires TUN + UDP + UDS + reactor; live multi-point + relay netns end-to-end test) |
+| 10 Wire-protocol spec + KAT | `docs/PROTOCOL.md`, `tests/protocol-vectors.json`, `src/protocol_vectors.zig`, `src/protocol_conformance.zig` | ✅ Done (normative v1 spec; known-answer vectors generated from the live code via `zig build vectors`; drift sentinel pins the golden in `zig build test`) |
 
-> **Currently verifiable**: `zig build test` is all green (48/48 in the Linux
-> dev container; 37 pass + 11 Linux-only skips on a macOS host); produces a
-> < 512KB static binary. A Linux dev container
+> **Currently verifiable**: `zig build test` is all green (60 pass + 12
+> Linux-only skips on a macOS host, 72 total; all run in the Linux dev
+> container); produces a < 512KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
 > static-link and size constraints across both musl targets **and runs a live

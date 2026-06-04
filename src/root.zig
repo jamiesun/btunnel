@@ -14,6 +14,8 @@ pub const reactor = @import("reactor.zig");
 pub const uds = @import("uds.zig");
 pub const netplan = @import("netplan.zig");
 pub const stats = @import("stats.zig");
+pub const protocol_vectors = @import("protocol_vectors.zig");
+pub const protocol_conformance = @import("protocol_conformance.zig");
 
 test {
     // Pull in every submodule's test blocks.
