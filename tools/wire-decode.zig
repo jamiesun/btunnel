@@ -26,14 +26,22 @@ const MAX_WIRE = reactor.MAX_WIRE;
 const MAX_PLAINTEXT = reactor.MAX_PLAINTEXT;
 
 const USAGE =
-    \\Usage: wire-decode --data <hex> --psk <64hex> --to <id> [--from <id>]
+    \\Usage:
+    \\  wire-decode --data <hex> --psk <64hex> --to <id> [--from <id>]
+    \\  wire-decode --stream --key <from:to:64hex> [--key ...]   (reads hex datagrams, one per line, from stdin)
     \\
-    \\Parse and authenticate a single captured btunnel datagram offline.
+    \\Parse and authenticate captured btunnel datagram(s) offline.
     \\
+    \\Single datagram:
     \\  --data <hex>   the raw datagram bytes as hex (e.g. from tcpdump)
     \\  --psk  <hex>   the link's 64-char hex pre-shared key
     \\  --to   <id>    the receiver's mesh id (this node's local_id)
     \\  --from <id>    the sender's mesh id (defaults to the header key_id)
+    \\
+    \\Bulk (stdin, one hex datagram per line):
+    \\  --stream       decode every line of stdin, selecting the key by header key_id
+    \\  --key <f:t:k>  a link key as sender_id:receiver_id:64hex_psk (repeatable, max 16)
+    \\
     \\  -h, --help     show this help
     \\  -V, --version  show version
     \\
@@ -77,6 +85,150 @@ fn openInner(datagram: []const u8, psk: crypto.Key, from_id: u32, to_id: u32, ou
     return crypto.open(skey, hdr.seq, ct, out) catch error.AuthFailed;
 }
 
+const MAX_KEYS = 16;
+
+/// A directional link key for bulk decoding: the sender id (matched against the
+/// header `key_id`), the receiver id, and the link PSK.
+const KeyEntry = struct { from: u32, to: u32, psk: crypto.Key };
+
+/// Per-datagram outcome in bulk mode.
+const Class = enum { decoded, auth_failed, no_key, skipped };
+
+const Tally = struct {
+    decoded: usize = 0,
+    auth_failed: usize = 0,
+    no_key: usize = 0,
+    skipped: usize = 0,
+};
+
+/// Classify one datagram against the key map: skip non-btunnel/too-short input,
+/// report when no key matches its `key_id`, otherwise try every key whose sender
+/// id matches and return `decoded` (with `plen`) on the first that authenticates.
+fn classify(datagram: []const u8, keys: []const KeyEntry, out: []u8, plen: *usize) Class {
+    const hdr = parseHeader(datagram) catch return .skipped;
+    if (hdr.version != reactor.WIRE_VERSION) return .skipped;
+
+    var matched = false;
+    for (keys) |k| {
+        if (k.from != hdr.key_id) continue;
+        matched = true;
+        if (openInner(datagram, k.psk, k.from, k.to, out)) |n| {
+            plen.* = n;
+            return .decoded;
+        } else |_| {}
+    }
+    if (!matched) return .no_key;
+    return .auth_failed;
+}
+
+/// Parse repeated `--key <from>:<to>:<64hex>` arguments into `buf`.
+fn parseKeys(args: std.process.Args, buf: []KeyEntry) !usize {
+    var n: usize = 0;
+    var it = args.iterate();
+    _ = it.skip(); // argv[0]
+    while (it.next()) |a| {
+        if (!std.mem.eql(u8, a, "--key")) continue;
+        const spec = it.next() orelse return error.InvalidArgument;
+        if (n >= buf.len) return error.TooManyKeys;
+
+        var parts = std.mem.splitScalar(u8, spec, ':');
+        const from_s = parts.next() orelse return error.InvalidArgument;
+        const to_s = parts.next() orelse return error.InvalidArgument;
+        const psk_s = parts.next() orelse return error.InvalidArgument;
+        if (parts.next() != null) return error.InvalidArgument;
+        if (psk_s.len != 64) return error.InvalidArgument;
+
+        var entry: KeyEntry = undefined;
+        entry.from = std.fmt.parseInt(u32, from_s, 10) catch return error.InvalidArgument;
+        entry.to = std.fmt.parseInt(u32, to_s, 10) catch return error.InvalidArgument;
+        _ = std.fmt.hexToBytes(&entry.psk, psk_s) catch return error.InvalidArgument;
+        buf[n] = entry;
+        n += 1;
+    }
+    return n;
+}
+
+fn trimLine(line: []const u8) []const u8 {
+    return std.mem.trim(u8, line, " \t\r\n");
+}
+
+/// Bulk mode: decode every newline-delimited hex datagram from stdin, selecting
+/// the link key by header `key_id`, and print a per-record result plus a tally.
+fn runStream(io: std.Io, args: std.process.Args) !void {
+    var key_buf: [MAX_KEYS]KeyEntry = undefined;
+    const nkeys = parseKeys(args, &key_buf) catch {
+        writeErr(io, "wire-decode: invalid --key (expected from:to:64hex, max 16)\n");
+        return error.InvalidArgument;
+    };
+    if (nkeys == 0) {
+        writeErr(io, "wire-decode: --stream needs at least one --key from:to:64hex\n");
+        return error.InvalidArgument;
+    }
+    const keys = key_buf[0..nkeys];
+
+    // Read all of stdin into a fixed buffer (a capture pasted/piped as hex lines).
+    var in_buf: [1 << 20]u8 = undefined;
+    const stdin = std.Io.File.stdin();
+    var total: usize = 0;
+    while (total < in_buf.len) {
+        const n = stdin.readStreaming(io, &.{in_buf[total..]}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        total += n;
+    }
+
+    var tally = Tally{};
+    var dbuf: [MAX_WIRE]u8 = undefined;
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    var index: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, in_buf[0..total], '\n');
+    while (lines.next()) |raw_line| {
+        const line = trimLine(raw_line);
+        if (line.len == 0) continue;
+        index += 1;
+
+        const datagram = std.fmt.hexToBytes(&dbuf, line) catch {
+            tally.skipped += 1;
+            var b: [64]u8 = undefined;
+            writeOut(io, std.fmt.bufPrint(&b, "[{d}] skipped (not hex)\n", .{index}) catch "");
+            continue;
+        };
+
+        var plen: usize = 0;
+        const class = classify(datagram, keys, &out, &plen);
+        var b: [256]u8 = undefined;
+        switch (class) {
+            .decoded => {
+                tally.decoded += 1;
+                const hdr = parseHeader(datagram) catch unreachable;
+                writeOut(io, std.fmt.bufPrint(&b, "[{d}] auth OK   key_id={d} epoch={d} seq={d}\n", .{ index, hdr.key_id, hdr.epoch, hdr.seq }) catch "");
+                printInner(io, out[0..plen]);
+            },
+            .auth_failed => {
+                tally.auth_failed += 1;
+                writeOut(io, std.fmt.bufPrint(&b, "[{d}] auth FAIL (key matched key_id but did not authenticate)\n", .{index}) catch "");
+            },
+            .no_key => {
+                tally.no_key += 1;
+                const hdr = parseHeader(datagram) catch unreachable;
+                writeOut(io, std.fmt.bufPrint(&b, "[{d}] no key for key_id={d}\n", .{ index, hdr.key_id }) catch "");
+            },
+            .skipped => {
+                tally.skipped += 1;
+                writeOut(io, std.fmt.bufPrint(&b, "[{d}] skipped (not a v1 btunnel datagram)\n", .{index}) catch "");
+            },
+        }
+    }
+
+    var sbuf: [256]u8 = undefined;
+    writeOut(io, std.fmt.bufPrint(&sbuf, "\nsummary: decoded={d} auth_failed={d} no_key={d} skipped={d}\n", .{
+        tally.decoded, tally.auth_failed, tally.no_key, tally.skipped,
+    }) catch "");
+}
+
 fn fmtIpv4(buf: []u8, be: []const u8) []const u8 {
     return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ be[0], be[1], be[2], be[3] }) catch buf[0..0];
 }
@@ -118,6 +270,10 @@ pub fn main(init: std.process.Init) !void {
         const v = std.fmt.bufPrint(&vbuf, "wire-decode (btunnel v{s})\n", .{build_options.version}) catch return;
         writeOut(io, v);
         return;
+    }
+
+    if (hasFlag(args, "--stream")) {
+        return runStream(io, args);
     }
 
     const data_hex = flagValue(args, "--data") orelse {
@@ -256,4 +412,35 @@ test "openInner fails under the wrong receiver id" {
     const n = buildDatagram(&wire);
     var out: [MAX_PLAINTEXT]u8 = undefined;
     try std.testing.expectError(error.AuthFailed, openInner(wire[0..n], TEST_PSK, TEST_FROM, TEST_TO + 1, &out));
+}
+
+test "classify selects the key by key_id and reports the bulk outcomes" {
+    const keys = [_]KeyEntry{.{ .from = TEST_FROM, .to = TEST_TO, .psk = TEST_PSK }};
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    var plen: usize = 0;
+
+    // A good datagram authenticates.
+    var good: [MAX_WIRE]u8 = undefined;
+    const gn = buildDatagram(&good);
+    try std.testing.expectEqual(Class.decoded, classify(good[0..gn], &keys, &out, &plen));
+    try std.testing.expectEqualSlices(u8, &TEST_INNER, out[0..plen]);
+
+    // A tampered datagram matches the key_id but fails authentication.
+    var bad: [MAX_WIRE]u8 = undefined;
+    const bn = buildDatagram(&bad);
+    bad[HEADER_LEN] ^= 0x01;
+    try std.testing.expectEqual(Class.auth_failed, classify(bad[0..bn], &keys, &out, &plen));
+
+    // No key whose sender id matches the header key_id.
+    const other = [_]KeyEntry{.{ .from = TEST_FROM + 9, .to = TEST_TO, .psk = TEST_PSK }};
+    try std.testing.expectEqual(Class.no_key, classify(good[0..gn], &other, &out, &plen));
+
+    // A non-v1 datagram is skipped.
+    var alien: [MAX_WIRE]u8 = undefined;
+    const an = buildDatagram(&alien);
+    alien[0] = reactor.WIRE_VERSION +% 1;
+    try std.testing.expectEqual(Class.skipped, classify(alien[0..an], &keys, &out, &plen));
+
+    // Too-short input is skipped.
+    try std.testing.expectEqual(Class.skipped, classify(good[0 .. HEADER_LEN - 1], &keys, &out, &plen));
 }

@@ -28,6 +28,9 @@ feature.
 zig build tool:keygen        # -> zig-out/tools/keygen
 zig build tool:config-lint   # -> zig-out/tools/config-lint
 zig build tool:wire-decode   # -> zig-out/tools/wire-decode
+zig build tool:key-derive    # -> zig-out/tools/key-derive
+zig build tool:config-gen    # -> zig-out/tools/config-gen
+zig build tool:crypto-bench  # -> zig-out/tools/crypto-bench
 zig build tools-test         # run the tools' unit tests (separate from `zig build test`)
 ```
 
@@ -54,20 +57,64 @@ prints PSK material.
 zig-out/tools/config-lint deploy/hub.json
 ```
 
-### `wire-decode` (issue #60)
-Offline, read-only inspector for a single captured datagram. Reuses the live
-protocol + crypto code to parse the header, derive the session key, and
-authenticate/decrypt the body, then prints the header fields, an explicit
-`auth OK`/`auth FAIL` line, and the inner IPv4 5-tuple.
+### `wire-decode` (issues #60, #65)
+Offline, read-only inspector for captured datagram(s). Reuses the live protocol +
+crypto code to parse the header, derive the session key, and authenticate/decrypt
+the body, then prints the header fields, an explicit `auth OK`/`auth FAIL` line,
+and the inner IPv4 5-tuple.
 
 ```sh
+# single datagram
 zig-out/tools/wire-decode --data <hex> --psk <64hex> --to <local_id> [--from <id>]
+
+# bulk: one hex datagram per line on stdin, key chosen by header key_id
+tcpdump ... | extract-hex | \
+  zig-out/tools/wire-decode --stream --key 1:2:<64hex> --key 2:1:<64hex>
 ```
+
+In `--stream` mode each `--key sender:receiver:64hex` (repeatable, max 16) is a
+directional link key; a record's key is selected by matching its header `key_id`
+against the sender id. Output is one line per record (`auth OK` / `auth FAIL` /
+`no key` / `skipped`) plus a final `decoded/auth_failed/no_key/skipped` tally.
 
 > **Local diagnostic only.** It requires the link PSK, so it grants no capability
 > an operator who already holds the secret lacks. Never paste a production PSK
 > into a shared log. Printing `auth FAIL` is fine here because nothing is emitted
 > to the network — it is not the daemon's on-wire silent-drop behaviour.
+
+### `key-derive` (issue #64)
+Reproduce the daemon's key schedule offline: from a link PSK plus sender/receiver
+ids (and optional epoch) it prints the derived `link_key` and `session_key` using
+the live `crypto` code, so the output can never drift from the runtime. Useful for
+cross-checking captures and the published protocol vectors.
+
+```sh
+zig-out/tools/key-derive --psk <64hex> --from <id> --to <id> [--epoch <ns>]
+```
+
+> Requires the PSK; treat the output as secret. Local diagnostic only.
+
+### `config-gen` (issue #63)
+Scaffold a starting `config.json` for a hub or a spoke, with cryptographically
+random, symmetric per-link PSKs already filled in. Emits placeholder endpoints
+that intentionally fail `config-lint` until you replace them, so an unfinished
+config can never be mistaken for a deployable one.
+
+```sh
+zig-out/tools/config-gen --role hub   --local-id 1 --peer-id 2
+zig-out/tools/config-gen --role spoke --local-id 2 --peer-id 1
+```
+
+### `crypto-bench` (issue #66)
+Micro-benchmark the data-plane crypto primitives (`seal`/`open`,
+`deriveLinkKey`/`deriveSessionKey`) using the live code, reporting ops/sec,
+throughput, and ns/op. A local performance sanity check — not shipped, not a test
+gate. Build with `-Doptimize=ReleaseFast` for representative numbers.
+
+```sh
+zig build tool:crypto-bench -Doptimize=ReleaseFast
+zig-out/tools/crypto-bench --iters 200000
+```
 
 ### `doctor` (issue #61)
 POSIX-`sh` environment preflight (BusyBox-friendly). Checks `/dev/net/tun`,

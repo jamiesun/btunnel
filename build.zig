@@ -100,6 +100,9 @@ pub fn build(b: *std.Build) void {
         .{ .name = "keygen", .src = "tools/keygen.zig", .needs_core = false },
         .{ .name = "config-lint", .src = "tools/config-lint.zig", .needs_core = true },
         .{ .name = "wire-decode", .src = "tools/wire-decode.zig", .needs_core = true },
+        .{ .name = "key-derive", .src = "tools/key-derive.zig", .needs_core = true },
+        .{ .name = "config-gen", .src = "tools/config-gen.zig", .needs_core = true },
+        .{ .name = "crypto-bench", .src = "tools/crypto-bench.zig", .needs_core = true },
     };
     for (tool_specs) |spec| {
         const core_import = [_]std.Build.Module.Import{.{ .name = "btunnel", .module = core }};
