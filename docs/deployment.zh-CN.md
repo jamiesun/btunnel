@@ -13,6 +13,11 @@
 > 会在运行时重新学习，因此处于 NAT 后/漫游的 Spoke 无需运维介入即可恢复。Hub 仍必须
 > 拥有一个稳定、可达、每个 Spoke 都能到达的端点。
 
+如需把 **macOS 主机作为 Spoke** 接入（原生 `utun`），服务化方式见下文 §4（launchd），
+端到端真机验收流程见手册
+[`macos-spoke-acceptance.md`](macos-spoke-acceptance.md)。Hub 与中继仍为 Linux/RouterOS；
+macOS 仅作为 **Spoke** 支持。
+
 ## 0. 组件
 
 | 节点     | Mesh id | Overlay IP   | Underlay 端点         | 私有局域网          |
@@ -37,6 +42,13 @@ sudo install -m 0755 zig-out/bin/subnetra  /usr/local/bin/subnetra
 ```
 
 `ldd /usr/local/bin/subnetrad` 应当报告 *not a dynamic executable*。
+
+> **macOS：** 从[发布页](https://github.com/jamiesun/subnetra/releases/latest)下载
+> `subnetra-<ver>-macos-<arch>.tar.gz`（或 `zig build`），用 `sudo install -m 0755`
+> 把两个二进制装入 `/usr/local/bin`，再清除 Gatekeeper 隔离属性：
+> `sudo xattr -d com.apple.quarantine /usr/local/bin/subnetrad /usr/local/bin/subnetra`。
+> macOS 二进制为*最小动态链接*（Apple 不提供静态 libc），因此用 `otool -L`（而非 `ldd`）
+> 验证——应当只显示 `/usr/lib/libSystem.B.dylib`。
 
 ## 2. 下发逐节点配置与密钥
 
@@ -99,7 +111,14 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo ip route add 192.168.31.0/24 dev snr0
 ```
 
+> **macOS：** `subnetrad --print-network-plan` 输出的是 `ifconfig`/`route` 方案，而非
+> `ip …`。`utun` 名字由**内核分配**（`utunN`），因此请在守护进程启动**之后**、用 `[ready]`
+> 横幅里的真实名字替换后再应用方案（见 §4 launchd 与验收手册）。subnetra 在任何平台都不会
+> 自行改动路由。
+
 ## 4. 以服务方式运行
+
+### Linux — systemd
 
 安装 unit 并启动守护进程：
 
@@ -118,6 +137,46 @@ sudo systemctl enable --now subnetra
 ```bash
 journalctl -u subnetrad -f
 ```
+
+### macOS — launchd
+
+在 macOS Spoke 上，用 `launchd` 托管守护进程。由于创建 `utun` 需要 root，它是一个**系统级**
+守护进程（`/Library/LaunchDaemons`，以 root 运行），而非每用户的 LaunchAgent。安装
+[`deploy/net.subnetra.subnetrad.plist`](../deploy/net.subnetra.subnetrad.plist)（配置按 §2
+准备好——`/etc/subnetra/config.json`，root 拥有、`0600`）：
+
+```bash
+sudo install -m 0644 deploy/net.subnetra.subnetrad.plist \
+    /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+sudo launchctl enable  system/net.subnetra.subnetrad
+# 较旧的 macOS：sudo launchctl load -w /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+```
+
+该任务以 root 运行 `subnetrad --config /etc/subnetra/config.json`，异常退出时重启
+（`KeepAlive.SuccessfulExit=false`，带节流——相当于 systemd 的 `Restart=on-failure`），
+日志写入 `/var/log/subnetrad.log`。请先用 `subnetrad --check` 校验配置，避免坏配置反复崩溃重启。
+从日志的 `[ready]` 横幅读取内核分配的接口名：
+
+```bash
+sudo tail -f /var/log/subnetrad.log
+# subnetra v… (… mode=raw_direct …) tun=utun4 sock=/var/run/subnetra.sock [ready]
+```
+
+**主机网络方案需单独应用。** 与所有平台一样，守护进程只**打印**方案；在 macOS 上 `utunN`
+名字由内核分配，因此请在守护进程启动**之后**、用横幅里的真实名字替换后再应用：
+
+```bash
+subnetrad --print-network-plan --config /etc/subnetra/config.json   # ifconfig/route 方案
+sudo ifconfig utun4 inet 10.0.0.2 10.0.0.2 mtu 1400 up
+sudo route add -net 10.0.0.0/24 -interface utun4
+```
+
+> `KeepAlive` 重启后可能落在**不同的** `utunN` 上；请重新读取横幅并重新应用方案。subnetra
+> 刻意把路由留给你掌控（不自动改动路由），且 macOS 仅作为 **Spoke**。用
+> `sudo launchctl kickstart -k system/net.subnetra.subnetrad` 重启、
+> `sudo launchctl bootout system/net.subnetra.subnetrad` 停止并卸载。完整的真机验收流程见
+> [`macos-spoke-acceptance.md`](macos-spoke-acceptance.md)。
 
 ## 5. 安装中继策略（Hub）
 

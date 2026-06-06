@@ -9,3 +9,4 @@ config.json
 
 # OS noise
 .DS_Store
+testnet.md

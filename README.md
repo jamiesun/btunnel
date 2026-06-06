@@ -367,12 +367,12 @@ endpoint (roaming/NAT remap, issue #34). PSKs and derived keys are never printed
 
 ### Production deployment (systemd)
 
-For a complete hub + two-spoke production walkthrough — systemd unit with the
-right capabilities and sandboxing, secrets handling, host networking, relay
-policy install, upgrade/rollback, and firewall/NAT requirements — see
-[`docs/deployment.md`](docs/deployment.md). Ready-to-edit artifacts live in
-[`deploy/`](deploy/) (`subnetrad.service`, `hub.json`, `spoke-a.json`,
-`spoke-b.json`).
+For a complete hub + two-spoke production walkthrough — systemd unit (Linux) or
+launchd plist (macOS spoke) with the right capabilities/permissions, secrets
+handling, host networking, relay policy install, upgrade/rollback, and
+firewall/NAT requirements — see [`docs/deployment.md`](docs/deployment.md).
+Ready-to-edit artifacts live in [`deploy/`](deploy/) (`subnetrad.service`,
+`net.subnetra.subnetrad.plist`, `hub.json`, `spoke-a.json`, `spoke-b.json`).
 
 ## 📊 Development status
 

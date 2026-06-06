@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Subnetra spoke daemon - macOS launchd template (the macOS analogue of
+  deploy/subnetrad.service).
+
+  Install as a SYSTEM daemon: creating a `utun` interface requires root, so this
+  belongs in /Library/LaunchDaemons (runs as root at boot), NOT in a per-user
+  ~/Library/LaunchAgents. Put the per-node config at /etc/subnetra/config.json
+  (root-owned, 0600) and the binary at /usr/local/bin/subnetrad, then:
+
+    sudo install -m 0644 deploy/net.subnetra.subnetrad.plist \
+        /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+    sudo launchctl enable  system/net.subnetra.subnetrad
+
+  subnetra NEVER mutates host routes (RFC section 9 / the "print, don't apply"
+  rule). launchd only keeps the daemon alive; apply the
+  `subnetrad --print-network-plan` ifconfig/route recipe yourself once the
+  kernel-assigned utunN name is known - read it from the [ready] banner in
+  /var/log/subnetrad.log. macOS is supported as a SPOKE only.
+  See docs/deployment.md section 4 and docs/macos-spoke-acceptance.md.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>net.subnetra.subnetrad</string>
+
+    <!-- LaunchDaemons default to root already; stated explicitly for clarity.
+         Root is required for utun creation, the 0600 config, and /var/run. -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <!-- The config path is explicit (--config) so it never silently depends on a
+         working directory. Validate with `subnetrad --check` before loading. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/subnetrad</string>
+        <string>--config</string>
+        <string>/etc/subnetra/config.json</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart only on abnormal exit, throttled - the macOS analogue of systemd
+         Restart=on-failure / RestartSec=2. A clean exit (e.g. operator stop) is
+         not restarted; a bad config exits non-zero, so `subnetrad --check` first
+         to avoid a throttled crash-loop. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- The [ready] banner written here reports the kernel-assigned utunN and the
+         control socket path - read it to apply the host network plan. -->
+    <key>StandardOutPath</key>
+    <string>/var/log/subnetrad.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/subnetrad.log</string>
+</dict>
+</plist>
