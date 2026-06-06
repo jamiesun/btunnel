@@ -1,15 +1,16 @@
 # RFC: native macOS spoke (MVP) — design proposal
 
-> **Status: DRAFT / DESIGN-ONLY — NOT APPROVED, NO CODE AUTHORIZED.**
-> This document proposes *how* subnetra could run natively on macOS as a **spoke**.
-> It ships **no implementation** and changes **no `src/` behaviour**. Two of the
-> iron laws in [`AGENT.md`](../AGENT.md) (§3 "Linux epoll reactor" and §6 "fully
-> static against musl-libc") are written around Linux primitives and physically
-> cannot hold on macOS. Per the project's own governance, **no macOS backend code
-> may begin until the maintainer signs off on the iron-law amendments in §2.** The
-> authoritative *what* remains [`docs/subnetra-develop.md`](subnetra-develop.md); the
-> normative v1 wire contract remains [`docs/PROTOCOL.md`](PROTOCOL.md). Where this
-> RFC and either of those disagree, **they win and this RFC is wrong.**
+> **Status: APPROVED — Gate 0 signed off (2026-06-07). Iron laws #3 and #6 are
+> amended (platform-relative reactor + binary form); the macOS spoke MVP is
+> authorized to proceed test-first in the §9 order.**
+> This document proposes *how* subnetra runs natively on macOS as a **spoke**.
+> Two of the iron laws in [`AGENT.md`](../AGENT.md) (§3 "reactor primitive" and §6
+> "binary form") were written around Linux primitives and physically cannot hold on
+> macOS; per the project's own governance they have now been made platform-relative
+> (§2), which is the gate that authorizes the backend issues. The authoritative
+> *what* remains [`docs/subnetra-develop.md`](subnetra-develop.md); the normative v1
+> wire contract remains [`docs/PROTOCOL.md`](PROTOCOL.md). Where this RFC and either
+> of those disagree, **they win and this RFC is wrong.**
 
 ## 1. Purpose and scope
 
@@ -252,6 +253,14 @@ release assets *until* §2/Q3 is decided; Windows/BSD. The `epoll`/`/dev/net/tun
 Linux paths are **not deleted** — they move behind the backend interface byte-for-byte.
 
 ## 10. Decisions required from the maintainer (before any code)
+
+> **RESOLVED — 2026-06-07 (Gate 0 sign-off).** Q1 **approved** (both iron-law
+> amendments adopted; see §2 and `AGENT.md` §3/§6). Q2 **`poll(2)` for the MVP,
+> `kqueue` deferred.** Q3 **macOS stays source-build-only** until the §8 runbook
+> proves it — no macOS release asset yet. Q4 **print-only `--print-network-plan`**
+> (no auto-route), matching Linux. **Go** — the macOS spoke MVP proceeds test-first
+> in the §9 order. The questions below are retained for the record.
+
 
 - **Q1 (Gate 0)** — approve the two iron-law amendments in §2 (#3 reactor becomes
   platform-relative; #6 macOS is minimal-dynamic `libSystem`-only with its own

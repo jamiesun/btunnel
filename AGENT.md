@@ -46,18 +46,24 @@ a hard failure regardless of how "clean" the result looks.
    is strictly allocation-free: all packet buffers live in resident memory fixed
    at startup. Control-plane / reliability paths may use independent arenas, but
    must never pollute the data-plane memory line.
-3. **Single-threaded, lock-free reactor.** One thread, Linux epoll edge-triggered
-   (`EPOLLET`). **No threads. No locks.** Policy hot-updates happen via atomic
-   pointer swap (RCU), never via mutexes.
+3. **Single-threaded, lock-free reactor.** One thread; a lock-free,
+   allocation-free readiness loop. The single-thread, no-lock, no-per-packet-alloc
+   invariant **is** the law; the specific readiness primitive is
+   **platform-selected at `comptime`**: Linux `epoll` edge-triggered (`EPOLLET`),
+   macOS `poll(2)` (`kqueue` deferred to a later milestone). **No threads. No
+   locks.** Policy hot-updates happen via atomic pointer swap (RCU), never via
+   mutexes.
 4. **Stateless obfuscation / stealth.** ChaCha20-Poly1305 full encryption with **no
    magic numbers** in ciphertext. On authentication failure, **Drop silently** —
    never reply with TCP Reset, ICMP, or anything observable.
 5. **Transport security is mandatory in v1.** PSK key, a per-endpoint 64-bit
    **monotonic nonce that is NEVER reused**, and a sliding-window **anti-replay**
    check. These cannot be deferred.
-6. **Single static binary.** Fully static against musl-libc. Default
-   `-O ReleaseSmall`, target **≤ 512KB**. `ldd` must report
-   `not a dynamic executable`.
+6. **Single minimal binary.** Default `-O ReleaseSmall`, zero third-party deps
+   (iron law #1 holds on every platform). **Linux:** fully static against
+   musl-libc, `ldd` → `not a dynamic executable`, target **≤ 512KB**. **macOS:**
+   minimal-dynamic — links **only** `libSystem` (Apple ships no static libc), with
+   its own recorded size baseline. The `ldd`-static check is a **Linux-only** gate.
 7. **Stay test-driven.** Follow the TDD workflow in the PRD. Pure logic must ship
    with tests. `zig build test` must stay green before any commit.
 8. **Stateless, handshake-free transport.** Every datagram is self-describing and
