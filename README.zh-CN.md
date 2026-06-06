@@ -201,9 +201,9 @@ cp config.example.json config.json
 | 1 编译配置 | `build.zig` | ✅ 完成（musl 静态、ReleaseSmall、双产物） |
 | 2 配置自检 | `config.zig` | ✅ 完成（std.json 解析 + 私有每对端十六进制 PSK + CIDR；边界熔断） |
 | 3 策略匹配 | `policy.zig` | ✅ 完成（CIDR / 最长前缀 / RCU） |
-| 4 系统驱动 | `tun.zig` | ✅ 完成（TUNSETIFF ioctl，非阻塞 L3 fd） |
+| 4 系统驱动 | `os/linux.zig` | ✅ 完成（TUNSETIFF ioctl，非阻塞 L3 fd；经 `os/mod.zig` 的 comptime 平台后端，macOS `utun` 桩在 `os/darwin.zig`） |
 | 5 密码学管道 | `crypto.zig` | ✅ 完成（AEAD / 每链路密钥 / 会话 epoch / 防重放） |
-| 6 核心反应堆 | `reactor.zig`、`peer.zig` | ✅ 完成（epoll ET 主循环；多对端注册表 + 每链路独立密钥 + 每次重启的会话 epoch；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
+| 6 核心反应堆 | `reactor.zig`、`peer.zig`、`os/linux.zig` | ✅ 完成（epoll ET 主循环置于 `os.Poller` 之后；多对端注册表 + 每链路独立密钥 + 每次重启的会话 epoch；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
 | 7 控制面 UDS | `uds.zig` | ✅ 完成（分词器 + AF_UNIX 数据报监听；原子 RCU 策略热替换，双缓冲） |
 | 8 控制工具 | `subnetra.zig` | ✅ 完成（UDS 投递；`policy add` 即发即弃，`policy show`/`save` 读取守护进程回包；守护进程未运行时非零退出） |
 | 9 守护进程主循环 + e2e | `main.zig`、`test/integration/run.sh` | ✅ 完成（接线 TUN + UDP + UDS + 反应堆；落地多点 + 中继网络命名空间端到端测试） |

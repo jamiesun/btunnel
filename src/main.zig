@@ -255,7 +255,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     const save_path = save_buf[0 .. sock_path.len + suffix.len];
 
     // Open the TUN device. The netdev exists only while this fd is held.
-    var tun = bt.tun.TunDevice.open(tun_name) catch |err| {
+    var tun = bt.os.TunDevice.open(tun_name) catch |err| {
         std.debug.print("tun open failed ({s}); need CAP_NET_ADMIN and /dev/net/tun\n", .{@errorName(err)});
         return err;
     };

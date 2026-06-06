@@ -353,9 +353,9 @@ and exercised end-to-end in the dev container.
 | 1 Build config | `build.zig` | ✅ Done (static musl, ReleaseSmall, dual binaries) |
 | 2 Config sanity | `config.zig` | ✅ Done (std.json parse + private per-peer hex PSK + CIDR; boundary fuse) |
 | 3 Policy match | `policy.zig` | ✅ Done (CIDR / longest-prefix / RCU) |
-| 4 System driver | `tun.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd) |
+| 4 System driver | `os/linux.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd; comptime OS backend via `os/mod.zig`, macOS `utun` stub in `os/darwin.zig`) |
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / per-link keys / session epoch / anti-replay) |
-| 6 Core reactor | `reactor.zig`, `peer.zig` | ✅ Done (epoll ET loop; multi-peer registry with per-link keys + per-restart session epoch; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
+| 6 Core reactor | `reactor.zig`, `peer.zig`, `os/linux.zig` | ✅ Done (epoll ET loop behind `os.Poller`; multi-peer registry with per-link keys + per-restart session epoch; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
 | 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
 | 8 Control tool | `subnetra.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
 | 9 Daemon main loop + e2e | `main.zig`, `test/integration/run.sh` | ✅ Done (wires TUN + UDP + UDS + reactor; live multi-point + relay netns end-to-end test) |

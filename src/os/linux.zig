@@ -1,14 +1,16 @@
-//! Task 4: TUN device system driver (data-plane device).
-//!
-//! Opens /dev/net/tun via native std.posix syscalls, instantiates the virtual
-//! L3 NIC with the TUNSETIFF ioctl, and keeps it in non-blocking mode. Linux is
-//! the only supported runtime; on other platforms it compiles but returns
-//! Unsupported, so the rest of the tree stays cross-compilable.
+//! Linux OS backend (issue #75): the real `/dev/net/tun` TUN device and the
+//! epoll edge-triggered readiness primitive. Moved here byte-for-byte from
+//! `tun.zig` and `reactor.zig` behind the backend interface in `os/mod.zig`;
+//! Linux behaviour is unchanged.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
 const linux = std.os.linux;
+const sys = @import("../sys.zig");
+const Trigger = @import("mod.zig").Trigger;
+
+// --- TUN device (/dev/net/tun) ------------------------------------------------
 
 pub const CLONE_PATH = "/dev/net/tun";
 
@@ -47,8 +49,6 @@ pub const TunDevice = struct {
     /// `error.AccessDenied` when the caller lacks CAP_NET_ADMIN, so callers and
     /// tests can distinguish a privilege gap from a real failure.
     pub fn open(if_name: []const u8) TunError!TunDevice {
-        if (builtin.os.tag != .linux) return TunError.Unsupported;
-
         const orc = linux.open(CLONE_PATH, .{ .ACCMODE = .RDWR, .NONBLOCK = true }, 0);
         switch (linux.errno(orc)) {
             .SUCCESS => {},
@@ -84,6 +84,56 @@ pub const TunDevice = struct {
 
     pub fn close(self: *TunDevice) void {
         _ = linux.close(self.fd);
+    }
+};
+
+// --- Readiness primitive (epoll) ----------------------------------------------
+
+/// Single-threaded epoll readiness source. `.edge` registrations are EPOLLET
+/// (the reactor drains each ready fd to EAGAIN); `.level` registrations are
+/// level-triggered (the control handler processes a bounded number of commands
+/// per tick and epoll re-notifies while datagrams remain).
+pub const Poller = struct {
+    epfd: i32,
+
+    pub fn init() !Poller {
+        const rc = linux.epoll_create1(0);
+        if (sys.errno(rc) != .SUCCESS) return error.EpollCreateFailed;
+        return .{ .epfd = @intCast(rc) };
+    }
+
+    pub fn deinit(self: *Poller) void {
+        _ = sys.close(self.epfd);
+    }
+
+    pub fn add(self: *Poller, fd: sys.fd_t, trigger: Trigger) !void {
+        const flags: u32 = switch (trigger) {
+            .edge => linux.EPOLL.IN | linux.EPOLL.ET,
+            .level => linux.EPOLL.IN,
+        };
+        var ev = linux.epoll_event{
+            .events = flags,
+            .data = .{ .fd = fd },
+        };
+        const rc = linux.epoll_ctl(self.epfd, linux.EPOLL.CTL_ADD, fd, &ev);
+        if (sys.errno(rc) != .SUCCESS) return error.EpollCtlFailed;
+    }
+
+    /// Block until at least one fd is ready, write the ready fds into `out`, and
+    /// return the count (bounded by `out.len`). Retries internally on EINTR.
+    pub fn wait(self: *Poller, out: []sys.fd_t) !usize {
+        var events: [16]linux.epoll_event = undefined;
+        const cap = @min(out.len, events.len);
+        while (true) {
+            const nrc = linux.epoll_wait(self.epfd, &events, @intCast(cap), -1);
+            const e = sys.errno(nrc);
+            if (e == .INTR) continue;
+            if (e != .SUCCESS) return error.EpollWaitFailed;
+            const n: usize = @intCast(nrc);
+            var i: usize = 0;
+            while (i < n) : (i += 1) out[i] = events[i].data.fd;
+            return n;
+        }
     }
 };
 
