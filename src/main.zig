@@ -103,32 +103,25 @@ fn resolveConfigPath(args: std.process.Args, environ: anytype, buf: []u8) !struc
     return .{ .path = buf[0..p.len :0], .explicit = explicit };
 }
 
-/// Read and parse the config at `path` with raw syscalls (consistent with the
-/// rest of the data path). A missing DEFAULT file falls back to the compile-time
-/// default; a missing EXPLICIT path (--config/SUBNETRA_CONFIG) is an error so a
-/// typo'd path never silently runs on built-in defaults. Malformed JSON or an
-/// unreadable file is propagated so startup aborts.
+/// Read and parse the config at `path` with portable `std.posix` syscalls
+/// (`std.os.linux.*` emits raw Linux syscall numbers that mis-dispatch on XNU —
+/// issue #73). A missing DEFAULT file falls back to the compile-time default; a
+/// missing EXPLICIT path (--config/SUBNETRA_CONFIG) is an error so a typo'd path
+/// never silently runs on built-in defaults. Malformed JSON or an unreadable file
+/// is propagated so startup aborts.
 fn loadConfig(allocator: std.mem.Allocator, path: [:0]const u8, explicit: bool) !bt.config.Config {
-    const orc = linux.open(path, .{ .ACCMODE = .RDONLY }, 0);
-    switch (linux.errno(orc)) {
-        .SUCCESS => {},
-        .NOENT => return if (explicit) error.ConfigNotFound else bt.config.Config.default(),
+    const fd = std.posix.openatZ(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch |err| switch (err) {
+        error.FileNotFound => return if (explicit) error.ConfigNotFound else bt.config.Config.default(),
         else => return error.ConfigOpenFailed,
-    }
-    const fd: i32 = @intCast(orc);
-    defer _ = linux.close(fd);
+    };
+    defer _ = std.posix.system.close(fd);
 
     var buf: [CONFIG_MAX]u8 = undefined;
     var total: usize = 0;
     while (total < buf.len) {
-        const rc = linux.read(fd, buf[total..].ptr, buf.len - total);
-        switch (linux.errno(rc)) {
-            .SUCCESS => {},
-            .INTR => continue,
-            else => return error.ConfigReadFailed,
-        }
-        if (rc == 0) break;
-        total += rc;
+        const n = std.posix.read(fd, buf[total..]) catch return error.ConfigReadFailed;
+        if (n == 0) break;
+        total += n;
     }
     return bt.config.Config.fromJson(allocator, buf[0..total]);
 }
