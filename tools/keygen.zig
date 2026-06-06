@@ -46,7 +46,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (hasFlag(args, "--version") or hasFlag(args, "-V")) {
         var vbuf: [80]u8 = undefined;
-        const v = std.fmt.bufPrint(&vbuf, "keygen (btunnel v{s})\n", .{build_options.version}) catch return;
+        const v = std.fmt.bufPrint(&vbuf, "keygen (subnetra v{s})\n", .{build_options.version}) catch return;
         writeOut(io, v);
         return;
     }

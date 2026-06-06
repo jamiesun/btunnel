@@ -1,7 +1,7 @@
-# BTunnel development & local integration-test container.
+# Subnetra development & local integration-test container.
 #
 # This image exists for ONE reason: give a reproducible Linux environment where
-# BTunnel's syscall-heavy code (TUN device, epoll reactor, AF_UNIX control
+# Subnetra's syscall-heavy code (TUN device, epoll reactor, AF_UNIX control
 # socket) can actually be built and exercised — something a macOS/Windows host
 # cannot do natively. It is NOT a product dependency; the shipped artifact stays
 # a single static musl binary with zero third-party dependencies.

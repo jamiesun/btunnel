@@ -22,7 +22,7 @@ const crypto = @import("crypto.zig");
 /// (20) + a UDP header (8). IPv4-only in v1 (IPv6 underlay is out of scope).
 pub const OUTER_OVERHEAD: u16 = 28;
 
-/// Total per-packet overhead added on top of the inner IP packet: btunnel wire
+/// Total per-packet overhead added on top of the inner IP packet: subnetra wire
 /// header + AEAD tag + outer IPv4/UDP. Computed from the live constants so the
 /// recommended MTU can never silently drift from the actual protocol.
 pub const TUNNEL_OVERHEAD: u16 = reactor.HEADER_LEN + crypto.TAG_LEN + OUTER_OVERHEAD;
@@ -86,7 +86,7 @@ pub fn render(out: []u8, cfg: config.Config, tun_name: []const u8, path_mtu: u16
 
     const max_mtu = maxTunMtu(path_mtu);
 
-    try w.print("# btunnel network plan for interface '{s}'\n", .{tun_name});
+    try w.print("# subnetra network plan for interface '{s}'\n", .{tun_name});
     try w.print("# underlay path MTU assumed: {d} (override with --path-mtu N)\n", .{path_mtu});
     try w.print(
         "# tunnel overhead: {d} bytes (wire header {d} + AEAD tag {d} + outer IPv4/UDP {d})\n",
@@ -176,11 +176,11 @@ test "render: deterministic plan with address, route, and MTU" {
     };
 
     var buf: [4096]u8 = undefined;
-    const plan = try render(&buf, cfg, "btun0", 1500);
+    const plan = try render(&buf, cfg, "snr0", 1500);
 
-    try std.testing.expect(std.mem.indexOf(u8, plan, "ip link set btun0 mtu 1400 up") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan, "ip addr add 10.0.0.2/24 dev btun0") != null);
-    try std.testing.expect(std.mem.indexOf(u8, plan, "ip route add 192.168.31.0/24 dev btun0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "ip link set snr0 mtu 1400 up") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "ip addr add 10.0.0.2/24 dev snr0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "ip route add 192.168.31.0/24 dev snr0") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "recommended max tunnel MTU for this path: 1436") != null);
     // 1400 <= 1436, so no warning.
     try std.testing.expect(std.mem.indexOf(u8, plan, "WARNING") == null);
@@ -193,7 +193,7 @@ test "render: warns when configured MTU exceeds the path maximum" {
     cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
 
     var buf: [4096]u8 = undefined;
-    const plan = try render(&buf, cfg, "btun0", 1500);
+    const plan = try render(&buf, cfg, "snr0", 1500);
     try std.testing.expect(std.mem.indexOf(u8, plan, "WARNING") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "exceeds the recommended max 1436") != null);
 }
@@ -207,7 +207,7 @@ test "render: unset local_tun_ip emits a placeholder, /0 allowed_src emits no ro
     cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
 
     var buf: [4096]u8 = undefined;
-    const plan = try render(&buf, cfg, "btun0", 1500);
+    const plan = try render(&buf, cfg, "snr0", 1500);
     try std.testing.expect(std.mem.indexOf(u8, plan, "'local_tun_ip' is unset") != null);
     try std.testing.expect(std.mem.indexOf(u8, plan, "no route emitted") != null);
     // No concrete `ip route add` line should appear for a /0 peer.

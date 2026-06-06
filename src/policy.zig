@@ -86,7 +86,7 @@ pub const DeriveError = error{OutOfSpace};
 /// returns the populated slice. Assumes `cfg` already passed `validate()`
 /// (which guarantees a hub peer owns a specific non-overlapping prefix, a spoke
 /// has exactly one hub peer and a local target, etc.). `role=manual` yields an
-/// empty policy — identical to the original "operator installs rules via ptctl"
+/// empty policy — identical to the original "operator installs rules via subnetra"
 /// behavior.
 ///
 /// Policy match is destination-only (longest-prefix), so every entry uses a

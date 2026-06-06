@@ -14,8 +14,8 @@ pub const NONCE_LEN = Aead.nonce_length; // 12
 
 pub const Key = [KEY_LEN]u8;
 
-const LINK_LABEL = "btunnel-v1-link";
-const SESSION_LABEL = "btunnel-v1-session";
+const LINK_LABEL = "subnetra-v1-link";
+const SESSION_LABEL = "subnetra-v1-session";
 
 /// Derive a directional per-link key from the shared PSK and the ordered pair
 /// of mesh node ids (`from_id` is the sender, `to_id` is the receiver).

@@ -29,7 +29,7 @@ pub fn build(b: *std.Build) void {
 
     // Shared core library module: re-exports config / policy / crypto / tun /
     // reactor / uds so both the daemon and the control tool can import it.
-    const core = b.addModule("btunnel", .{
+    const core = b.addModule("subnetra", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
@@ -40,35 +40,35 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("tests/protocol-vectors.json"),
     });
 
-    // btunnel: the single-threaded epoll reactor daemon.
-    const btunnel = b.addExecutable(.{
-        .name = "btunnel",
+    // subnetrad: the single-threaded epoll reactor daemon.
+    const subnetrad = b.addExecutable(.{
+        .name = "subnetrad",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "btunnel", .module = core },
+                .{ .name = "subnetra", .module = core },
             },
         }),
     });
-    b.installArtifact(btunnel);
-    btunnel.root_module.addOptions("build_options", build_options);
+    b.installArtifact(subnetrad);
+    subnetrad.root_module.addOptions("build_options", build_options);
 
-    // ptctl: the lightweight UDS control client.
-    const ptctl = b.addExecutable(.{
-        .name = "ptctl",
+    // subnetra: the lightweight UDS control client.
+    const subnetra = b.addExecutable(.{
+        .name = "subnetra",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/ptctl.zig"),
+            .root_source_file = b.path("src/subnetra.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "btunnel", .module = core },
+                .{ .name = "subnetra", .module = core },
             },
         }),
     });
-    b.installArtifact(ptctl);
-    ptctl.root_module.addOptions("build_options", build_options);
+    b.installArtifact(subnetra);
+    subnetra.root_module.addOptions("build_options", build_options);
 
     // gen-vectors: emits the canonical wire-protocol KAT set as JSON. Used to
     // (re)generate the committed golden `tests/protocol-vectors.json`, which the
@@ -89,9 +89,9 @@ pub fn build(b: *std.Build) void {
     // tools/: out-of-tree auxiliary utilities (issue #57). Each tool is a
     // standalone executable exposed via its own `tool:<name>` step and is
     // **never** part of the default `zig build` install, so a bare `zig build`
-    // keeps shipping only `btunnel` + `ptctl` and the static-size budget is
+    // keeps shipping only `subnetrad` + `subnetra` and the static-size budget is
     // untouched. Building a tool explicitly drops its binary under
-    // `zig-out/tools/`. Tools MAY import the `btunnel` core module to reuse
+    // `zig-out/tools/`. Tools MAY import the `subnetra` core module to reuse
     // config / crypto / protocol; the data plane (src/) must NEVER import
     // anything under tools/ — the dependency is strictly one-way.
     const tools_test_step = b.step("tools-test", "Run unit tests for the tools/ utilities");
@@ -105,7 +105,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "crypto-bench", .src = "tools/crypto-bench.zig", .needs_core = true },
     };
     for (tool_specs) |spec| {
-        const core_import = [_]std.Build.Module.Import{.{ .name = "btunnel", .module = core }};
+        const core_import = [_]std.Build.Module.Import{.{ .name = "subnetra", .module = core }};
         const tool_mod = b.createModule(.{
             .root_source_file = b.path(spec.src),
             .target = target,
@@ -134,8 +134,8 @@ pub fn build(b: *std.Build) void {
     }
 
     // `zig build run` runs the daemon.
-    const run_step = b.step("run", "Run the btunnel daemon");
-    const run_cmd = b.addRunArtifact(btunnel);
+    const run_step = b.step("run", "Run the subnetrad daemon");
+    const run_cmd = b.addRunArtifact(subnetrad);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
     run_step.dependOn(&run_cmd.step);
@@ -147,9 +147,9 @@ pub fn build(b: *std.Build) void {
     const core_tests = b.addTest(.{ .root_module = core });
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
-    const btunnel_tests = b.addTest(.{ .root_module = btunnel.root_module });
-    test_step.dependOn(&b.addRunArtifact(btunnel_tests).step);
+    const subnetrad_tests = b.addTest(.{ .root_module = subnetrad.root_module });
+    test_step.dependOn(&b.addRunArtifact(subnetrad_tests).step);
 
-    const ptctl_tests = b.addTest(.{ .root_module = ptctl.root_module });
-    test_step.dependOn(&b.addRunArtifact(ptctl_tests).step);
+    const subnetra_tests = b.addTest(.{ .root_module = subnetra.root_module });
+    test_step.dependOn(&b.addRunArtifact(subnetra_tests).step);
 }

@@ -7,9 +7,9 @@
 //! compiled in, the linker is left with undefined references to the legacy GCC
 //! `__sync_*_1` / `__sync_*_4` intrinsics.
 //!
-//! Why a *plain* (non-atomic) implementation is correct here: BTunnel runs a
+//! Why a *plain* (non-atomic) implementation is correct here: Subnetra runs a
 //! strictly single-threaded, lock-free reactor (AGENT.md iron law #3 — "No
-//! threads. No locks."), and `ptctl` is a one-shot single-threaded client.
+//! threads. No locks."), and `subnetra` is a one-shot single-threaded client.
 //! There is only ever one thread of execution in the process, so no other
 //! thread can observe a torn read-modify-write. A sequential RMW by the sole
 //! thread is therefore indistinguishable from a hardware-atomic one. (If this
@@ -18,7 +18,7 @@
 //!
 //! This file is dependency-free Zig (no libc, no third-party code) and is only
 //! pulled into the build for arm targets that lack the v6 feature; see the
-//! comptime gate in `main.zig` / `ptctl.zig`.
+//! comptime gate in `main.zig` / `subnetra.zig`.
 
 const std = @import("std");
 

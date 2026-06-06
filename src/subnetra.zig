@@ -1,4 +1,4 @@
-//! ptctl control tool entry point.
+//! subnetra control tool entry point.
 //!
 //! Packs terminal command-line arguments into a text command line and ships it
 //! to the daemon over the control UDS. `policy add` is fire-and-forget; `policy
@@ -6,7 +6,7 @@
 //! missing daemon (or a request timeout) exits non-zero so scripts can detect it.
 
 const std = @import("std");
-const bt = @import("btunnel");
+const bt = @import("subnetra");
 const linux = std.os.linux;
 const build_options = @import("build_options");
 
@@ -43,22 +43,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
         _ = pre.skip();
         while (pre.next()) |arg| {
             if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
-                std.debug.print("ptctl v{s}\n", .{build_options.version});
+                std.debug.print("subnetra v{s}\n", .{build_options.version});
                 return;
             }
             if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
                 std.debug.print(
-                    \\ptctl — btunnel control client
+                    \\subnetra — Subnetra control client
                     \\
                     \\Usage:
-                    \\  ptctl status                     Show daemon status (health, peers, counters).
-                    \\  ptctl policy show                Print the active policy tree.
-                    \\  ptctl policy add --src X --dst Y --action forward --target Z
-                    \\  ptctl save                       Snapshot the active policy to disk.
-                    \\  ptctl --version | --help
+                    \\  subnetra status                     Show daemon status (health, peers, counters).
+                    \\  subnetra policy show                Print the active policy tree.
+                    \\  subnetra policy add --src X --dst Y --action forward --target Z
+                    \\  subnetra save                       Snapshot the active policy to disk.
+                    \\  subnetra --version | --help
                     \\
                     \\Environment:
-                    \\  BTUNNEL_SOCK  Control socket path (default /var/run/btunnel.sock).
+                    \\  SUBNETRA_SOCK  Control socket path (default /var/run/subnetra.sock).
                     \\
                 , .{});
                 return;
@@ -73,7 +73,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const sep: usize = if (first) 0 else 1;
         // Reject overflow rather than silently truncating into a different command.
         if (len + sep + arg.len > buf.len) {
-            std.debug.print("ptctl: command line too long (max {d} bytes)\n", .{buf.len});
+            std.debug.print("subnetra: command line too long (max {d} bytes)\n", .{buf.len});
             std.process.exit(2);
         }
         if (!first) {
@@ -87,13 +87,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const line = buf[0..len];
     const cmd = bt.uds.parseCommand(line) catch |err| {
-        std.debug.print("ptctl: failed to parse command ({s})\n", .{@errorName(err)});
-        std.debug.print("usage: ptctl policy add --src X --dst Y --action forward --target Z\n", .{});
-        std.debug.print("       ptctl policy show | ptctl status | ptctl save\n", .{});
+        std.debug.print("subnetra: failed to parse command ({s})\n", .{@errorName(err)});
+        std.debug.print("usage: subnetra policy add --src X --dst Y --action forward --target Z\n", .{});
+        std.debug.print("       subnetra policy show | subnetra status | subnetra save\n", .{});
         std.process.exit(2);
     };
 
-    const path: []const u8 = if (std.process.Environ.getPosix(init.environ, "BTUNNEL_SOCK")) |s|
+    const path: []const u8 = if (std.process.Environ.getPosix(init.environ, "SUBNETRA_SOCK")) |s|
         s
     else
         bt.uds.SOCKET_PATH;
@@ -111,13 +111,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 fn failRequest(err: bt.uds.ClientError, path: []const u8) noreturn {
     switch (err) {
-        error.DaemonUnavailable => std.debug.print("ptctl: daemon not running (socket {s})\n", .{path}),
-        error.NoResponse => std.debug.print("ptctl: no response from daemon (timed out)\n", .{}),
-        else => std.debug.print("ptctl: control request failed ({s})\n", .{@errorName(err)}),
+        error.DaemonUnavailable => std.debug.print("subnetra: daemon not running (socket {s})\n", .{path}),
+        error.NoResponse => std.debug.print("subnetra: no response from daemon (timed out)\n", .{}),
+        else => std.debug.print("subnetra: control request failed ({s})\n", .{@errorName(err)}),
     }
     std.process.exit(1);
 }
 
-test "ptctl module wiring" {
+test "subnetra module wiring" {
     _ = bt.uds;
 }

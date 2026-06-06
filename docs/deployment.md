@@ -1,9 +1,9 @@
-# BTunnel production deployment guide
+# Subnetra production deployment guide
 
 > A Chinese translation is kept in sync at [`deployment.zh-CN.md`](deployment.zh-CN.md).
 
 This guide deploys a public **Hub** and two NATed **Spokes** so that hosts on the
-spokes' private LANs can reach each other through the Hub relay. BTunnel ships as
+spokes' private LANs can reach each other through the Hub relay. Subnetra ships as
 a single static binary with no runtime dependencies, so deployment is mostly
 about config, capabilities, and host networking.
 
@@ -39,11 +39,11 @@ tool:
 
 ```bash
 zig build -Doptimize=ReleaseSmall
-sudo install -m 0755 zig-out/bin/btunnel /usr/local/bin/btunnel
-sudo install -m 0755 zig-out/bin/ptctl  /usr/local/bin/ptctl
+sudo install -m 0755 zig-out/bin/subnetrad /usr/local/bin/subnetrad
+sudo install -m 0755 zig-out/bin/subnetra  /usr/local/bin/subnetra
 ```
 
-`ldd /usr/local/bin/btunnel` should report *not a dynamic executable*.
+`ldd /usr/local/bin/subnetrad` should report *not a dynamic executable*.
 
 ## 2. Provision per-node config and secrets
 
@@ -64,37 +64,37 @@ PSK is rejected (`InvalidPsk`). The example configs contain obviously-fake
 placeholder keys (`aaaa…`, `bbbb…`) **only so they pass `--check`** — replace
 every one before deploying.
 
-Install each node's config as `/etc/btunnel/config.json`:
+Install each node's config as `/etc/subnetra/config.json`:
 
 ```bash
-sudo mkdir -p /etc/btunnel
-sudo install -m 0600 -o root -g root deploy/spoke-a.json /etc/btunnel/config.json
+sudo mkdir -p /etc/subnetra
+sudo install -m 0600 -o root -g root deploy/spoke-a.json /etc/subnetra/config.json
 ```
 
 > **Secrets handling (required):** config files carry private PSKs. They MUST be
-> root-owned and `0600` (not world-readable). `/etc/btunnel` itself should be
+> root-owned and `0600` (not world-readable). `/etc/subnetra` itself should be
 > `0700`. Never commit a real config to source control.
 
 Validate before starting:
 
 ```bash
-sudo btunnel --check --config /etc/btunnel/config.json
-# btunnel v… (mtu=1400, udp_port=51820, mode=raw_direct, local_id=2, peers=1) [config ok]
+sudo subnetrad --check --config /etc/subnetra/config.json
+# subnetra v… (mtu=1400, udp_port=51820, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 `--config` is optional; without it the daemon reads `./config.json` from its
-working directory (or `$BTUNNEL_CONFIG`). `btunnel --version` and `btunnel --help`
+working directory (or `$SUBNETRA_CONFIG`). `subnetrad --version` and `subnetrad --help`
 work without a config; an unrecognized flag is rejected rather than ignored.
 
 ## 3. Host networking
 
-btunnel creates the TUN device but **prints** (never applies) the host setup, so
+subnetrad creates the TUN device but **prints** (never applies) the host setup, so
 you keep the zero-dependency guarantee and stay in control of routing. Generate
 the plan per node:
 
 ```bash
-sudo btunnel --print-network-plan           # assumes a 1500-byte underlay
-sudo btunnel --print-network-plan --path-mtu 1420   # e.g. behind PPPoE/another VPN
+sudo subnetrad --print-network-plan           # assumes a 1500-byte underlay
+sudo subnetrad --print-network-plan --path-mtu 1420   # e.g. behind PPPoE/another VPN
 ```
 
 Apply the printed `ip` commands (or paste them into the `ExecStartPost` hooks of
@@ -109,7 +109,7 @@ remote LAN via the overlay on each spoke:
 ```bash
 sudo sysctl -w net.ipv4.ip_forward=1
 # On Spoke A, reach Spoke B's LAN through the tunnel:
-sudo ip route add 192.168.31.0/24 dev btun0
+sudo ip route add 192.168.31.0/24 dev snr0
 ```
 
 ## 4. Run as a service
@@ -117,13 +117,13 @@ sudo ip route add 192.168.31.0/24 dev btun0
 Install the unit and start the daemon:
 
 ```bash
-sudo install -m 0644 deploy/btunnel.service /etc/systemd/system/btunnel.service
+sudo install -m 0644 deploy/subnetrad.service /etc/systemd/system/subnetrad.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now btunnel
+sudo systemctl enable --now subnetra
 ```
 
 The unit requests only `CAP_NET_ADMIN`, grants `/dev/net/tun`, runs
-`btunnel --check` as `ExecStartPre`, restarts on failure, and is otherwise
+`subnetrad --check` as `ExecStartPre`, restarts on failure, and is otherwise
 sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`, restricted address
 families, etc.). Edit the commented `ExecStartPost` lines to match your
 `--print-network-plan` output.
@@ -131,7 +131,7 @@ families, etc.). Edit the commented `ExecStartPost` lines to match your
 Logs go to the journal:
 
 ```bash
-journalctl -u btunnel -f
+journalctl -u subnetrad -f
 ```
 
 ## 5. Install the relay policy (Hub)
@@ -145,32 +145,32 @@ journalctl -u btunnel -f
 
 The Hub starts with an empty policy tree; install the relay/delivery rules at
 runtime over the local control socket (hot-swapped, no restart). Set
-`BTUNNEL_SOCK` to match the unit (`/run/btunnel/btunnel.sock`):
+`SUBNETRA_SOCK` to match the unit (`/run/subnetra/subnetra.sock`):
 
 ```bash
-export BTUNNEL_SOCK=/run/btunnel/btunnel.sock
+export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 # Deliver/relay overlay traffic to the right spoke:
-sudo -E ptctl policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
-sudo -E ptctl policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
-sudo -E ptctl policy show
-sudo -E ptctl save        # persist a replayable snapshot
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
+sudo -E subnetra policy show
+sudo -E subnetra save        # persist a replayable snapshot
 ```
 
 On each Spoke, deliver tunnelled traffic destined for the local overlay address
 to the local TUN (target `0` = local):
 
 ```bash
-export BTUNNEL_SOCK=/run/btunnel/btunnel.sock
-sudo -E ptctl policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
+export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
 ```
 
 ## 6. Inspect, troubleshoot, upgrade
 
 ```bash
-sudo -E ptctl status      # peers, traffic counters, and per-reason drop counters
+sudo -E subnetra status      # peers, traffic counters, and per-reason drop counters
 ```
 
-`ptctl status` exits non-zero if the daemon is down. Rising drop counters point
+`subnetra status` exits non-zero if the daemon is down. Rising drop counters point
 straight at the cause: `unknown_peer` (header `key_id` matches no configured
 peer), `auth_or_invalid` (PSK/epoch/wire mismatch), `spoof` (inner source outside
 `allowed_src`), or `no_route` (no matching policy). The `endpoint_learned`
@@ -183,8 +183,8 @@ is derived each lifetime). To roll back, reinstall the previous binary and
 restart. Re-apply the saved policy snapshot if needed.
 
 ```bash
-sudo install -m 0755 zig-out/bin/btunnel /usr/local/bin/btunnel
-sudo systemctl restart btunnel
+sudo install -m 0755 zig-out/bin/subnetrad /usr/local/bin/subnetrad
+sudo systemctl restart subnetrad
 ```
 
 > **Time synchronization (required).** The fresh-epoch-per-restart property above
@@ -198,7 +198,7 @@ sudo systemctl restart btunnel
 > clocks advance past the old value — the link silently blackholes and the peer's
 > `auth_or_invalid` drop counter (above) climbs. **Mitigation:** run a time
 > daemon (`chrony` / `systemd-timesyncd`); on hardware without an RTC, order
-> `btunnel.service` after `time-sync.target` (`After=time-sync.target` +
+> `subnetrad.service` after `time-sync.target` (`After=time-sync.target` +
 > `Wants=time-sync.target`) so the clock is monotonic across restarts. If a clock
 > did jump backward, restart **both** ends of the affected link to force a fresh
 > epoch on each side. This is an accepted, permanent trade-off of the
@@ -231,12 +231,12 @@ with a tiny DDNS watcher — no daemon changes. A restart is **stateless and che
 edit plus restart:
 
 ```bash
-# /usr/local/bin/btunnel-ddns.sh  — run from a systemd timer every ~60s on each spoke
+# /usr/local/bin/subnetrad-ddns.sh  — run from a systemd timer every ~60s on each spoke
 new=$(getent hosts hub.example.com | awk '{print $1}')
-cur=$(grep -oE '[0-9.]+:[0-9]+' /etc/btunnel/config.json | head -1 | cut -d: -f1)
+cur=$(grep -oE '[0-9.]+:[0-9]+' /etc/subnetra/config.json | head -1 | cut -d: -f1)
 [ -n "$new" ] && [ "$new" != "$cur" ] && {
-  sed -i "s/$cur/$new/" /etc/btunnel/config.json
-  systemctl restart btunnel        # stateless restart: a fresh epoch is derived
+  sed -i "s/$cur/$new/" /etc/subnetra/config.json
+  systemctl restart subnetrad        # stateless restart: a fresh epoch is derived
 }
 ```
 
@@ -247,16 +247,16 @@ address change after startup, which is exactly the case this watcher handles.
 
 On long, cross-ISP or cross-region links, the dominant cause of jitter and loss is
 **not** that the tunnel is "detected" — it is the underlay: ISP interconnect
-congestion, last-mile queueing, single-flow rate caps, and bursty UDP. BTunnel is
+congestion, last-mile queueing, single-flow rate caps, and bursty UDP. Subnetra is
 intentionally a **stateless, handshake-free, allocation-free data plane** (iron
 laws #2, #3, #8): it does **not** ship an in-tunnel scheduler, an adaptive rate
 controller, or an auto-switching path manager, and it never will. All of the
 shaping below is done **at the OS layer with `tc`** and standard kernel tooling —
 **no daemon changes, no protocol changes**. The kernel already sees the real inner
-five-tuples on the cleartext `btun0` device, so let it do the work it is good at.
+five-tuples on the cleartext `snr0` device, so let it do the work it is good at.
 
 > Everything here is **optional host tuning**. Measure first (Section 6,
-> `ptctl status` drop counters and the counters your monitoring scrapes), change
+> `subnetra status` drop counters and the counters your monitoring scrapes), change
 > one thing at a time, and keep a rollback. Do not enable all of it blindly.
 
 **1. Cap the egress, don't let the ISP cap it for you.** A tunnel that fires UDP
@@ -270,12 +270,12 @@ sudo tc qdisc replace dev eth0 root tbf rate 60mbit burst 512k latency 80ms
 ```
 
 **2. Fair-queue per flow so bulk traffic can't starve interactive traffic.**
-Apply this on the **inner** device (`btun0`), where the kernel can see each real
+Apply this on the **inner** device (`snr0`), where the kernel can see each real
 flow (DNS, SSH, RDP, an HTTP API call, a backup) — not on the outer UDP socket,
 where everything collapses into one flow:
 
 ```bash
-sudo tc qdisc replace dev btun0 root fq_codel target 5ms interval 100ms limit 2000
+sudo tc qdisc replace dev snr0 root fq_codel target 5ms interval 100ms limit 2000
 ```
 
 On a home/branch gateway doing the egress shaping itself, CAKE is a good
@@ -287,15 +287,15 @@ sudo tc qdisc replace dev eth0 root cake bandwidth 60mbit
 
 This — kernel fair-queueing on the cleartext device — is the correct home for
 per-flow prioritisation. It replaces any "in-tunnel QoS scheduler": the OS already
-understands the flows, so BTunnel must not duplicate `tc` inside the data plane.
+understands the flows, so Subnetra must not duplicate `tc` inside the data plane.
 
 **3. Be conservative with MTU, and clamp MSS.** Stacked PPPoE / cloud VPC / bridge
-hops plus BTunnel's own outer IP/UDP + AEAD overhead shrink the usable MTU. Don't
+hops plus Subnetra's own outer IP/UDP + AEAD overhead shrink the usable MTU. Don't
 start at 1500. Use the daemon's own plan (Section 3) — it prints the safe tunnel
 MTU **and** the MSS-clamp rule for the path:
 
 ```bash
-sudo btunnel --print-network-plan --path-mtu 1280   # raise once it proves stable
+sudo subnetrad --print-network-plan --path-mtu 1280   # raise once it proves stable
 ```
 
 If small packets pass but large transfers stall, this is almost always the cause.
@@ -312,7 +312,7 @@ sudo iptables -t mangle -A POSTROUTING -o eth0 -j DSCP --set-dscp 0
 **5. Multi-path, if you need it, stays static and stateless.** Prefer
 **same-ISP** Hub placement and per-region Hubs over one national Hub straining a
 saturated backbone — but express that as **static per-link / per-spoke config and
-routing**, chosen by the operator (or `ptctl`), **not** as an in-protocol health
+routing**, chosen by the operator (or `subnetra`), **not** as an in-protocol health
 probe or auto-failover state machine inside the daemon (iron law #8). If you fan a
 link across multiple endpoints, hash by the **inner five-tuple** so a single TCP
 connection always rides one path; never stripe one connection's packets across

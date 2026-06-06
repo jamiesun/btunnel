@@ -1,7 +1,7 @@
-//! BTunnel core library.
+//! Subnetra core library.
 //!
 //! Re-exports every internal module so that the daemon (`main.zig`) and the
-//! control tool (`ptctl.zig`) share a single compiled module. Keeping the
+//! control tool (`subnetra.zig`) share a single compiled module. Keeping the
 //! `@import`s here also makes every module's `test` block reachable from
 //! `zig build test`.
 

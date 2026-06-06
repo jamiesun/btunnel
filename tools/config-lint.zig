@@ -4,7 +4,7 @@
 //! (`config.fromJson` + `Config.validate` + `peer.PeerRegistry.fromConfig`) so
 //! the linter can never drift from what the daemon enforces at startup.
 //!
-//! Unlike `btunnel --check`, it has NO dependency on a sane system clock — it
+//! Unlike `subnetrad --check`, it has NO dependency on a sane system clock — it
 //! feeds the registry a fixed synthetic epoch purely to exercise the structural
 //! checks (duplicate ids/endpoints, reserved/self ids) — and it never opens a
 //! socket. That makes it safe to run on a build/CI box whose wall clock is
@@ -13,7 +13,7 @@
 //! `zig build tool:config-lint`, never installed by default).
 
 const std = @import("std");
-const bt = @import("btunnel");
+const bt = @import("subnetra");
 const build_options = @import("build_options");
 
 const CONFIG_MAX = 64 * 1024;
@@ -27,7 +27,7 @@ const SYNTH_EPOCH: u64 = bt.protocol_vectors.MIN_EPOCH;
 const USAGE =
     \\Usage: config-lint [PATH]
     \\
-    \\Validate a btunnel config.json offline using the daemon's own parser and
+    \\Validate a subnetra config.json offline using the daemon's own parser and
     \\sanity checks. Exits 0 if the config is valid, non-zero otherwise.
     \\PATH defaults to "config.json".
     \\
@@ -93,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (hasFlag(args, "--version") or hasFlag(args, "-V")) {
         var vbuf: [80]u8 = undefined;
-        const v = std.fmt.bufPrint(&vbuf, "config-lint (btunnel v{s})\n", .{build_options.version}) catch return;
+        const v = std.fmt.bufPrint(&vbuf, "config-lint (subnetra v{s})\n", .{build_options.version}) catch return;
         writeOut(io, v);
         return;
     }

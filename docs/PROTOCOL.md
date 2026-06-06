@@ -1,9 +1,9 @@
-# BTunnel Wire Protocol Specification — v1
+# Subnetra Wire Protocol Specification — v1
 
 > **Status: normative.** This document is the interoperability contract for the
-> BTunnel data plane. Any implementation — regardless of operating system or
+> Subnetra data plane. Any implementation — regardless of operating system or
 > programming language — that reproduces the behaviour below is a conformant
-> BTunnel endpoint and can join a mesh alongside the reference implementation.
+> Subnetra endpoint and can join a mesh alongside the reference implementation.
 >
 > The reference implementation (pure Zig) lives in `src/` and is the executable
 > source of truth. The machine-checkable companion to this document is the
@@ -30,7 +30,7 @@ RFC 2119.
 
 ## 1. Scope and model
 
-BTunnel forwards raw IPv4 packets between mesh nodes over an encrypted UDP
+Subnetra forwards raw IPv4 packets between mesh nodes over an encrypted UDP
 underlay in a **single-hub hub-and-spoke** topology. Each node has a numeric
 mesh **id** that is non-zero and **MUST** fit a `u16` (`0 < id ≤ 65535`), so it
 can serve as the on-wire `key_id` selector (§3.1, §5). Every directional link
@@ -68,13 +68,13 @@ are ASCII with **no NUL terminator**.
 ```
 link_key(psk, from_id, to_id) =
     BLAKE2b-256( key = psk,
-                 msg = "btunnel-v1-link"            // 15 bytes
+                 msg = "subnetra-v1-link"            // 15 bytes
                      || u32_be(from_id)             //  4 bytes
                      || u32_be(to_id) )             //  4 bytes   → 32-byte key
 
 session_key(link_key, epoch) =
     BLAKE2b-256( key = link_key,
-                 msg = "btunnel-v1-session"         // 18 bytes
+                 msg = "subnetra-v1-session"         // 18 bytes
                      || u64_be(epoch) )             //  8 bytes   → 32-byte key
 ```
 
@@ -125,7 +125,7 @@ Each daemon lifetime samples a **boot epoch** once at startup:
 
 ## 3. Datagram format
 
-A BTunnel UDP payload is:
+A Subnetra UDP payload is:
 
 ```
 +------------------+---------------------------+----------------+
@@ -244,7 +244,7 @@ security-critical.
 > window, accept) and thus also *learn the attacker's endpoint*. This requires
 > on-path capture; an off-path attacker cannot forge an authenticator. It is the
 > standard trade-off of stateless-epoch establishment plus endpoint learning,
-> and it is **accepted by design, not deferred**: BTunnel performs no handshake
+> and it is **accepted by design, not deferred**: Subnetra performs no handshake
 > as a deliberate constraint (the design contract's iron law #8), so there is no
 > challenge/response to close it. The harm is also transient — the peer's next
 > genuine packet relocates the endpoint back — and an off-path attacker cannot
@@ -274,7 +274,7 @@ On **any** rejection — unknown `key_id`, malformed header, non-zero `flags`,
 stale/zero epoch, authentication failure, replay, or inner-source violation —
 the endpoint **MUST silently drop** the datagram. It **MUST NOT** emit a TCP
 RST, an ICMP error, or any other observable response. The ciphertext **MUST
-NOT** contain any fixed magic number. These rules make BTunnel
+NOT** contain any fixed magic number. These rules make Subnetra
 indistinguishable from background noise to an external prober.
 
 ---

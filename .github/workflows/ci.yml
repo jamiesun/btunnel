@@ -92,7 +92,7 @@ jobs:
           cpu_arg=""
           if [ -n "${{ matrix.cpu }}" ]; then cpu_arg="-Dcpu=${{ matrix.cpu }}"; fi
           zig build -Dtarget="${{ matrix.target }}" $cpu_arg -Doptimize=ReleaseSmall
-          for bin in btunnel ptctl; do
+          for bin in subnetrad subnetra; do
             path="zig-out/bin/${bin}"
             if readelf -d "$path" 2>/dev/null | grep -q NEEDED; then
               echo "ERROR: ${path} is dynamically linked" >&2; exit 1

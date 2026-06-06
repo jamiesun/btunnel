@@ -1,14 +1,14 @@
-# BTunnel on RouterOS Container
+# Subnetra on RouterOS Container
 
-This guide documents the RouterOS-specific deployment shape for BTunnel. Use it
+This guide documents the RouterOS-specific deployment shape for Subnetra. Use it
 when a MikroTik/RouterOS device is a **Spoke** behind NAT and a public Linux
 server is the **Hub**.
 
 RouterOS Container is not the same as a normal Linux host:
 
 - RouterOS manages the container's Ethernet side through a `veth`.
-- BTunnel creates its own Linux `btun0` TUN device inside the container.
-- RouterOS cannot manage the container's `btun0` directly. It routes to the
+- Subnetra creates its own Linux `snr0` TUN device inside the container.
+- RouterOS cannot manage the container's `snr0` directly. It routes to the
   container through the `veth` gateway.
 - RouterOS image import may require a legacy Docker archive layout.
 
@@ -25,7 +25,7 @@ Public Linux Hub
 RouterOS office Spoke
   container veth: 172.30.66.2/30
   RouterOS veth side: 172.30.66.1/30
-  btunnel TUN in container: 10.66.0.3/24
+  subnetra TUN in container: 10.66.0.3/24
   published LAN: 192.168.88.0/24
 ```
 
@@ -81,49 +81,49 @@ layer.tar
 
 The image must include:
 
-- `/usr/local/bin/btunnel`
-- `/usr/local/bin/ptctl`
-- `/etc/btunnel/config.json`
+- `/usr/local/bin/subnetrad`
+- `/usr/local/bin/subnetra`
+- `/etc/subnetra/config.json`
 - an entrypoint script that configures the container-local TUN interface
 
 The entrypoint should:
 
 ```sh
-export BTUNNEL_SOCK="${BTUNNEL_SOCK:-/etc/btunnel/btunnel.sock}"
-export BTUNNEL_TUN="${BTUNNEL_TUN:-btun0}"
+export SUBNETRA_SOCK="${SUBNETRA_SOCK:-/etc/subnetra/subnetra.sock}"
+export SUBNETRA_TUN="${SUBNETRA_TUN:-snr0}"
 echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
 
-/usr/local/bin/btunnel &
+/usr/local/bin/subnetrad &
 pid=$!
 
 for i in $(seq 1 100); do
-  ip link show "$BTUNNEL_TUN" >/dev/null 2>&1 && break
+  ip link show "$SUBNETRA_TUN" >/dev/null 2>&1 && break
   sleep 0.1
 done
 
-ip addr add "$BTUNNEL_TUN_IP" dev "$BTUNNEL_TUN" 2>/dev/null || true
-ip link set "$BTUNNEL_TUN" mtu "${BTUNNEL_TUN_MTU:-1400}" up
+ip addr add "$SUBNETRA_TUN_IP" dev "$SUBNETRA_TUN" 2>/dev/null || true
+ip link set "$SUBNETRA_TUN" mtu "${SUBNETRA_TUN_MTU:-1400}" up
 
 # If this RouterOS Spoke publishes a LAN, return traffic to RouterOS over veth.
-if [ -n "${BTUNNEL_LAN_CIDR:-}" ]; then
-  ip route replace "$BTUNNEL_LAN_CIDR" via 172.30.66.1 2>/dev/null || true
+if [ -n "${SUBNETRA_LAN_CIDR:-}" ]; then
+  ip route replace "$SUBNETRA_LAN_CIDR" via 172.30.66.1 2>/dev/null || true
 fi
-ip route replace 10.66.0.0/24 dev "$BTUNNEL_TUN" 2>/dev/null || true
+ip route replace 10.66.0.0/24 dev "$SUBNETRA_TUN" 2>/dev/null || true
 
-/usr/local/bin/ptctl status || true
+/usr/local/bin/subnetra status || true
 wait "$pid"
 ```
 
 Set these image environment values in the image config, not in RouterOS secrets:
 
 ```text
-BTUNNEL_TUN_IP=10.66.0.3/24
-BTUNNEL_TUN_MTU=1400
-BTUNNEL_LAN_CIDR=192.168.88.0/24
-BTUNNEL_SOCK=/etc/btunnel/btunnel.sock
+SUBNETRA_TUN_IP=10.66.0.3/24
+SUBNETRA_TUN_MTU=1400
+SUBNETRA_LAN_CIDR=192.168.88.0/24
+SUBNETRA_SOCK=/etc/subnetra/subnetra.sock
 ```
 
-Real PSKs live in `/etc/btunnel/config.json` inside the image. Do not commit
+Real PSKs live in `/etc/subnetra/config.json` inside the image. Do not commit
 production configs or image build directories containing real PSKs.
 
 ## 3. Spoke config shape
@@ -163,24 +163,24 @@ Important semantics:
 
 ## 4. RouterOS veth, address, and route
 
-Create a dedicated veth for the BTunnel container:
+Create a dedicated veth for the Subnetra container:
 
 ```routeros
-/interface/veth/add name=btunnel-test-veth address=172.30.66.2/30 gateway=172.30.66.1
-/ip/address/add address=172.30.66.1/30 interface=btunnel-test-veth comment=btunnel-test-veth
+/interface/veth/add name=subnetra-test-veth address=172.30.66.2/30 gateway=172.30.66.1
+/ip/address/add address=172.30.66.1/30 interface=subnetra-test-veth comment=subnetra-test-veth
 ```
 
 Route overlay traffic from RouterOS into the container:
 
 ```routeros
-/ip/route/add dst-address=10.66.0.0/24 gateway=172.30.66.2 comment=btunnel-test-overlay
+/ip/route/add dst-address=10.66.0.0/24 gateway=172.30.66.2 comment=subnetra-test-overlay
 ```
 
 If remote nodes should reach the RouterOS LAN, they must have a route to the LAN
-through BTunnel. On a Linux Hub/Spoke this is usually:
+through Subnetra. On a Linux Hub/Spoke this is usually:
 
 ```bash
-ip route add 192.168.88.0/24 dev btun0
+ip route add 192.168.88.0/24 dev snr0
 ```
 
 ## 5. Add and start the container
@@ -189,34 +189,34 @@ Upload the legacy archive to RouterOS, then add the container:
 
 ```routeros
 /container/add \
-  file=btunnel-routeros-spoke.legacy.tar.gz \
-  interface=btunnel-test-veth \
-  root-dir=btunnel-routeros-spoke-root \
+  file=subnetra-routeros-spoke.legacy.tar.gz \
+  interface=subnetra-test-veth \
+  root-dir=subnetra-routeros-spoke-root \
   logging=yes \
   start-on-boot=no \
-  comment=btunnel-routeros-spoke
+  comment=subnetra-routeros-spoke
 
-/container/start [find comment="btunnel-routeros-spoke"]
-/container/print detail where comment="btunnel-routeros-spoke"
+/container/start [find comment="subnetra-routeros-spoke"]
+/container/print detail where comment="subnetra-routeros-spoke"
 ```
 
 Check logs:
 
 ```routeros
-/log/print where message~"btunnel-routeros-spoke|btunnel"
+/log/print where message~"subnetra-routeros-spoke|subnetra"
 ```
 
 Expected startup evidence:
 
 ```text
-btunnel v0.2.0 ... local_id=3 peers=1 ... [ready]
-btun0 ... mtu 1400 ... inet 10.66.0.3/24
-ptctl status shows udp/tun counters
+subnetrad v0.2.0 ... local_id=3 peers=1 ... [ready]
+snr0 ... mtu 1400 ... inet 10.66.0.3/24
+subnetra status shows udp/tun counters
 ```
 
 ## 6. NAT rules
 
-Do not add broad NAT rules for BTunnel traffic.
+Do not add broad NAT rules for Subnetra traffic.
 
 For LAN publishing, preserve the real LAN source addresses. The Hub should see
 inner sources from the published LAN, for example `192.168.88.0/24`, and
@@ -233,10 +233,10 @@ source:
   chain=srcnat \
   src-address=172.30.66.1 \
   dst-address=10.66.0.0/24 \
-  out-interface=btunnel-test-veth \
+  out-interface=subnetra-test-veth \
   action=src-nat \
   to-addresses=192.168.88.1 \
-  comment=btunnel-routeros-self-snat \
+  comment=subnetra-routeros-self-snat \
   place-before=[find chain=srcnat action=masquerade]
 ```
 
@@ -251,7 +251,7 @@ From the public Hub:
 ```bash
 ping -c 3 10.66.0.3
 ping -c 3 192.168.88.1
-BTUNNEL_SOCK=/run/btunnel-test/btunnel.sock sudo -E ptctl status
+SUBNETRA_SOCK=/run/subnetra-test/subnetra.sock sudo -E subnetra status
 ```
 
 From another Linux Spoke:
@@ -288,7 +288,7 @@ tun.not_ipv4
 
 ## 8. MTU guidance
 
-BTunnel v0.2.0 overhead is 64 bytes:
+Subnetra v0.2.0 overhead is 64 bytes:
 
 ```text
 wire header 20 + AEAD tag 16 + outer IPv4/UDP 28 = 64
@@ -317,23 +317,23 @@ public-internet paths. For a known 1400-byte VPN/private-line underlay, use
 Stop and remove the container:
 
 ```routeros
-/container/stop [find comment="btunnel-routeros-spoke"]
-/container/remove [find comment="btunnel-routeros-spoke"]
-/file/remove [find name="btunnel-routeros-spoke-root"]
+/container/stop [find comment="subnetra-routeros-spoke"]
+/container/remove [find comment="subnetra-routeros-spoke"]
+/file/remove [find name="subnetra-routeros-spoke-root"]
 ```
 
 Remove the test route and optional self-SNAT:
 
 ```routeros
-/ip/route/remove [find comment="btunnel-test-overlay"]
-/ip/firewall/nat/remove [find comment="btunnel-routeros-self-snat"]
+/ip/route/remove [find comment="subnetra-test-overlay"]
+/ip/firewall/nat/remove [find comment="subnetra-routeros-self-snat"]
 ```
 
 Keep the veth if you plan to redeploy; otherwise remove it:
 
 ```routeros
-/ip/address/remove [find comment="btunnel-test-veth"]
-/interface/veth/remove [find name="btunnel-test-veth"]
+/ip/address/remove [find comment="subnetra-test-veth"]
+/interface/veth/remove [find name="subnetra-test-veth"]
 ```
 
 ## 10. Production notes

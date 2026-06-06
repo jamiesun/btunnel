@@ -1,34 +1,34 @@
 # RFC: native macOS spoke (MVP) — design proposal
 
 > **Status: DRAFT / DESIGN-ONLY — NOT APPROVED, NO CODE AUTHORIZED.**
-> This document proposes *how* btunnel could run natively on macOS as a **spoke**.
+> This document proposes *how* subnetra could run natively on macOS as a **spoke**.
 > It ships **no implementation** and changes **no `src/` behaviour**. Two of the
 > iron laws in [`AGENT.md`](../AGENT.md) (§3 "Linux epoll reactor" and §6 "fully
 > static against musl-libc") are written around Linux primitives and physically
 > cannot hold on macOS. Per the project's own governance, **no macOS backend code
 > may begin until the maintainer signs off on the iron-law amendments in §2.** The
-> authoritative *what* remains [`docs/btunnel-develop.md`](btunnel-develop.md); the
+> authoritative *what* remains [`docs/subnetra-develop.md`](subnetra-develop.md); the
 > normative v1 wire contract remains [`docs/PROTOCOL.md`](PROTOCOL.md). Where this
 > RFC and either of those disagree, **they win and this RFC is wrong.**
 
 ## 1. Purpose and scope
 
-btunnel today is **Linux-first by construction**, not by accident:
+subnetrad today is **Linux-first by construction**, not by accident:
 
 - `src/tun.zig` opens `/dev/net/tun` and issues the `TUNSETIFF` ioctl
   (`tun.zig:13,21,67`) — a Linux-only device model.
 - `src/reactor.zig` is an **edge-triggered `epoll`** loop (`reactor.zig:279-285`,
   `EPOLL.IN | EPOLL.ET`); 14 `epoll*` references, 133 `linux.*` calls.
 - `src/uds.zig` (143 `linux.*`), `src/main.zig` (28), `src/config.zig`,
-  `src/ptctl.zig`, `src/peer.zig` all call `std.os.linux.*` **raw syscalls**
+  `src/subnetra.zig`, `src/peer.zig` all call `std.os.linux.*` **raw syscalls**
   directly.
 
 **Pain (the real one):** the maintainer's daily-driver OS is macOS. Running
-btunnel only inside Colima/Docker (a Linux VM) means the **Mac host routing table
+subnetrad only inside Colima/Docker (a Linux VM) means the **Mac host routing table
 never enters the tunnel** — there is an extra NAT hop and no native route
 injection. That is not equivalent to "my laptop is a spoke on the overlay."
 
-**Collapse point if not done:** btunnel stays a server-to-server tool that the
+**Collapse point if not done:** subnetra stays a server-to-server tool that the
 maintainer cannot natively dogfood from their primary workstation. Adoption as a
 *daily* mesh tool stalls.
 
@@ -38,7 +38,7 @@ maintainer cannot natively dogfood from their primary workstation. Adoption as a
   hub**. No macOS hub, no `launchd`/`systemd` equivalent, no automatic route
   table mutation in the first cut.
 - Deliver: `--check`, config parsing, UDP data plane, UDS control plane, a
-  `utun` device, and `ptctl status` working on a real Mac, reaching a Linux/
+  `utun` device, and `subnetra status` working on a real Mac, reaching a Linux/
   RouterOS node with `ping`/MTU intact.
 - Out of scope: see §9.
 
@@ -46,7 +46,7 @@ maintainer cannot natively dogfood from their primary workstation. Adoption as a
 
 ```
 $ zig build -Dtarget=aarch64-macos      # → Mach-O 64-bit executable arm64 (compiles)
-$ ./zig-out/bin/btunnel --check
+$ ./zig-out/bin/subnetrad --check
 thread … panic: index out of bounds: index 65548, len 65536
     src/main.zig:133  return bt.config.Config.fromJson(allocator, buf[0..total]);
 ```
@@ -85,7 +85,7 @@ Unchanged, must keep passing:
    lock-free, allocation-free readiness loop: `epoll` (edge-triggered) on Linux,
    `poll(2)`/`kqueue` on macOS. The single-thread, no-lock, no-per-packet-alloc
    invariant is the law; the specific syscall is platform-selected."* Rationale in
-   §4 — for btunnel's fd model the choice is performance-neutral.
+   §4 — for subnetra's fd model the choice is performance-neutral.
 7. **Iron law #6 — binary form.** Today: *"Fully static against musl-libc, `ldd`
    → `not a dynamic executable`, ≤ 512 KB."* macOS **cannot** statically link
    `libSystem` (Apple does not ship a static libc); every Mach-O links
@@ -110,7 +110,7 @@ syscall numbers**. On XNU those numbers map to unrelated calls, so the binary
   wrappers in **`std.posix.*`**. Migrating the tree from `std.os.linux.*` to
   `std.posix.*` makes the config/UDP/UDS/control plane correct on macOS **and is
   a pure improvement on Linux** (idiomatic, identical syscalls). This is broad
-  (`reactor`, `uds`, `main`, `peer`, `config`, `ptctl`) but mechanical.
+  (`reactor`, `uds`, `main`, `peer`, `config`, `subnetra`) but mechanical.
 - **Genuinely Linux-only primitives** — `epoll`, `/dev/net/tun` + `TUNSETIFF` —
   have no portable wrapper and become the **platform backend** (§4, §6).
 
@@ -141,7 +141,7 @@ The decisive design fact, verified in `src/reactor.zig`:
 
 So the reactor watches **~3 file descriptors whether it is a 1-peer spoke or an
 N-peer hub.** `epoll`'s headline advantage — `O(ready)` vs `poll`'s `O(n)` at
-large fd counts — **never triggers in btunnel**, because `n ≈ 3`.
+large fd counts — **never triggers in subnetra**, because `n ≈ 3`.
 
 Consequences:
 
@@ -223,9 +223,9 @@ privilege/SIP surface for the first cut.
   network namespaces**, which are Linux-only. GitHub macOS runners have **no
   netns** and cannot create a `utun` without elevated privileges/entitlements.
 - Therefore macOS acceptance is a **documented manual real-machine runbook**, not
-  a CI job, for the MVP: on a real Mac, start btunnel, confirm a `utun` comes up,
+  a CI job, for the MVP: on a real Mac, start subnetrad, confirm a `utun` comes up,
   reach an existing Linux/RouterOS hub, and verify `ping`, path MTU, and
-  `ptctl status`. The **release gate stays Linux-only**; the macOS artifact is
+  `subnetra status`. The **release gate stays Linux-only**; the macOS artifact is
   certified by the runbook until a hosted-mac acceptance path exists.
 
 > This is the part the "1–2 weeks to be as solid as Linux" estimate understates:

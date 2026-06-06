@@ -25,7 +25,7 @@
 //!   Topology is single-hub hub-and-spoke; spokes do not relay.
 //!
 //! Control plane (issue #6): an optional `*uds.Control` listener is registered
-//! level-triggered so `ptctl` can hot-swap the policy tree at runtime; the data
+//! level-triggered so `subnetra` can hot-swap the policy tree at runtime; the data
 //! plane only ever reads the tree atomically and never blocks on control I/O.
 
 const std = @import("std");
@@ -231,7 +231,7 @@ pub const Reactor = struct {
     /// Multi-peer endpoint + crypto registry (per-peer keys, counters, windows).
     registry: *peer.PeerRegistry,
     /// Optional runtime counters (issue #24). Null in unit tests that don't care
-    /// about observability; set by `main` so `ptctl status` can read them. Plain
+    /// about observability; set by `main` so `subnetra status` can read them. Plain
     /// increments are safe under the single-threaded reactor (no atomics).
     counters: ?*stats.Counters = null,
     rx: [BUF_LEN]u8 = undefined,
@@ -525,7 +525,7 @@ pub const Reactor = struct {
 };
 
 /// Wall-clock nanoseconds for the observability-only `last_seen_wall_ns` field.
-/// REALTIME (not MONOTONIC) so `ptctl status` shows a human-meaningful instant;
+/// REALTIME (not MONOTONIC) so `subnetra status` shows a human-meaningful instant;
 /// it is subject to NTP/clock jumps and MUST NOT drive any protocol logic. On a
 /// non-Linux host (unit tests only) it returns 0.
 fn wallNs() u64 {

@@ -57,13 +57,13 @@ jobs:
       - name: Load tun module
         run: sudo modprobe tun
 
-      # BTUNNEL_RELEASE_GATE=1 makes any SKIP a HARD FAILURE: the release is only
+      # SUBNETRA_RELEASE_GATE=1 makes any SKIP a HARD FAILURE: the release is only
       # certified if the live privileged netns relay e2e actually runs and passes.
       # Evidence is appended to the job summary by the harness.
       - name: Run privileged release gate
         run: |
-          sudo --preserve-env=PATH,BTUNNEL_RELEASE_GATE,GITHUB_STEP_SUMMARY \
-            env "PATH=$PATH" BTUNNEL_RELEASE_GATE=1 \
+          sudo --preserve-env=PATH,SUBNETRA_RELEASE_GATE,GITHUB_STEP_SUMMARY \
+            env "PATH=$PATH" SUBNETRA_RELEASE_GATE=1 \
             bash test/integration/run.sh
 
   binaries:
@@ -108,7 +108,7 @@ jobs:
           cpu_arg=""
           if [ -n "${{ matrix.cpu }}" ]; then cpu_arg="-Dcpu=${{ matrix.cpu }}"; fi
           zig build -Dtarget="${{ matrix.target }}" $cpu_arg -Doptimize=ReleaseSmall
-          for bin in btunnel ptctl; do
+          for bin in subnetrad subnetra; do
             path="zig-out/bin/${bin}"
             # Iron law #6: each artifact must be static and within budget.
             if readelf -d "$path" 2>/dev/null | grep -q NEEDED; then
@@ -122,9 +122,9 @@ jobs:
               exit 1
             fi
           done
-          stage="btunnel-${version}-linux-${{ matrix.arch }}"
+          stage="subnetra-${version}-linux-${{ matrix.arch }}"
           mkdir -p "dist/$stage"
-          cp zig-out/bin/btunnel zig-out/bin/ptctl "dist/$stage/"
+          cp zig-out/bin/subnetrad zig-out/bin/subnetra "dist/$stage/"
           cp config.example.json README.md README.zh-CN.md LICENSE "dist/$stage/"
           tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
           rm -rf "dist/$stage"
@@ -133,7 +133,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v5
         with:
-          name: btunnel-${{ matrix.arch }}
+          name: subnetra-${{ matrix.arch }}
           path: dist/*.tar.gz
           retention-days: 1
 
@@ -164,7 +164,7 @@ jobs:
           set -euo pipefail
           gh release create "$VERSION" \
             --repo "$REPO" \
-            --title "BTunnel ${VERSION}" \
+            --title "Subnetra ${VERSION}" \
             --generate-notes \
             dist/*.tar.gz dist/SHA256SUMS.txt
 
@@ -180,7 +180,7 @@ jobs:
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          echo "image=ghcr.io/${owner}/btunnel" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${owner}/subnetra" >> "$GITHUB_OUTPUT"
           echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
       # Multi-platform output needs the docker-container buildx driver. No qemu
@@ -265,15 +265,15 @@ jobs:
               --platform "$plat" \
               "${base_arg[@]}" \
               --tag "${image}:${version}" \
-              --output "type=docker,dest=images/btunnel-image-${version}-${arch}.tar" \
+              --output "type=docker,dest=images/subnetra-image-${version}-${arch}.tar" \
               .
-            gzip -9 "images/btunnel-image-${version}-${arch}.tar"
+            gzip -9 "images/subnetra-image-${version}-${arch}.tar"
           done
           ls -l images
 
       - name: Upload offline image artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: btunnel-images
+          name: subnetra-images
           path: images/*.tar.gz
           retention-days: 1

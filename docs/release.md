@@ -1,6 +1,6 @@
 # Release validation & gating
 
-Issue #26. A BTunnel release candidate is **not** certified by `zig build test`
+Issue #26. A Subnetra release candidate is **not** certified by `zig build test`
 alone. Unit tests are the fast local check; a release must additionally pass the
 **full privileged integration harness with the live network-namespace e2e**, and
 that e2e must actually **run** — a skip is treated as a failure.
@@ -29,7 +29,7 @@ release. It runs no privileged e2e.
 
 ## Exact host / container requirements
 
-The release gate runs `test/integration/run.sh` with `BTUNNEL_RELEASE_GATE=1`.
+The release gate runs `test/integration/run.sh` with `SUBNETRA_RELEASE_GATE=1`.
 In that mode every missing prerequisite is a **hard failure** (not a skip):
 
 | Requirement        | Why                                              | How to provide |
@@ -44,9 +44,9 @@ In that mode every missing prerequisite is a **hard failure** (not a skip):
 A privileged container is the simplest way to get all of this:
 
 ```bash
-docker build -t btunnel-dev -f .devcontainer/Dockerfile .
+docker build -t subnetra-dev -f .devcontainer/Dockerfile .
 docker run --rm --privileged --device=/dev/net/tun -v "$PWD":/workspace \
-    -e BTUNNEL_RELEASE_GATE=1 btunnel-dev test/integration/run.sh
+    -e SUBNETRA_RELEASE_GATE=1 subnetra-dev test/integration/run.sh
 ```
 
 ## What the gate proves
@@ -54,7 +54,7 @@ docker run --rm --privileged --device=/dev/net/tun -v "$PWD":/workspace \
 Run in order; any failure aborts the whole gate:
 
 1. **Native build** (`ReleaseSmall`) — statically linked, `<= 512 KiB`.
-2. **Daemon smoke run** — `btunnel --check` accepts a valid config.
+2. **Daemon smoke run** — `subnetrad --check` accepts a valid config.
 3. **Foreign cross-build** — the other musl arch, also static and within budget
    (build-only; not executed).
 4. **Unit tests** — `zig build test` is green.
@@ -63,7 +63,7 @@ Run in order; any failure aborts the whole gate:
    encryption (plaintext marker absent on the underlay, present on the decrypted
    overlay), and that an RCU policy hot-update does not stall in-flight traffic.
    A second scenario proves a `role`-based config derives the full policy with
-   zero runtime `ptctl` injection (issue #21).
+   zero runtime `subnetra` injection (issue #21).
 
 ## Evidence
 

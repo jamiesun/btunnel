@@ -1,6 +1,6 @@
 //! wire-decode — offline, read-only datagram inspector (issue #60).
 //!
-//! Takes a captured btunnel datagram (hex), the link PSK (64-hex), and the
+//! Takes a captured subnetra datagram (hex), the link PSK (64-hex), and the
 //! sender/receiver mesh ids, then reuses the LIVE protocol + crypto code to
 //! parse the header, derive the session key, and authenticate/decrypt the body
 //! — so the decoder can never drift from the wire format. It prints the header
@@ -15,7 +15,7 @@
 //! NOT part of the shipped daemon (built via `zig build tool:wire-decode`).
 
 const std = @import("std");
-const bt = @import("btunnel");
+const bt = @import("subnetra");
 const build_options = @import("build_options");
 
 const reactor = bt.reactor;
@@ -30,7 +30,7 @@ const USAGE =
     \\  wire-decode --data <hex> --psk <64hex> --to <id> [--from <id>]
     \\  wire-decode --stream --key <from:to:64hex> [--key ...]   (reads hex datagrams, one per line, from stdin)
     \\
-    \\Parse and authenticate captured btunnel datagram(s) offline.
+    \\Parse and authenticate captured subnetra datagram(s) offline.
     \\
     \\Single datagram:
     \\  --data <hex>   the raw datagram bytes as hex (e.g. from tcpdump)
@@ -101,7 +101,7 @@ const Tally = struct {
     skipped: usize = 0,
 };
 
-/// Classify one datagram against the key map: skip non-btunnel/too-short input,
+/// Classify one datagram against the key map: skip non-subnetra/too-short input,
 /// report when no key matches its `key_id`, otherwise try every key whose sender
 /// id matches and return `decoded` (with `plen`) on the first that authenticates.
 fn classify(datagram: []const u8, keys: []const KeyEntry, out: []u8, plen: *usize) Class {
@@ -218,7 +218,7 @@ fn runStream(io: std.Io, args: std.process.Args) !void {
             },
             .skipped => {
                 tally.skipped += 1;
-                writeOut(io, std.fmt.bufPrint(&b, "[{d}] skipped (not a v1 btunnel datagram)\n", .{index}) catch "");
+                writeOut(io, std.fmt.bufPrint(&b, "[{d}] skipped (not a v1 subnetra datagram)\n", .{index}) catch "");
             },
         }
     }
@@ -267,7 +267,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (hasFlag(args, "--version") or hasFlag(args, "-V")) {
         var vbuf: [80]u8 = undefined;
-        const v = std.fmt.bufPrint(&vbuf, "wire-decode (btunnel v{s})\n", .{build_options.version}) catch return;
+        const v = std.fmt.bufPrint(&vbuf, "wire-decode (subnetra v{s})\n", .{build_options.version}) catch return;
         writeOut(io, v);
         return;
     }

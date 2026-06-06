@@ -1,4 +1,4 @@
-//! BTunnel wire-protocol conformance vectors (KAT — known-answer tests).
+//! Subnetra wire-protocol conformance vectors (KAT — known-answer tests).
 //!
 //! This module is the executable companion to `docs/PROTOCOL.md`. It emits two
 //! suites, both computed *straight from the live protocol code*
@@ -376,7 +376,7 @@ pub fn writeJson(out: []u8) ![]const u8 {
 
     try w.print(
         "{{\n" ++
-            "  \"protocol\": \"btunnel\",\n" ++
+            "  \"protocol\": \"subnetra\",\n" ++
             "  \"wire_version\": {d},\n" ++
             "  \"header_len\": {d},\n" ++
             "  \"tag_len\": {d},\n" ++

@@ -1,19 +1,19 @@
-# BTunnel
+# Subnetra
 
 **A pure-Zig, zero-dependency Layer-3 UDP tunnel that ships as a single static binary under 512KB.**
 
-[![CI](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml)
-[![Release](https://github.com/jamiesun/btunnel/actions/workflows/release.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/jamiesun/btunnel?sort=semver)](https://github.com/jamiesun/btunnel/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/jamiesun/btunnel)](LICENSE)
+[![CI](https://github.com/jamiesun/subnetra/actions/workflows/ci.yml/badge.svg)](https://github.com/jamiesun/subnetra/actions/workflows/ci.yml)
+[![Release](https://github.com/jamiesun/subnetra/actions/workflows/release.yml/badge.svg)](https://github.com/jamiesun/subnetra/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/jamiesun/subnetra?sort=semver)](https://github.com/jamiesun/subnetra/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/jamiesun/subnetra)](LICENSE)
 [![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
 ![Binary size](https://img.shields.io/badge/binary-%E2%89%A4512KB-44cc11)
-[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5-2b90d9)](https://github.com/jamiesun/btunnel/releases/latest)
+[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5-2b90d9)](https://github.com/jamiesun/subnetra/releases/latest)
 
 **English** · [简体中文](README.zh-CN.md)
 
 <p align="center">
-  <img src="btunnel.png" alt="BTunnel — Layer-3 UDP tunnel, pure Zig, static binary: TUN ingress, encrypt &amp; seal, star relay, policy routing, spoke egress" width="100%">
+  <img src="subnetra.png" alt="Subnetra — Layer-3 UDP tunnel, pure Zig, static binary: TUN ingress, encrypt &amp; seal, star relay, policy routing, spoke egress" width="100%">
 </p>
 
 > A virtual Layer-3 adaptive networking tool written in **pure Zig** (pinned to the
@@ -22,7 +22,7 @@
 > BusyBox / RouterOS Container): zero dependencies, zero dynamic allocation,
 > strong stealth.
 
-BTunnel builds a virtual subnet on top of a physical leased line, using a
+Subnetra builds a virtual subnet on top of a physical leased line, using a
 **hub-and-spoke topology** and forwarding raw IP packets through a private UDP
 tunnel. It does **not depend on any third-party network framework**:
 the TUN device, encryption, anti-replay, and policy engine are all in-house,
@@ -51,7 +51,7 @@ producing a single, fully statically linked binary.
 ## 📦 Project layout
 
 ```
-build.zig            Dual-binary build (btunnel daemon + ptctl control tool), static musl cross-compile
+build.zig            Dual-binary build (subnetra daemon + subnetra control tool), static musl cross-compile
 build.zig.zon        Package manifest
 config.example.json  Example config (copy to config.json to use)
 deploy/              systemd unit + example hub/spoke configs (see docs/deployment.md)
@@ -63,17 +63,17 @@ src/
   reactor.zig  Packed private wire header + egress dispatch + epoll reactor
   tun.zig      TUN device system driver
   netplan.zig  --print-network-plan: host TUN address/route/MTU/MSS command emitter
-  stats.zig    data-plane counters (rx/tx, per-reason drops) for `ptctl status`
+  stats.zig    data-plane counters (rx/tx, per-reason drops) for `subnetra status`
   uds.zig      Control-plane Unix domain socket + command tokenizer
-  main.zig     btunnel daemon entry point
-  ptctl.zig    ptctl control tool entry point
+  main.zig     subnetra daemon entry point
+  subnetra.zig    subnetra control tool entry point
 tools/               Out-of-tree helper utilities, never shipped in the daemon (see tools/README.md)
   keygen.zig         Generate per-link 64-hex PSKs (zig build tool:keygen)
   config-lint.zig    Offline config.json validation, clock-independent (zig build tool:config-lint)
   wire-decode.zig    Offline read-only datagram inspector (zig build tool:wire-decode)
   doctor.sh          Environment preflight: /dev/net/tun, CAP_NET_ADMIN, ip, clock
 docs/
-  btunnel-develop.md  System requirements & architecture design (PRD & Architecture)
+  subnetra-develop.md  System requirements & architecture design (PRD & Architecture)
   PROTOCOL.md         Normative wire-protocol spec (v1) — the cross-impl interoperability contract
   deployment.md       Hub + two-spoke production deployment walkthrough (systemd, secrets, upgrade)
   routeros-container.md RouterOS Container deployment guide (veth, routes, LAN publishing)
@@ -100,11 +100,11 @@ zig build test
 zig build run
 ```
 
-Artifacts are placed in `zig-out/bin/`: `btunnel` (daemon) and `ptctl` (control tool).
+Artifacts are placed in `zig-out/bin/`: `subnetra` (daemon) and `subnetra` (control tool).
 
 > **ARMv5 note:** ARMv5 has no hardware atomics (no `LDREX`/`STREX`), so the
 > standard library's threaded I/O scaffolding references legacy `__sync_*`
-> intrinsics that musl does not provide. Because BTunnel is strictly
+> intrinsics that musl does not provide. Because Subnetra is strictly
 > single-threaded (iron law #3), [`src/atomic_shim.zig`](src/atomic_shim.zig)
 > supplies a provably-correct plain (non-atomic) implementation of those
 > builtins. The shim is gated at comptime and only compiled in for pre-ARMv6
@@ -119,17 +119,17 @@ architectures: `amd64`, `arm64`, `armv7`, and `armv5`.
 
 ```bash
 # Pull the multi-arch image (Docker selects the right arch automatically)
-docker pull ghcr.io/jamiesun/btunnel:latest
+docker pull ghcr.io/jamiesun/subnetra:latest
 
 # Run the daemon: it needs NET_ADMIN + the TUN device, and a config.json
-# mounted into its working directory (/etc/btunnel).
-docker run -d --name btunnel \
+# mounted into its working directory (/etc/subnetra).
+docker run -d --name subnetra \
     --cap-add=NET_ADMIN --device=/dev/net/tun \
-    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
-    ghcr.io/jamiesun/btunnel:latest
+    -v "$PWD/config.json":/etc/subnetra/config.json:ro \
+    ghcr.io/jamiesun/subnetra:latest
 ```
 
-The image ships a Docker `HEALTHCHECK` (`ptctl status`), so `docker ps` /
+The image ships a Docker `HEALTHCHECK` (`subnetra status`), so `docker ps` /
 Compose / Kubernetes report the daemon `healthy` once it is serving its control
 socket and `unhealthy` if it stops responding.
 
@@ -147,15 +147,15 @@ See [`Dockerfile`](Dockerfile) for the runtime image and
 
 Devices that cannot reach a container registry can use the per-arch
 `docker load`-able image tarballs attached to each GitHub Release
-(`btunnel-image-<version>-<arch>.tar.gz`):
+(`subnetra-image-<version>-<arch>.tar.gz`):
 
 ```bash
 # Copy the tarball for the target arch to the device, then:
-docker load < btunnel-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/btunnel:v0.1.0
-docker run -d --name btunnel \
+docker load < subnetra-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/subnetra:v0.1.0
+docker run -d --name subnetra \
     --cap-add=NET_ADMIN --device=/dev/net/tun \
-    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
-    ghcr.io/jamiesun/btunnel:v0.1.0
+    -v "$PWD/config.json":/etc/subnetra/config.json:ro \
+    ghcr.io/jamiesun/subnetra:v0.1.0
 ```
 
 Verify any asset against the release's `SHA256SUMS.txt` before loading.
@@ -180,16 +180,16 @@ headless:
 
 ```bash
 # Build the Linux toolchain image (Debian-slim + pinned Zig 0.16.0)
-docker build -t btunnel-dev -f .devcontainer/Dockerfile .
+docker build -t subnetra-dev -f .devcontainer/Dockerfile .
 
 # Run the integration / preflight harness inside it
 docker run --rm --privileged --device=/dev/net/tun \
-    -v "$PWD":/workspace btunnel-dev test/integration/run.sh
+    -v "$PWD":/workspace subnetra-dev test/integration/run.sh
 ```
 
 [`test/integration/run.sh`](test/integration/run.sh) builds the binary on the
 container's native arch, enforces the static-link and ≤ 512 KB constraints,
-smoke-runs the daemon (`btunnel --check`), cross-builds the other musl arch,
+smoke-runs the daemon (`subnetrad --check`), cross-builds the other musl arch,
 runs the unit tests, and then runs the **multi-point + relay end-to-end test**:
 a 3-node hub-and-spoke star across network namespaces (one Hub relay + two
 Spokes). It asserts end-to-end delivery spoke-A → Hub(relay) → spoke-B, on-wire
@@ -212,24 +212,24 @@ cp config.example.json config.json
 # the daemon refuses to start (config sanity: InvalidPsk).
 
 # Start the daemon (reads config.json from the working directory)
-./zig-out/bin/btunnel
+./zig-out/bin/subnetrad
 
 # Inject a policy dynamically (hot-updated over the UDS, no restart needed)
-./ptctl policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3
-./ptctl policy show
+./subnetra policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3
+./subnetra policy show
 
 # Runtime status & diagnostics: peers, traffic counters, and drop reasons.
 # Exits non-zero when the daemon is not running, so scripts can detect it.
-./ptctl status
+./subnetra status
 
-./ptctl save
+./subnetra save
 ```
 
 See [`config.example.json`](config.example.json) for a config example.
 
 ### Roles: auto-derive the policy from config (`role`)
 
-Issue #21. Instead of hand-injecting `ptctl policy add` rules, set a `role` and
+Issue #21. Instead of hand-injecting `subnetra policy add` rules, set a `role` and
 let the daemon derive the forwarding table at boot. Two roles cover the common
 hub-and-spoke deployment; `role` defaults to `"manual"` (no derivation — inject
 rules yourself, exactly as before, so existing configs are unchanged).
@@ -251,7 +251,7 @@ else through the relay needs only:
 ```
 
 This derives `10.0.0.2/32 → LOCAL` and `10.0.0.0/24 → hub(id 1)` automatically —
-no `ptctl` calls. The matching **hub** just lists its spokes; each peer's
+no `subnetra` calls. The matching **hub** just lists its spokes; each peer's
 `allowed_src` becomes a forward rule to that peer:
 
 ```json
@@ -266,25 +266,25 @@ no `ptctl` calls. The matching **hub** just lists its spokes; each peer's
 }
 ```
 
-Validation is strict (`btunnel --check` enforces it): a `hub` rejects a peer
+Validation is strict (`subnetrad --check` enforces it): a `hub` rejects a peer
 with a missing or overlapping `allowed_src`; a `spoke` requires exactly one hub
 peer, at least one local target, and no `0.0.0.0/0` local route. Ready-to-edit
-examples live in [`deploy/`](deploy/). You can still add extra `ptctl policy`
+examples live in [`deploy/`](deploy/). You can still add extra `subnetra policy`
 rules on top of a derived table at runtime.
 
 ### Host network setup (`--print-network-plan`)
 
-btunnel creates the TUN device but does **not** configure host addressing,
+subnetrad creates the TUN device but does **not** configure host addressing,
 routes, or MTU itself (auto-apply is intentionally out of scope to preserve the
 zero-dependency single-binary guarantee). Instead it can *print* the exact
 commands for the loaded config so you can review and run them:
 
 ```bash
 # Print the host networking plan for this node (defaults to a 1500-byte underlay).
-./zig-out/bin/btunnel --print-network-plan
+./zig-out/bin/subnetrad --print-network-plan
 
 # Override the underlay path MTU (e.g. behind a PPPoE/VPN underlay):
-./zig-out/bin/btunnel --print-network-plan --path-mtu 1420
+./zig-out/bin/subnetrad --print-network-plan --path-mtu 1420
 ```
 
 The plan computes the safe tunnel MTU from the real wire overhead
@@ -301,15 +301,15 @@ the classic cause of "small packets work, large transfers stall". It emits:
 
 Output is deterministic and print-only; nothing on the host is modified.
 
-### Observability & troubleshooting (`ptctl status`)
+### Observability & troubleshooting (`subnetra status`)
 
 The data plane drops malformed, unauthenticated, replayed, spoofed, unrouted,
-or oversized packets *silently by design* (stealth). `ptctl status` makes those
+or oversized packets *silently by design* (stealth). `subnetra status` makes those
 silent drops countable so you can tell *why* traffic is not flowing:
 
 ```text
-btunnel v0.1.0 [running]
-mode=raw_direct local_id=1 udp_port=51820 tun=btun0 peers=2
+subnetrad v0.1.0 [running]
+mode=raw_direct local_id=1 udp_port=51820 tun=snr0 peers=2
 peers:
   id=2 endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
   id=3 endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
@@ -339,7 +339,7 @@ For a complete hub + two-spoke production walkthrough — systemd unit with the
 right capabilities and sandboxing, secrets handling, host networking, relay
 policy install, upgrade/rollback, and firewall/NAT requirements — see
 [`docs/deployment.md`](docs/deployment.md). Ready-to-edit artifacts live in
-[`deploy/`](deploy/) (`btunnel.service`, `hub.json`, `spoke-a.json`,
+[`deploy/`](deploy/) (`subnetrad.service`, `hub.json`, `spoke-a.json`,
 `spoke-b.json`).
 
 ## 📊 Development status
@@ -357,7 +357,7 @@ and exercised end-to-end in the dev container.
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / per-link keys / session epoch / anti-replay) |
 | 6 Core reactor | `reactor.zig`, `peer.zig` | ✅ Done (epoll ET loop; multi-peer registry with per-link keys + per-restart session epoch; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
 | 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
-| 8 Control tool | `ptctl.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
+| 8 Control tool | `subnetra.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
 | 9 Daemon main loop + e2e | `main.zig`, `test/integration/run.sh` | ✅ Done (wires TUN + UDP + UDS + reactor; live multi-point + relay netns end-to-end test) |
 | 10 Wire-protocol spec + KAT | `docs/PROTOCOL.md`, `tests/protocol-vectors.json`, `src/protocol_vectors.zig`, `src/protocol_conformance.zig` | ✅ Done (normative v1 spec; known-answer vectors generated from the live code via `zig build vectors`; drift sentinel pins the golden in `zig build test`) |
 
@@ -371,7 +371,7 @@ and exercised end-to-end in the dev container.
 > network namespaces): real delivery spoke-A → Hub(relay) → spoke-B, on-wire
 > encryption, and RCU policy hot-update under load.
 
-See [`docs/btunnel-develop.md`](docs/btunnel-develop.md) for the detailed
+See [`docs/subnetra-develop.md`](docs/subnetra-develop.md) for the detailed
 architecture, memory model, and acceptance checklist.
 
 ## 📄 License

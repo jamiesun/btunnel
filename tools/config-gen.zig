@@ -11,7 +11,7 @@
 //! NOT part of the shipped daemon (built via `zig build tool:config-gen`).
 
 const std = @import("std");
-const bt = @import("btunnel");
+const bt = @import("subnetra");
 const build_options = @import("build_options");
 
 const MAX_SPOKES = 32;
@@ -133,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (hasFlag(args, "--version") or hasFlag(args, "-V")) {
         var vbuf: [80]u8 = undefined;
-        const v = std.fmt.bufPrint(&vbuf, "config-gen (btunnel v{s})\n", .{build_options.version}) catch return;
+        const v = std.fmt.bufPrint(&vbuf, "config-gen (subnetra v{s})\n", .{build_options.version}) catch return;
         writeOut(io, v);
         return;
     }

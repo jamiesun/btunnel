@@ -4,7 +4,7 @@
 //! single-threaded (iron law #3): the data pumps and the control `handle()`
 //! never run concurrently, so a plain `+= 1` needs no atomics and no locks. The
 //! struct lives in `main`'s frame and is shared by reference: the reactor
-//! increments it, the control plane reads it for `ptctl status`.
+//! increments it, the control plane reads it for `subnetra status`.
 //!
 //! Drop reasons are split only as finely as the data plane can HONESTLY
 //! distinguish them. `decodeIngress` collapses authentication failure, replay,
