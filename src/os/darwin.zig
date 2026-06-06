@@ -1,7 +1,6 @@
-//! Darwin (macOS) OS backend (issue #76): a real `utun` L3 TUN device plus the
-//! 4-byte address-family framing utun requires, behind the same interface as
-//! `os/linux.zig`. The readiness primitive (`Poller`) is still a stub until the
-//! macOS `poll(2)` loop (#77).
+//! Darwin (macOS) OS backend: a real `utun` L3 TUN device (#76) plus the 4-byte
+//! address-family framing utun requires, and a `poll(2)` readiness primitive
+//! (#77), behind the same interface as `os/linux.zig`.
 //!
 //! A utun is created not via a `/dev` node but by `connect`-ing a
 //! `PF_SYSTEM` / `SYSPROTO_CONTROL` socket to the kernel control
@@ -154,11 +153,22 @@ pub fn tunWrite(fd: posix.fd_t, pkt: []const u8) bool {
     }
 }
 
-/// Stub until the macOS `poll(2)` readiness loop (#77). macOS `poll` is
-/// level-triggered, so `Trigger` collapses to a no-op there.
+/// Single-threaded, allocation-free `poll(2)` readiness source (#77). The
+/// reactor watches a small, fixed fd set — `tun_fd`, the single `udp_fd`, and
+/// the optional UDS control listener — so a `pollfd` array sized at startup
+/// needs no per-iteration allocation. `poll` is level-triggered, so `Trigger`
+/// (edge vs. level) is a no-op here; the pumps' drain-to-`EAGAIN` loop keeps the
+/// level-triggered semantics correct and free of busy-spin.
 pub const Poller = struct {
+    // Headroom over the reactor's 3 fds (tun + udp + control). The data plane
+    // never grows this set at runtime, so the bound is static.
+    const MAX_FDS = 8;
+
+    fds: [MAX_FDS]system.pollfd = undefined,
+    n: usize = 0,
+
     pub fn init() !Poller {
-        return error.Unsupported;
+        return .{};
     }
 
     pub fn deinit(self: *Poller) void {
@@ -166,15 +176,29 @@ pub const Poller = struct {
     }
 
     pub fn add(self: *Poller, fd: sys.fd_t, trigger: Trigger) !void {
-        _ = self;
-        _ = fd;
-        _ = trigger;
-        return error.Unsupported;
+        _ = trigger; // poll(2) is level-triggered; the drain pumps make this correct
+        if (self.n >= self.fds.len) return error.TooManyFds;
+        self.fds[self.n] = .{ .fd = fd, .events = system.POLL.IN, .revents = 0 };
+        self.n += 1;
     }
 
+    /// Block until at least one fd is ready, write the ready fds into `out`, and
+    /// return the count (bounded by `out.len`). Retries internally on EINTR.
     pub fn wait(self: *Poller, out: []sys.fd_t) !usize {
-        _ = self;
-        _ = out;
-        return error.Unsupported;
+        while (true) {
+            const rc = system.poll(&self.fds, @intCast(self.n), -1);
+            const e = sys.errno(rc);
+            if (e == .INTR) continue;
+            if (e != .SUCCESS) return error.PollFailed;
+            var count: usize = 0;
+            var i: usize = 0;
+            while (i < self.n and count < out.len) : (i += 1) {
+                if (self.fds[i].revents != 0) {
+                    out[count] = self.fds[i].fd;
+                    count += 1;
+                }
+            }
+            return count;
+        }
     }
 };

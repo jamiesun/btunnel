@@ -14,9 +14,9 @@
 //!     `wait(out: []fd_t) !usize` (block until ≥1 ready, write the ready fds,
 //!     retry on EINTR), `deinit()`. Pumps drain each ready fd to `EAGAIN`.
 //!
-//! Linux carries the real epoll + `/dev/net/tun` implementation; Darwin ships
-//! stubs returning `error.Unsupported` until the `utun` (#76) and `poll` (#77)
-//! backends land.
+//! Linux carries the real epoll + `/dev/net/tun` implementation; Darwin carries
+//! a `poll(2)` readiness loop + `utun` TUN device. Both present the identical
+//! surface so the data path selects an implementation purely at comptime.
 
 const builtin = @import("builtin");
 
@@ -60,4 +60,30 @@ fn assertBackend(comptime B: type) void {
 test "os backends satisfy the reactor interface (comptime)" {
     comptime assertBackend(@import("linux.zig"));
     comptime assertBackend(@import("darwin.zig"));
+}
+
+test "native Poller reports a readable fd" {
+    const std = @import("std");
+    const sys = @import("../sys.zig");
+    const system = std.posix.system;
+
+    // A pipe is a synchronous, platform-uniform readiness source (unlike macOS
+    // loopback UDP, which defers delivery). Exercises whichever backend is
+    // native: poll(2) on macOS, epoll on Linux. Allocation-free by construction
+    // — no allocator is threaded through the readiness path.
+    var fds: [2]i32 = undefined;
+    if (system.pipe(&fds) != 0) return error.PipeFailed;
+    defer _ = sys.close(fds[0]);
+    defer _ = sys.close(fds[1]);
+
+    var poller = try Poller.init();
+    defer poller.deinit();
+    try poller.add(fds[0], .level);
+
+    _ = sys.write(fds[1], "x", 1);
+
+    var ready: [4]sys.fd_t = undefined;
+    const n = try poller.wait(&ready);
+    try std.testing.expectEqual(@as(usize, 1), n);
+    try std.testing.expectEqual(fds[0], ready[0]);
 }
