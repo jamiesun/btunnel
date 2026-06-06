@@ -19,8 +19,8 @@
 > A virtual Layer-3 adaptive networking tool written in **pure Zig** (pinned to the
 > 2026 latest standard library `std.posix`).
 > Targets general Linux environments (including lightweight containers such as
-> BusyBox / RouterOS Container): zero dependencies, zero dynamic allocation,
-> strong stealth.
+> BusyBox / RouterOS Container), and runs natively on **macOS as a spoke**
+> (`utun` + `poll(2)`): zero dependencies, zero dynamic allocation, strong stealth.
 
 Subnetra builds a virtual subnet on top of a physical leased line, using a
 **hub-and-spoke topology** and forwarding raw IP packets through a private UDP
@@ -34,8 +34,9 @@ producing a single, fully statically linked binary.
   reports `not a dynamic executable`; size ≤ 512KB.
 - **Layered zero dynamic allocation**: the data plane (reactor / crypto) is strictly
   allocation-free, with buffers locked into resident memory at startup.
-- **Single-threaded event-driven reactor**: based on Linux epoll edge-triggered
-  (`EPOLLET`), lock-free, with no concurrency contention.
+- **Single-threaded event-driven reactor**: Linux `epoll` edge-triggered
+  (`EPOLLET`) or macOS `poll(2)`, selected at comptime; lock-free, with no
+  concurrency contention.
 - **Stateless obfuscation**: ChaCha20-Poly1305 full encryption; ciphertext has no
   fixed magic number; authentication failures are silently dropped — physically
   invisible to probing.
@@ -60,9 +61,11 @@ src/
   config.zig   Config parsing + sanity check (MTU range / subnet overlap)
   policy.zig   CIDR parsing + longest-prefix match + lock-free RCU ActiveTree
   crypto.zig   ChaCha20-Poly1305 + monotonic nonce + sliding-window anti-replay
-  reactor.zig  Packed private wire header + egress dispatch + epoll reactor
-  tun.zig      TUN device system driver
-  netplan.zig  --print-network-plan: host TUN address/route/MTU/MSS command emitter
+  reactor.zig  Packed private wire header + egress dispatch + readiness reactor
+  os/          Comptime OS backend: linux.zig (epoll + /dev/net/tun), darwin.zig (poll(2) + utun), mod.zig (selector)
+  sys.zig      Portable syscall shim (std.posix wrappers shared by both backends)
+  peer.zig     Per-peer endpoint + crypto registry (keys, counters, anti-replay windows)
+  netplan.zig  --print-network-plan host command emitter (Linux ip / macOS ifconfig+route)
   stats.zig    data-plane counters (rx/tx, per-reason drops) for `subnetra status`
   uds.zig      Control-plane Unix domain socket + command tokenizer
   main.zig     subnetra daemon entry point
@@ -76,7 +79,7 @@ docs/
   subnetra-develop.md  System requirements & architecture design (PRD & Architecture)
   PROTOCOL.md         Normative wire-protocol spec (v1) — the cross-impl interoperability contract
   deployment.md       Hub + two-spoke production deployment walkthrough (systemd, secrets, upgrade)
-  macos-spoke-acceptance.md  Manual real-machine runbook certifying a macOS utun spoke (#72)
+  macos-spoke-acceptance.md  Manual real-machine runbook certifying a macOS utun spoke
   routeros-container.md RouterOS Container deployment guide (veth, routes, LAN publishing)
 ```
 
@@ -170,11 +173,13 @@ release workflow refuses to publish if the tag and `build.zig.zon` disagree.
 
 ## 🧪 Local integration testing (dev container)
 
-The syscall-heavy data path (TUN device, epoll reactor, AF_UNIX control socket)
-can only run on Linux, so a reproducible Linux container is provided under
-[`.devcontainer/`](.devcontainer/). It is a **development/test aid only** — the
-shipped artifact is still a single static musl binary with zero third-party
-dependencies.
+The privileged **integration harness** (a hub-and-spoke relay across network
+namespaces) is Linux-only, so a reproducible Linux container is provided under
+[`.devcontainer/`](.devcontainer/). It is a **development/test aid only**. The
+data path also runs natively on **macOS as a spoke** — `utun` + `poll(2)`,
+comptime-selected behind [`src/os/`](src/os/) — certified by the manual
+[`docs/macos-spoke-acceptance.md`](docs/macos-spoke-acceptance.md) runbook; the
+Linux static musl binary remains the CI- and release-gated production artifact.
 
 Open the folder in any dev-container-aware editor, or run the preflight harness
 headless:
@@ -346,24 +351,26 @@ policy install, upgrade/rollback, and firewall/NAT requirements — see
 ## 📊 Development status
 
 Currently the framework, the pure-algorithm layer, and the syscall data path
-(TUN, epoll reactor, AF_UNIX control plane, daemon main loop) are implemented
-and exercised end-to-end in the dev container.
+(TUN, the readiness reactor, AF_UNIX control plane, daemon main loop) are
+implemented and exercised end-to-end in the dev container, with a native macOS
+`utun`/`poll(2)` spoke behind the comptime `src/os/` backend.
 
 | Task | Module | Status |
 |---|---|---|
 | 1 Build config | `build.zig` | ✅ Done (static musl, ReleaseSmall, dual binaries) |
 | 2 Config sanity | `config.zig` | ✅ Done (std.json parse + private per-peer hex PSK + CIDR; boundary fuse) |
 | 3 Policy match | `policy.zig` | ✅ Done (CIDR / longest-prefix / RCU) |
-| 4 System driver | `os/linux.zig` | ✅ Done (TUNSETIFF ioctl, non-blocking L3 fd; comptime OS backend via `os/mod.zig`, macOS `utun` stub in `os/darwin.zig`) |
+| 4 System driver | `os/linux.zig`, `os/darwin.zig` | ✅ Done (comptime OS backend via `os/mod.zig`: Linux `/dev/net/tun` TUNSETIFF, macOS `utun` PF_SYSTEM/SYSPROTO_CONTROL with 4-byte AF framing; both non-blocking L3) |
 | 5 Crypto pipeline | `crypto.zig` | ✅ Done (AEAD / per-link keys / session epoch / anti-replay) |
-| 6 Core reactor | `reactor.zig`, `peer.zig`, `os/linux.zig` | ✅ Done (epoll ET loop behind `os.Poller`; multi-peer registry with per-link keys + per-restart session epoch; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
+| 6 Core reactor | `reactor.zig`, `peer.zig`, `os/*` | ✅ Done (readiness loop behind `os.Poller` — Linux epoll ET, macOS `poll(2)`, comptime-selected; multi-peer registry with per-link keys + per-restart session epoch; seal/forward, open/anti-replay, source filter, inner-source binding, hub relay) |
 | 7 Control-plane UDS | `uds.zig` | ✅ Done (tokenizer + AF_UNIX datagram listener; atomic RCU policy hot-swap, double-buffered) |
 | 8 Control tool | `subnetra.zig` | ✅ Done (UDS delivery; `policy add` fire-and-forget, `policy show`/`save` read the daemon's reply; non-zero exit when the daemon is down) |
 | 9 Daemon main loop + e2e | `main.zig`, `test/integration/run.sh` | ✅ Done (wires TUN + UDP + UDS + reactor; live multi-point + relay netns end-to-end test) |
 | 10 Wire-protocol spec + KAT | `docs/PROTOCOL.md`, `tests/protocol-vectors.json`, `src/protocol_vectors.zig`, `src/protocol_conformance.zig` | ✅ Done (normative v1 spec; known-answer vectors generated from the live code via `zig build vectors`; drift sentinel pins the golden in `zig build test`) |
+| 11 Native macOS spoke | `os/darwin.zig`, `netplan.zig`, `docs/macos-spoke-acceptance.md` | ✅ Done (#72: `utun` TunDevice + `poll(2)` reactor + platform `--print-network-plan` ifconfig/route; runbook-certified spoke to a Linux/RouterOS hub; CI/release gate stays Linux-only) |
 
-> **Currently verifiable**: `zig build test` is all green (60 pass + 12
-> Linux-only skips on a macOS host, 72 total; all run in the Linux dev
+> **Currently verifiable**: `zig build test` is all green (72 pass + 15
+> Linux-only skips on a macOS host, 87 total; all run in the Linux dev
 > container); produces a < 512KB static binary. A Linux dev container
 > ([`.devcontainer/`](.devcontainer/)) runs an integration/preflight harness
 > ([`test/integration/run.sh`](test/integration/run.sh)) that enforces the
