@@ -17,7 +17,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
+const sys = @import("sys.zig");
 const crypto = @import("crypto.zig");
 const config = @import("config.zig");
 
@@ -29,7 +29,7 @@ pub const LOCAL_TARGET: u32 = 0;
 
 pub const Peer = struct {
     id: u32,
-    endpoint: linux.sockaddr.in,
+    endpoint: sys.sockaddr.in,
     allowed_src: config.Cidr,
     /// Transmit session: epoch-bound key + monotonic counter (issue #14).
     tx: crypto.TxSession,
@@ -84,8 +84,8 @@ const MIN_BOOT_EPOCH_NS: u64 = 1_704_067_200 * std.time.ns_per_s;
 /// never by an epoch-exchange handshake.
 pub fn bootEpoch() RegistryError!u64 {
     if (builtin.os.tag != .linux) return MIN_BOOT_EPOCH_NS;
-    var ts: linux.timespec = undefined;
-    if (linux.errno(linux.clock_gettime(linux.CLOCK.REALTIME, &ts)) != .SUCCESS) return error.ClockUnavailable;
+    var ts: sys.timespec = undefined;
+    if (sys.errno(sys.clock_gettime(sys.CLOCK.REALTIME, &ts)) != .SUCCESS) return error.ClockUnavailable;
     if (ts.sec < 0) return error.ClockUnavailable;
     const ns = @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
     if (ns < MIN_BOOT_EPOCH_NS) return error.ClockUnavailable;
@@ -111,7 +111,7 @@ pub const PeerRegistry = struct {
         self: *PeerRegistry,
         psk: crypto.Key,
         id: u32,
-        endpoint: linux.sockaddr.in,
+        endpoint: sys.sockaddr.in,
         allowed_src: config.Cidr,
         boot_epoch: u64,
     ) RegistryError!*Peer {
@@ -175,7 +175,7 @@ pub const PeerRegistry = struct {
     }
 };
 
-fn testEndpoint(comptime text: []const u8) linux.sockaddr.in {
+fn testEndpoint(comptime text: []const u8) sys.sockaddr.in {
     return config.parseEndpoint(text) catch unreachable;
 }
 
