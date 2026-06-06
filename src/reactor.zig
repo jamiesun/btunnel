@@ -30,8 +30,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
 const sys = @import("sys.zig");
+const os = @import("os/mod.zig");
 const policy = @import("policy.zig");
 const crypto = @import("crypto.zig");
 const peer = @import("peer.zig");
@@ -248,45 +248,31 @@ pub const Reactor = struct {
         };
     }
 
-    fn epollAdd(epfd: i32, fd: sys.fd_t, events: u32) !void {
-        var ev = linux.epoll_event{
-            .events = events,
-            .data = .{ .fd = fd },
-        };
-        const rc = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &ev);
-        if (sys.errno(rc) != .SUCCESS) return error.EpollCtlFailed;
-    }
-
-    /// Single-threaded epoll_wait loop (Linux only). Forces TUN/UDP non-blocking,
-    /// registers them edge-triggered, registers the optional control socket
-    /// level-triggered, and dispatches readable events to the drain pumps. Runs
-    /// until an unrecoverable epoll error.
+    /// Single-threaded readiness loop. Forces TUN/UDP non-blocking, registers
+    /// them edge-triggered and the optional control socket level-triggered on the
+    /// comptime-selected `os.Poller`, and dispatches each ready fd to its drain
+    /// pump. Runs until an unrecoverable poller error. The OS readiness mechanism
+    /// (epoll on Linux, poll(2) on macOS) lives behind `os.Poller`; this loop has
+    /// no runtime OS branch.
     pub fn run(self: *Reactor) !void {
-        if (builtin.os.tag != .linux) return error.Unsupported;
-
         try sys.setNonblock(self.tun_fd);
         try sys.setNonblock(self.udp_fd);
 
-        const epfd_rc = linux.epoll_create1(0);
-        if (sys.errno(epfd_rc) != .SUCCESS) return error.EpollCreateFailed;
-        const epfd: i32 = @intCast(epfd_rc);
-        defer _ = sys.close(epfd);
+        var poller = try os.Poller.init();
+        defer poller.deinit();
 
-        try epollAdd(epfd, self.tun_fd, linux.EPOLL.IN | linux.EPOLL.ET);
-        try epollAdd(epfd, self.udp_fd, linux.EPOLL.IN | linux.EPOLL.ET);
+        try poller.add(self.tun_fd, .edge);
+        try poller.add(self.udp_fd, .edge);
         // Control socket is level-triggered: handle() processes a bounded number
-        // of commands per tick, and epoll re-notifies while datagrams remain.
-        if (self.control) |c| try epollAdd(epfd, c.fd, linux.EPOLL.IN);
+        // of commands per tick, and the poller re-notifies while datagrams remain.
+        if (self.control) |c| try poller.add(c.fd, .level);
 
-        var events: [16]linux.epoll_event = undefined;
+        var ready: [16]sys.fd_t = undefined;
         while (true) {
-            const nrc = linux.epoll_wait(epfd, &events, events.len, -1);
-            const e = sys.errno(nrc);
-            if (e == .INTR) continue;
-            if (e != .SUCCESS) return error.EpollWaitFailed;
+            const n = try poller.wait(&ready);
             var i: usize = 0;
-            while (i < nrc) : (i += 1) {
-                const fd = events[i].data.fd;
+            while (i < n) : (i += 1) {
+                const fd = ready[i];
                 if (fd == self.tun_fd) {
                     self.pumpTunToUdp();
                 } else if (fd == self.udp_fd) {
