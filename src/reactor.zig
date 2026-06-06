@@ -31,6 +31,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
+const sys = @import("sys.zig");
 const policy = @import("policy.zig");
 const crypto = @import("crypto.zig");
 const peer = @import("peer.zig");
@@ -207,20 +208,10 @@ fn ipv4Src(pkt: []const u8) ?u32 {
     return std.mem.readInt(u32, pkt[12..][0..4], .big);
 }
 
-fn nonblockBit() usize {
-    return @as(u32, @bitCast(linux.O{ .NONBLOCK = true }));
-}
-
-fn setNonblock(fd: linux.fd_t) !void {
-    const cur = linux.fcntl(fd, linux.F.GETFL, 0);
-    if (linux.errno(cur) != .SUCCESS) return error.FcntlFailed;
-    const rc = linux.fcntl(fd, linux.F.SETFL, cur | nonblockBit());
-    if (linux.errno(rc) != .SUCCESS) return error.FcntlFailed;
-}
 
 pub const Reactor = struct {
-    tun_fd: linux.fd_t,
-    udp_fd: linux.fd_t,
+    tun_fd: sys.fd_t,
+    udp_fd: sys.fd_t,
     /// Optional AF_UNIX control listener (issue #6). When present its datagram
     /// socket is registered level-triggered in `run()` and drained via
     /// `Control.handle()`; the control plane owns the policy-tree storage and the
@@ -242,8 +233,8 @@ pub const Reactor = struct {
     relay: [BUF_LEN]u8 = undefined,
 
     pub fn init(
-        tun_fd: linux.fd_t,
-        udp_fd: linux.fd_t,
+        tun_fd: sys.fd_t,
+        udp_fd: sys.fd_t,
         control: ?*uds.Control,
         active: *policy.ActiveTree,
         registry: *peer.PeerRegistry,
@@ -257,13 +248,13 @@ pub const Reactor = struct {
         };
     }
 
-    fn epollAdd(epfd: i32, fd: linux.fd_t, events: u32) !void {
+    fn epollAdd(epfd: i32, fd: sys.fd_t, events: u32) !void {
         var ev = linux.epoll_event{
             .events = events,
             .data = .{ .fd = fd },
         };
         const rc = linux.epoll_ctl(epfd, linux.EPOLL.CTL_ADD, fd, &ev);
-        if (linux.errno(rc) != .SUCCESS) return error.EpollCtlFailed;
+        if (sys.errno(rc) != .SUCCESS) return error.EpollCtlFailed;
     }
 
     /// Single-threaded epoll_wait loop (Linux only). Forces TUN/UDP non-blocking,
@@ -273,13 +264,13 @@ pub const Reactor = struct {
     pub fn run(self: *Reactor) !void {
         if (builtin.os.tag != .linux) return error.Unsupported;
 
-        try setNonblock(self.tun_fd);
-        try setNonblock(self.udp_fd);
+        try sys.setNonblock(self.tun_fd);
+        try sys.setNonblock(self.udp_fd);
 
         const epfd_rc = linux.epoll_create1(0);
-        if (linux.errno(epfd_rc) != .SUCCESS) return error.EpollCreateFailed;
+        if (sys.errno(epfd_rc) != .SUCCESS) return error.EpollCreateFailed;
         const epfd: i32 = @intCast(epfd_rc);
-        defer _ = linux.close(epfd);
+        defer _ = sys.close(epfd);
 
         try epollAdd(epfd, self.tun_fd, linux.EPOLL.IN | linux.EPOLL.ET);
         try epollAdd(epfd, self.udp_fd, linux.EPOLL.IN | linux.EPOLL.ET);
@@ -290,7 +281,7 @@ pub const Reactor = struct {
         var events: [16]linux.epoll_event = undefined;
         while (true) {
             const nrc = linux.epoll_wait(epfd, &events, events.len, -1);
-            const e = linux.errno(nrc);
+            const e = sys.errno(nrc);
             if (e == .INTR) continue;
             if (e != .SUCCESS) return error.EpollWaitFailed;
             var i: usize = 0;
@@ -322,13 +313,13 @@ pub const Reactor = struct {
     /// Loops until EAGAIN.
     pub fn pumpTunToUdp(self: *Reactor) void {
         while (true) {
-            const rc = linux.read(self.tun_fd, &self.rx, self.rx.len);
-            const e = linux.errno(rc);
+            const rc = sys.read(self.tun_fd, &self.rx, self.rx.len);
+            const e = sys.errno(rc);
             if (e == .AGAIN) return;
             if (e == .INTR) continue;
             if (e != .SUCCESS) return; // transient read error: yield this round
             if (rc == 0) return;
-            const pkt = self.rx[0..rc];
+            const pkt = self.rx[0..@intCast(rc)];
             self.cInc("tun_rx_packets");
             self.cAdd("tun_rx_bytes", @intCast(rc));
 
@@ -377,14 +368,14 @@ pub const Reactor = struct {
     /// (hub behaviour). Loops until EAGAIN.
     pub fn pumpUdpIngress(self: *Reactor) void {
         while (true) {
-            var src: linux.sockaddr.in = undefined;
-            var slen: linux.socklen_t = @sizeOf(linux.sockaddr.in);
-            const rc = linux.recvfrom(self.udp_fd, &self.rx, self.rx.len, 0, @ptrCast(&src), &slen);
-            const e = linux.errno(rc);
+            var src: sys.sockaddr.in = undefined;
+            var slen: sys.socklen_t = @sizeOf(sys.sockaddr.in);
+            const rc = sys.recvfrom(self.udp_fd, &self.rx, self.rx.len, 0, @ptrCast(&src), &slen);
+            const e = sys.errno(rc);
             if (e == .AGAIN) return;
             if (e == .INTR) continue;
             if (e != .SUCCESS) return;
-            const dgram = self.rx[0..rc];
+            const dgram = self.rx[0..@intCast(rc)];
             self.cInc("udp_rx_packets");
             self.cAdd("udp_rx_bytes", @intCast(rc));
 
@@ -476,19 +467,19 @@ pub const Reactor = struct {
     /// Send `buf` to `endpoint`. Returns true if the datagram was handed to the
     /// kernel without error, false otherwise (so the caller can count send
     /// errors honestly rather than assuming success).
-    fn sendTo(self: *Reactor, endpoint: linux.sockaddr.in, buf: []const u8) bool {
+    fn sendTo(self: *Reactor, endpoint: sys.sockaddr.in, buf: []const u8) bool {
         var ep = endpoint;
         while (true) {
-            const rc = linux.sendto(
+            const rc = sys.sendto(
                 self.udp_fd,
                 buf.ptr,
                 buf.len,
                 0,
                 @ptrCast(&ep),
-                @sizeOf(linux.sockaddr.in),
+                @sizeOf(sys.sockaddr.in),
             );
-            if (linux.errno(rc) == .INTR) continue;
-            return linux.errno(rc) == .SUCCESS;
+            if (sys.errno(rc) == .INTR) continue;
+            return sys.errno(rc) == .SUCCESS;
         }
     }
 
@@ -496,9 +487,9 @@ pub const Reactor = struct {
     /// error (counted by the caller).
     fn writeTun(self: *Reactor, buf: []const u8) bool {
         while (true) {
-            const rc = linux.write(self.tun_fd, buf.ptr, buf.len);
-            if (linux.errno(rc) == .INTR) continue;
-            return linux.errno(rc) == .SUCCESS;
+            const rc = sys.write(self.tun_fd, buf.ptr, buf.len);
+            if (sys.errno(rc) == .INTR) continue;
+            return sys.errno(rc) == .SUCCESS;
         }
     }
 
@@ -514,7 +505,7 @@ pub const Reactor = struct {
     /// authenticated and passed the inner-source binding check, so an
     /// unauthenticated, replayed, or spoofed packet can never move the endpoint.
     /// The endpoint is runtime state only — it is never written back to config.
-    fn maybeLearnEndpoint(self: *Reactor, p: *peer.Peer, src: linux.sockaddr.in) void {
+    fn maybeLearnEndpoint(self: *Reactor, p: *peer.Peer, src: sys.sockaddr.in) void {
         p.last_seen_wall_ns = wallNs();
         if (p.endpoint.addr != src.addr or p.endpoint.port != src.port) {
             p.endpoint.addr = src.addr;
@@ -530,8 +521,8 @@ pub const Reactor = struct {
 /// non-Linux host (unit tests only) it returns 0.
 fn wallNs() u64 {
     if (builtin.os.tag != .linux) return 0;
-    var ts: linux.timespec = undefined;
-    if (linux.errno(linux.clock_gettime(linux.CLOCK.REALTIME, &ts)) != .SUCCESS) return 0;
+    var ts: sys.timespec = undefined;
+    if (sys.errno(sys.clock_gettime(sys.CLOCK.REALTIME, &ts)) != .SUCCESS) return 0;
     if (ts.sec < 0) return 0;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
@@ -641,22 +632,26 @@ test "codec: session epoch is forward-only (stale dropped, newer resets window)"
 
 // ---- Live-socket pump tests (Linux only; skip elsewhere / on permission gaps) ----
 
-fn makeUdpLoopback() !linux.fd_t {
-    const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK, 0);
-    if (linux.errno(rc) != .SUCCESS) return error.SkipZigTest;
-    const fd: linux.fd_t = @intCast(rc);
-    var addr = linux.sockaddr.in{ .family = linux.AF.INET, .port = 0, .addr = 0x0100007f }; // 127.0.0.1:0
-    if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
-        _ = linux.close(fd);
+// Live-socket pump tests are Linux-gated: they assume synchronous loopback
+// delivery (a Linux behaviour) so a datagram is readable immediately after
+// sendto. macOS defers loopback delivery, so these would need explicit poll
+// readiness; the production reactor never races (epoll/poll drive readiness).
+// macOS data-plane behaviour is certified by the manual acceptance runbook
+// (docs/macos-spoke-acceptance.md, issue #79) per the RFC.
+fn makeUdpLoopback() !sys.fd_t {
+    const fd = sys.socket(sys.AF.INET, sys.SOCK.DGRAM, 0, true, false) catch return error.SkipZigTest;
+    var addr = sys.sockaddr.in{ .family = sys.AF.INET, .port = 0, .addr = 0x0100007f }; // 127.0.0.1:0
+    if (sys.errno(sys.bind(fd, @ptrCast(&addr), @sizeOf(sys.sockaddr.in))) != .SUCCESS) {
+        _ = sys.close(fd);
         return error.SkipZigTest;
     }
     return fd;
 }
 
-fn addrOf(fd: linux.fd_t) !linux.sockaddr.in {
-    var a: linux.sockaddr.in = undefined;
-    var l: linux.socklen_t = @sizeOf(linux.sockaddr.in);
-    if (linux.errno(linux.getsockname(fd, @ptrCast(&a), &l)) != .SUCCESS) return error.SkipZigTest;
+fn addrOf(fd: sys.fd_t) !sys.sockaddr.in {
+    var a: sys.sockaddr.in = undefined;
+    var l: sys.socklen_t = @sizeOf(sys.sockaddr.in);
+    if (sys.errno(sys.getsockname(fd, @ptrCast(&a), &l)) != .SUCCESS) return error.SkipZigTest;
     return a;
 }
 
@@ -677,11 +672,11 @@ const TEST_EPOCH: u64 = 1_700_000_000_000_000_000;
 /// endpoint, so endpoint relearning (issue #34) is observable as a change away
 /// from it. `port` is chosen below the ephemeral range so it never aliases a
 /// loopback test socket.
-fn fakeAddr(port: u16) linux.sockaddr.in {
-    return .{ .family = linux.AF.INET, .port = std.mem.nativeToBig(u16, port), .addr = 0x0100007f };
+fn fakeAddr(port: u16) sys.sockaddr.in {
+    return .{ .family = sys.AF.INET, .port = std.mem.nativeToBig(u16, port), .addr = 0x0100007f };
 }
 
-fn sameEndpoint(a: linux.sockaddr.in, b: linux.sockaddr.in) bool {
+fn sameEndpoint(a: sys.sockaddr.in, b: sys.sockaddr.in) bool {
     return a.addr == b.addr and a.port == b.port;
 }
 
@@ -691,15 +686,14 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     const psk: crypto.Key = [_]u8{0x33} ** crypto.KEY_LEN;
 
     // tun side: a pipe whose read end the reactor drains.
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
-    defer _ = linux.close(pipe_fds[0]);
-    defer _ = linux.close(pipe_fds[1]);
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
 
     const udp_hub = try makeUdpLoopback(); // reactor's udp_fd (local id 1)
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback(); // peer A (id 2)
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
 
     var reg = peer.PeerRegistry.init(1);
     _ = try reg.add(psk, 2, try addrOf(udp_a), ANY_SRC, TEST_EPOCH);
@@ -719,7 +713,7 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     r.counters = &ctr;
 
     const ip_pkt = ipPkt(.{ 10, 0, 0, 1 }, .{ 10, 0, 0, 2 });
-    _ = linux.write(pipe_fds[1], &ip_pkt, ip_pkt.len);
+    _ = sys.write(pipe_fds[1], &ip_pkt, ip_pkt.len);
 
     r.pumpTunToUdp();
 
@@ -729,22 +723,22 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     try std.testing.expect(ctr.udp_tx_bytes > 0);
 
     var buf: [MAX_WIRE]u8 = undefined;
-    const rc = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
-    try std.testing.expect(linux.errno(rc) == .SUCCESS);
+    const rc = sys.recvfrom(udp_a, &buf, buf.len, 0, null, null);
+    try std.testing.expect(sys.errno(rc) == .SUCCESS);
 
     // Peer A decodes with its rx key for traffic from the hub: derive(psk, 1, 2).
     const a_rx_key = crypto.deriveLinkKey(psk, 1, 2);
     var a_rx = crypto.RxSession.init(a_rx_key);
     var out: [MAX_PLAINTEXT]u8 = undefined;
-    const plen = decodeIngress(&a_rx, buf[0..rc], &out) orelse return error.UnexpectedDrop;
+    const plen = decodeIngress(&a_rx, buf[0..@intCast(rc)], &out) orelse return error.UnexpectedDrop;
     try std.testing.expectEqualSlices(u8, &ip_pkt, out[0..plen]);
 
     // A packet whose destination has no route is dropped (no default peer).
     const no_route = ipPkt(.{ 10, 0, 0, 1 }, .{ 10, 0, 0, 9 });
-    _ = linux.write(pipe_fds[1], &no_route, no_route.len);
+    _ = sys.write(pipe_fds[1], &no_route, no_route.len);
     r.pumpTunToUdp();
-    const rc2 = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
-    try std.testing.expect(linux.errno(rc2) == .AGAIN);
+    const rc2 = sys.recvfrom(udp_a, &buf, buf.len, 0, null, null);
+    try std.testing.expect(sys.errno(rc2) == .AGAIN);
     // The no-route packet was read but dropped: the drop counter records it.
     try std.testing.expectEqual(@as(u64, 2), ctr.tun_rx_packets);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_tun_no_route);
@@ -756,11 +750,11 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     const psk: crypto.Key = [_]u8{0x44} ** crypto.KEY_LEN;
 
     const udp_hub = try makeUdpLoopback(); // reactor (local id 1)
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback(); // spoke A (id 2)
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
     const udp_b = try makeUdpLoopback(); // spoke B (id 3)
-    defer _ = linux.close(udp_b);
+    defer _ = sys.close(udp_b);
 
     const hub_addr = try addrOf(udp_hub);
 
@@ -777,10 +771,9 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     var active = policy.ActiveTree.init(&tree);
 
     // tun fd unused on the relay path; a throwaway pipe write end keeps it valid.
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
-    defer _ = linux.close(pipe_fds[0]);
-    defer _ = linux.close(pipe_fds[1]);
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
 
     var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
 
@@ -790,28 +783,28 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     const to_b = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 3 });
     var wire: [MAX_WIRE]u8 = undefined;
     const wlen = encodeEgress(&a_tx, 2, &to_b, &wire);
-    _ = linux.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
 
     r.pumpUdpIngress();
 
     // B receives the relayed packet, decodes with derive(psk, 1, 3).
     var buf: [MAX_WIRE]u8 = undefined;
-    const rcb = linux.recvfrom(udp_b, &buf, buf.len, 0, null, null);
-    try std.testing.expect(linux.errno(rcb) == .SUCCESS);
+    const rcb = sys.recvfrom(udp_b, &buf, buf.len, 0, null, null);
+    try std.testing.expect(sys.errno(rcb) == .SUCCESS);
     const b_rx_key = crypto.deriveLinkKey(psk, 1, 3);
     var b_rx = crypto.RxSession.init(b_rx_key);
     var out: [MAX_PLAINTEXT]u8 = undefined;
-    const plen = decodeIngress(&b_rx, buf[0..rcb], &out) orelse return error.UnexpectedDrop;
+    const plen = decodeIngress(&b_rx, buf[0..@intCast(rcb)], &out) orelse return error.UnexpectedDrop;
     try std.testing.expectEqualSlices(u8, &to_b, out[0..plen]);
 
     // No-reflect: A sends a packet destined to itself (target 2). The hub must
     // not bounce it back to A.
     const to_self = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 2 });
     const wlen2 = encodeEgress(&a_tx, 2, &to_self, &wire);
-    _ = linux.sendto(udp_a, &wire, wlen2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wlen2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    const rca = linux.recvfrom(udp_a, &buf, buf.len, 0, null, null);
-    try std.testing.expect(linux.errno(rca) == .AGAIN);
+    const rca = sys.recvfrom(udp_a, &buf, buf.len, 0, null, null);
+    try std.testing.expect(sys.errno(rca) == .AGAIN);
 }
 
 test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoofs" {
@@ -819,17 +812,16 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
 
     const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
 
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
-    defer _ = linux.close(pipe_fds[0]);
-    defer _ = linux.close(pipe_fds[1]);
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
 
     const udp_hub = try makeUdpLoopback(); // reactor (local id 1)
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback(); // spoke A (id 2), bound to 10.0.0.2/32
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
     const udp_c = try makeUdpLoopback(); // an unregistered stranger
-    defer _ = linux.close(udp_c);
+    defer _ = sys.close(udp_c);
 
     const hub_addr = try addrOf(udp_hub);
 
@@ -864,9 +856,9 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     // Unknown `key_id` selector (issue #34): no peer has id 99, so the datagram is
     // dropped before any crypto runs. Sealed with A's real key but mislabelled.
     const wl_unk = encodeEgress(&a_tx, 99, &legit, &wire);
-    _ = linux.sendto(udp_a, &wire, wl_unk, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wl_unk, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_unknown_peer);
 
     // True stranger: a correct `key_id=2` but sealed with the WRONG key, arriving
@@ -875,9 +867,9 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     const wrong_key: crypto.Key = [_]u8{0x77} ** crypto.KEY_LEN;
     var bad_tx = crypto.TxSession.init(wrong_key, TEST_EPOCH);
     const wl_bad = encodeEgress(&bad_tx, 2, &legit, &wire);
-    _ = linux.sendto(udp_c, &wire, wl_bad, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_c, &wire, wl_bad, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, a_addr));
@@ -887,9 +879,9 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     // check — and an authenticated-but-spoofed packet MUST NOT move the endpoint.
     const spoof = ipPkt(.{ 10, 0, 0, 99 }, .{ 10, 0, 0, 1 });
     const wl1 = encodeEgress(&a_tx, 2, &spoof, &wire);
-    _ = linux.sendto(udp_c, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_c, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_spoof);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, a_addr));
@@ -897,11 +889,11 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     // Legitimate packet from A's configured endpoint -> written to the TUN. The
     // endpoint is unchanged, so no relearn is recorded.
     const wl2 = encodeEgress(&a_tx, 2, &legit, &wire);
-    _ = linux.sendto(udp_a, &wire, wl2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wl2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    const rc = linux.read(pipe_fds[0], &buf, buf.len);
-    try std.testing.expect(linux.errno(rc) == .SUCCESS);
-    try std.testing.expectEqualSlices(u8, &legit, buf[0..rc]);
+    const rc = sys.read(pipe_fds[0], &buf, buf.len);
+    try std.testing.expect(sys.errno(rc) == .SUCCESS);
+    try std.testing.expectEqualSlices(u8, &legit, buf[0..@intCast(rc)]);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
 }
 
@@ -910,15 +902,14 @@ test "pump: an authenticated packet from a new endpoint relearns the peer (issue
 
     const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
 
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
-    defer _ = linux.close(pipe_fds[0]);
-    defer _ = linux.close(pipe_fds[1]);
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
 
     const udp_hub = try makeUdpLoopback();
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback(); // A's ACTUAL (roamed) endpoint
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
 
     const hub_addr = try addrOf(udp_hub);
     const a_addr = try addrOf(udp_a);
@@ -949,21 +940,21 @@ test "pump: an authenticated packet from a new endpoint relearns the peer (issue
 
     // First authenticated datagram from the new endpoint: delivered AND learned.
     const wl0 = encodeEgress(&a_tx, 2, &legit, &wire);
-    _ = linux.sendto(udp_a, &wire, wl0, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wl0, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    const rc0 = linux.read(pipe_fds[0], &buf, buf.len);
-    try std.testing.expect(linux.errno(rc0) == .SUCCESS);
-    try std.testing.expectEqualSlices(u8, &legit, buf[0..rc0]);
+    const rc0 = sys.read(pipe_fds[0], &buf, buf.len);
+    try std.testing.expect(sys.errno(rc0) == .SUCCESS);
+    try std.testing.expectEqualSlices(u8, &legit, buf[0..@intCast(rc0)]);
     try std.testing.expectEqual(@as(u64, 1), ctr.udp_endpoint_learned);
     try std.testing.expectEqual(@as(u64, 0), ctr.drop_udp_unknown_peer);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, a_addr));
 
     // A second datagram from the SAME (now learned) endpoint does not relearn.
     const wl1 = encodeEgress(&a_tx, 2, &legit, &wire);
-    _ = linux.sendto(udp_a, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    const rc1 = linux.read(pipe_fds[0], &buf, buf.len);
-    try std.testing.expect(linux.errno(rc1) == .SUCCESS);
+    const rc1 = sys.read(pipe_fds[0], &buf, buf.len);
+    try std.testing.expect(sys.errno(rc1) == .SUCCESS);
     try std.testing.expectEqual(@as(u64, 1), ctr.udp_endpoint_learned);
 }
 
@@ -972,17 +963,16 @@ test "pump: a replayed datagram from a new endpoint cannot move the endpoint (is
 
     const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
 
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
-    defer _ = linux.close(pipe_fds[0]);
-    defer _ = linux.close(pipe_fds[1]);
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
 
     const udp_hub = try makeUdpLoopback();
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback();
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
     const udp_c = try makeUdpLoopback(); // attacker replaying from elsewhere
-    defer _ = linux.close(udp_c);
+    defer _ = sys.close(udp_c);
 
     const hub_addr = try addrOf(udp_hub);
     const a_addr = try addrOf(udp_a);
@@ -1011,16 +1001,16 @@ test "pump: a replayed datagram from a new endpoint cannot move the endpoint (is
 
     // A genuine datagram from A's real endpoint -> accepted, no endpoint change.
     const wl = encodeEgress(&a_tx, 2, &legit, &wire);
-    _ = linux.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .SUCCESS);
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .SUCCESS);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
 
     // The attacker replays the identical bytes from udp_c. The replay window
     // rejects it (decode null) BEFORE any endpoint learning, so A stays put.
-    _ = linux.sendto(udp_c, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_c, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
-    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, a_addr));
@@ -1032,9 +1022,9 @@ test "pump: a short datagram is counted and never crashes parseKeyId (issue #34)
     const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
 
     const udp_hub = try makeUdpLoopback();
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback();
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
     const hub_addr = try addrOf(udp_hub);
 
     var reg = peer.PeerRegistry.init(1);
@@ -1055,7 +1045,7 @@ test "pump: a short datagram is counted and never crashes parseKeyId (issue #34)
 
     // 3 bytes: too short to even hold the key_id selector at [2..4].
     const runt = [_]u8{ 1, 0, 0 };
-    _ = linux.sendto(udp_a, &runt, runt.len, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &runt, runt.len, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
@@ -1066,11 +1056,11 @@ test "pump: relay learns the source's endpoint, leaves the destination's untouch
     const psk: crypto.Key = [_]u8{0x44} ** crypto.KEY_LEN;
 
     const udp_hub = try makeUdpLoopback();
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback(); // A's ACTUAL (roamed) endpoint
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
     const udp_b = try makeUdpLoopback(); // B, at its configured endpoint
-    defer _ = linux.close(udp_b);
+    defer _ = sys.close(udp_b);
 
     const hub_addr = try addrOf(udp_hub);
     const a_addr = try addrOf(udp_a);
@@ -1087,10 +1077,9 @@ test "pump: relay learns the source's endpoint, leaves the destination's untouch
     var tree = policy.PolicyTree{ .entries = &entries };
     var active = policy.ActiveTree.init(&tree);
 
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
-    defer _ = linux.close(pipe_fds[0]);
-    defer _ = linux.close(pipe_fds[1]);
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
 
     var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
     var ctr = stats.Counters{};
@@ -1101,13 +1090,13 @@ test "pump: relay learns the source's endpoint, leaves the destination's untouch
     const to_b = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 3 });
     var wire: [MAX_WIRE]u8 = undefined;
     const wlen = encodeEgress(&a_tx, 2, &to_b, &wire);
-    _ = linux.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
 
     // B still receives the relayed packet at its (unchanged) endpoint.
     var buf: [MAX_WIRE]u8 = undefined;
-    const rcb = linux.recvfrom(udp_b, &buf, buf.len, 0, null, null);
-    try std.testing.expect(linux.errno(rcb) == .SUCCESS);
+    const rcb = sys.recvfrom(udp_b, &buf, buf.len, 0, null, null);
+    try std.testing.expect(sys.errno(rcb) == .SUCCESS);
 
     // The hub learned A's real endpoint; B's endpoint was not disturbed.
     try std.testing.expectEqual(@as(u64, 1), ctr.udp_endpoint_learned);
@@ -1119,15 +1108,14 @@ test "pump: an authenticated non-IPv4 inner packet is dropped before endpoint le
 
     const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
 
-    var pipe_fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&pipe_fds, linux.O{ .NONBLOCK = true })) != .SUCCESS) return error.SkipZigTest;
-    defer _ = linux.close(pipe_fds[0]);
-    defer _ = linux.close(pipe_fds[1]);
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
 
     const udp_hub = try makeUdpLoopback();
-    defer _ = linux.close(udp_hub);
+    defer _ = sys.close(udp_hub);
     const udp_a = try makeUdpLoopback();
-    defer _ = linux.close(udp_a);
+    defer _ = sys.close(udp_a);
     const hub_addr = try addrOf(udp_hub);
 
     // A is configured at a stale endpoint; if learning ran it would move to udp_a.
@@ -1161,11 +1149,11 @@ test "pump: an authenticated non-IPv4 inner packet is dropped before endpoint le
     bad[15] = 2;
     var wire: [MAX_WIRE]u8 = undefined;
     const wl = encodeEgress(&a_tx, 2, &bad, &wire);
-    _ = linux.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(linux.sockaddr.in));
+    _ = sys.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
     r.pumpUdpIngress();
 
     var buf: [MAX_PLAINTEXT]u8 = undefined;
-    try std.testing.expect(linux.errno(linux.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_not_ipv4);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, fakeAddr(9)));

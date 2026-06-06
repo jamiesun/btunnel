@@ -7,7 +7,7 @@
 //! and unit-testable on any host; the actual file read lives in `main.zig`.
 
 const std = @import("std");
-const linux = std.os.linux;
+const sys = @import("sys.zig");
 
 pub const MTU_MIN: u16 = 68;
 pub const MTU_MAX: u16 = 1500;
@@ -110,7 +110,7 @@ pub const Cidr = struct {
 /// keep working without extra configuration.
 pub const PeerSpec = struct {
     id: u32,
-    endpoint: linux.sockaddr.in,
+    endpoint: sys.sockaddr.in,
     allowed_src: Cidr = .{ .network = 0, .prefix = 0 },
     /// Private per-link pre-shared key (issue #13). Each peer link has its OWN
     /// secret, so compromising one spoke's PSK cannot derive any other link's
@@ -143,7 +143,7 @@ pub fn parseCidr(text: []const u8) CidrError!Cidr {
 
 /// Parse "A.B.C.D:port" into a `sockaddr.in` (address + port in network byte
 /// order, ready to hand to `sendto`).
-pub fn parseEndpoint(text: []const u8) EndpointError!linux.sockaddr.in {
+pub fn parseEndpoint(text: []const u8) EndpointError!sys.sockaddr.in {
     const colon = std.mem.lastIndexOfScalar(u8, text, ':') orelse return EndpointError.MissingColon;
     const ip_str = text[0..colon];
     const port_str = text[colon + 1 ..];
@@ -161,7 +161,7 @@ pub fn parseEndpoint(text: []const u8) EndpointError!linux.sockaddr.in {
     if (port == 0) return EndpointError.InvalidPort;
 
     return .{
-        .family = linux.AF.INET,
+        .family = sys.AF.INET,
         .port = std.mem.nativeToBig(u16, port),
         // `octets` already hold the address in network byte order; reinterpret
         // their bytes as the u32 the kernel expects (memory layout preserved).
@@ -613,7 +613,7 @@ test "fromJson: parses role and route arrays (issue #21)" {
 
 test "parseEndpoint: address and port land in network byte order" {
     const ep = try parseEndpoint("10.0.0.2:51820");
-    try std.testing.expectEqual(linux.AF.INET, ep.family);
+    try std.testing.expectEqual(sys.AF.INET, ep.family);
     // 10.0.0.2 in network byte order: bytes 0a 00 00 02.
     var addr_bytes: [4]u8 = @bitCast(ep.addr);
     try std.testing.expectEqualSlices(u8, &.{ 10, 0, 0, 2 }, &addr_bytes);

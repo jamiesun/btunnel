@@ -15,6 +15,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const bt = @import("subnetra");
+const sys = bt.sys;
 const build_options = @import("build_options");
 
 // Pre-ARMv6 targets (e.g. armv5te) lack hardware atomics, so the standard
@@ -127,18 +128,16 @@ fn loadConfig(allocator: std.mem.Allocator, path: [:0]const u8, explicit: bool) 
 }
 
 /// Open and bind a non-blocking IPv4 UDP socket on 0.0.0.0:`port`.
-fn openUdp(port: u16) !linux.fd_t {
-    const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(rc) != .SUCCESS) return error.UdpSocketFailed;
-    const fd: linux.fd_t = @intCast(rc);
-    errdefer _ = linux.close(fd);
+fn openUdp(port: u16) !sys.fd_t {
+    const fd = sys.socket(sys.AF.INET, sys.SOCK.DGRAM, 0, true, true) catch return error.UdpSocketFailed;
+    errdefer _ = sys.close(fd);
 
-    var addr = linux.sockaddr.in{
-        .family = linux.AF.INET,
+    var addr = sys.sockaddr.in{
+        .family = sys.AF.INET,
         .port = std.mem.nativeToBig(u16, port),
         .addr = 0, // 0.0.0.0
     };
-    if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in))) != .SUCCESS) {
+    if (sys.errno(sys.bind(fd, @ptrCast(&addr), @sizeOf(sys.sockaddr.in))) != .SUCCESS) {
         return error.UdpBindFailed;
     }
     return fd;
@@ -266,7 +265,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("udp bind failed ({s}) on port {d}\n", .{ @errorName(err), cfg.listen_port });
         return err;
     };
-    defer _ = linux.close(udp_fd);
+    defer _ = sys.close(udp_fd);
 
     // Data-plane counters (issue #24): shared by reference between the reactor
     // (writer) and the control plane (reader for `subnetra status`). Single-threaded
@@ -353,6 +352,11 @@ fn capLastCap() usize {
 /// running privileged. When already unprivileged (e.g. an unprivileged user
 /// namespace) there is nothing to drop and a `capset` refusal is tolerated.
 fn dropCapabilities() !void {
+    // Linux capability/prctl model only. macOS uses a different privilege model
+    // (the spoke runs with the privileges needed for utun; see the macOS
+    // acceptance runbook), so there is nothing to drop here — fail open.
+    if (builtin.os.tag != .linux) return;
+
     _ = linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
 
     const last = capLastCap();

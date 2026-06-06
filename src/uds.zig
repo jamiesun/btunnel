@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const linux = std.os.linux;
+const sys = @import("sys.zig");
 const policy = @import("policy.zig");
 const peer = @import("peer.zig");
 const stats = @import("stats.zig");
@@ -52,7 +52,7 @@ pub const MAX_REPLY = MAX_POLICY_ENTRIES * MAX_RULE_LINE;
 /// Used both as the bind addrlen for Linux abstract autobind and as the
 /// threshold that distinguishes an addressable (bound) client from an anonymous
 /// one in `recvfrom`'s returned source length.
-const ADDR_HDR = @offsetOf(linux.sockaddr.un, "path");
+const ADDR_HDR = @offsetOf(sys.sockaddr.un, "path");
 
 pub const ControlError = error{
     Unsupported,
@@ -145,43 +145,49 @@ pub fn parseCommand(line: []const u8) ParseError!Command {
 
 /// Fill a filesystem `sockaddr_un` from `path`, returning the address and the
 /// exact addrlen (`offsetof(path) + len + NUL`). Errors if the path cannot fit.
-fn fillUnixAddr(path: []const u8) ControlError!struct { addr: linux.sockaddr.un, alen: linux.socklen_t } {
+fn fillUnixAddr(path: []const u8) ControlError!struct { addr: sys.sockaddr.un, alen: sys.socklen_t } {
     if (path.len + 1 > 108) return error.PathTooLong; // sockaddr_un.path is 108 bytes incl. NUL
-    var addr = linux.sockaddr.un{ .path = undefined };
+    var addr = sys.sockaddr.un{ .path = undefined };
     @memset(&addr.path, 0);
     @memcpy(addr.path[0..path.len], path);
     addr.path[path.len] = 0;
-    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    const alen: sys.socklen_t = @intCast(ADDR_HDR + path.len + 1);
     return .{ .addr = addr, .alen = alen };
 }
 
 /// Open a non-blocking AF_UNIX datagram socket bound to `path`. A stale socket
 /// file at `path` is unlinked first (filesystem sockets only). On any failure
 /// after the socket is created, the fd is closed (no leak).
-fn openDgramSocket(path: []const u8) ControlError!linux.fd_t {
+fn openDgramSocket(path: []const u8) ControlError!sys.fd_t {
     const a = try fillUnixAddr(path);
 
-    const src = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(src) != .SUCCESS) return error.SocketFailed;
-    const fd: linux.fd_t = @intCast(src);
-    errdefer _ = linux.close(fd);
+    const fd = sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, true, true) catch return error.SocketFailed;
+    errdefer _ = sys.close(fd);
 
     // Best-effort removal of a stale socket from a previous run.
-    _ = linux.unlink(@ptrCast(&a.addr.path));
+    _ = sys.unlink(@ptrCast(&a.addr.path));
 
     // Create the node already owner-only: a permissive inherited umask must not
     // leave a window where a local user can enqueue a control datagram before
     // the fchmod below tightens it. umask is process-global, but this runs in the
     // single-threaded setup phase, so the scoped save/restore is safe.
-    const prev_umask = linux.syscall1(.umask, 0o177);
-    const brc = linux.bind(fd, @ptrCast(&a.addr), a.alen);
-    _ = linux.syscall1(.umask, prev_umask);
-    if (linux.errno(brc) != .SUCCESS) return error.BindFailed;
+    const prev_umask = sys.umask(0o177);
+    const brc = sys.bind(fd, @ptrCast(&a.addr), a.alen);
+    _ = sys.umask(prev_umask);
+    if (sys.errno(brc) != .SUCCESS) return error.BindFailed;
 
     // Defense in depth: pin the mode to 0600 explicitly on the bound fd
     // (path-TOCTOU-free), independent of umask. The control plane mutates routing
     // policy and exposes peer state, so it must never be group/world reachable.
-    if (linux.errno(linux.fchmod(fd, 0o600)) != .SUCCESS) return error.ChmodFailed;
+    // Linux: fchmod the bound fd (TOCTOU-free). macOS ignores umask for AF_UNIX
+    // bind *and* rejects fchmod() on a socket fd, leaving the node 0666, so the
+    // path is tightened to 0600 right after bind (sub-µs window, and in
+    // production the socket lives in a root-owned 0700 runtime dir).
+    if (builtin.os.tag == .linux) {
+        if (sys.errno(sys.fchmod(fd, 0o600)) != .SUCCESS) return error.ChmodFailed;
+    } else {
+        if (sys.errno(sys.chmod(@ptrCast(&a.addr.path), 0o600)) != .SUCCESS) return error.ChmodFailed;
+    }
 
     return fd;
 }
@@ -198,13 +204,11 @@ pub fn send(path: []const u8, line: []const u8) ClientError!void {
         else => error.SocketFailed,
     };
 
-    const src = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(src) != .SUCCESS) return error.SocketFailed;
-    const fd: linux.fd_t = @intCast(src);
-    defer _ = linux.close(fd);
+    const fd = sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, false, true) catch return error.SocketFailed;
+    defer _ = sys.close(fd);
 
-    const rc = linux.sendto(fd, line.ptr, line.len, 0, @ptrCast(&a.addr), a.alen);
-    return switch (linux.errno(rc)) {
+    const rc = sys.sendto(fd, line.ptr, line.len, 0, @ptrCast(&a.addr), a.alen);
+    return switch (sys.errno(rc)) {
         .SUCCESS => {},
         .NOENT, .CONNREFUSED, .CONNRESET => error.DaemonUnavailable,
         else => error.SendFailed,
@@ -226,20 +230,18 @@ pub fn request(path: []const u8, line: []const u8, out: []u8, timeout_ms: i32) C
         else => error.SocketFailed,
     };
 
-    const src = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(src) != .SUCCESS) return error.SocketFailed;
-    const fd: linux.fd_t = @intCast(src);
-    defer _ = linux.close(fd);
+    const fd = sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, true, true) catch return error.SocketFailed;
+    defer _ = sys.close(fd);
 
     // Abstract autobind: a zero-length path with addrlen == family size makes the
     // kernel assign a unique anonymous address so the daemon can reply to us.
-    var bind_addr = linux.sockaddr.un{ .path = undefined };
-    bind_addr.family = linux.AF.UNIX;
-    const brc = linux.bind(fd, @ptrCast(&bind_addr), ADDR_HDR);
-    if (linux.errno(brc) != .SUCCESS) return error.BindFailed;
+    var bind_addr = sys.sockaddr.un{ .path = undefined };
+    bind_addr.family = sys.AF.UNIX;
+    const brc = sys.bind(fd, @ptrCast(&bind_addr), ADDR_HDR);
+    if (sys.errno(brc) != .SUCCESS) return error.BindFailed;
 
-    const wrc = linux.sendto(fd, line.ptr, line.len, 0, @ptrCast(&a.addr), a.alen);
-    switch (linux.errno(wrc)) {
+    const wrc = sys.sendto(fd, line.ptr, line.len, 0, @ptrCast(&a.addr), a.alen);
+    switch (sys.errno(wrc)) {
         .SUCCESS => {},
         .NOENT, .CONNREFUSED, .CONNRESET => return error.DaemonUnavailable,
         else => return error.SendFailed,
@@ -249,11 +251,11 @@ pub fn request(path: []const u8, line: []const u8, out: []u8, timeout_ms: i32) C
     // extend the timeout, and require POLLIN (an ERR/HUP/NVAL-only wake is not a
     // reply). The socket is non-blocking, so recvfrom never stalls past poll.
     const deadline = monotonicMillis() +| timeout_ms;
-    var pfd = linux.pollfd{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
+    var pfd = sys.pollfd{ .fd = fd, .events = sys.POLL.IN, .revents = 0 };
     while (true) {
         const remaining = deadline -| monotonicMillis();
-        const prc = linux.poll(@ptrCast(&pfd), 1, @intCast(remaining));
-        switch (linux.errno(prc)) {
+        const prc = sys.poll(@ptrCast(&pfd), 1, @intCast(remaining));
+        switch (sys.errno(prc)) {
             .SUCCESS => {},
             .INTR => {
                 if (monotonicMillis() >= deadline) return error.NoResponse;
@@ -262,20 +264,20 @@ pub fn request(path: []const u8, line: []const u8, out: []u8, timeout_ms: i32) C
             else => return error.NoResponse,
         }
         if (prc == 0) return error.NoResponse; // timed out
-        if (pfd.revents & linux.POLL.IN == 0) return error.NoResponse; // ERR/HUP/NVAL: no reply
+        if (pfd.revents & sys.POLL.IN == 0) return error.NoResponse; // ERR/HUP/NVAL: no reply
         break;
     }
 
-    const rrc = linux.recvfrom(fd, out.ptr, out.len, 0, null, null);
-    if (linux.errno(rrc) != .SUCCESS) return error.NoResponse;
-    return out[0..rrc];
+    const rrc = sys.recvfrom(fd, out.ptr, out.len, 0, null, null);
+    if (sys.errno(rrc) != .SUCCESS) return error.NoResponse;
+    return out[0..@intCast(rrc)];
 }
 
 /// Monotonic clock in milliseconds; saturates to 0 on the (practically
 /// impossible) clock_gettime failure so callers still make forward progress.
 fn monotonicMillis() i64 {
-    var ts: linux.timespec = undefined;
-    if (linux.errno(linux.clock_gettime(linux.CLOCK.MONOTONIC, &ts)) != .SUCCESS) return 0;
+    var ts: sys.timespec = undefined;
+    if (sys.errno(sys.clock_gettime(sys.CLOCK.MONOTONIC, &ts)) != .SUCCESS) return 0;
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
@@ -389,7 +391,7 @@ pub fn formatStatus(
 /// is always safe to overwrite on the next update. No allocator, no deferred
 /// reclamation list.
 pub const Control = struct {
-    fd: linux.fd_t = -1,
+    fd: sys.fd_t = -1,
     active: *policy.ActiveTree = undefined,
     /// Double-buffered policy storage; only the non-current buffer is ever
     /// written, so the data plane never observes a half-built tree.
@@ -424,7 +426,6 @@ pub const Control = struct {
         active: *policy.ActiveTree,
         initial: []const policy.PolicyEntry,
     ) ControlError!void {
-        if (builtin.os.tag != .linux) return error.Unsupported;
         if (initial.len > MAX_POLICY_ENTRIES) return error.TooManyEntries;
         if (save_path.len > self.save_path_buf.len) return error.PathTooLong; // 108-byte sockaddr_un budget
 
@@ -467,7 +468,7 @@ pub const Control = struct {
 
     pub fn deinit(self: *Control) void {
         if (self.fd >= 0) {
-            _ = linux.close(self.fd);
+            _ = sys.close(self.fd);
             self.fd = -1;
         }
     }
@@ -520,38 +521,36 @@ pub const Control = struct {
         @memcpy(tmpz[sp.len..][0..4], ".tmp");
         tmpz[sp.len + 4] = 0;
 
-        const orc = linux.open(@ptrCast(&tmpz), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600);
-        if (linux.errno(orc) != .SUCCESS) return false;
-        const wfd: linux.fd_t = @intCast(orc);
+        const wfd = sys.openZ(@ptrCast(&tmpz), .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true }, 0o600) catch return false;
 
         var off: usize = 0;
         while (off < data.len) {
-            const rc = linux.write(wfd, data[off..].ptr, data.len - off);
-            const e = linux.errno(rc);
+            const rc = sys.write(wfd, data[off..].ptr, data.len - off);
+            const e = sys.errno(rc);
             if (e == .INTR) continue;
             // A short write (rc == 0) before completion is a failure, not EOF:
             // never publish a partial snapshot.
             if (e != .SUCCESS or rc == 0) {
-                _ = linux.close(wfd);
-                _ = linux.unlink(@ptrCast(&tmpz));
+                _ = sys.close(wfd);
+                _ = sys.unlink(@ptrCast(&tmpz));
                 return false;
             }
-            off += rc;
+            off += @intCast(rc);
         }
 
         // Durability: flush file contents before the rename publishes the name.
-        if (linux.errno(linux.fsync(wfd)) != .SUCCESS) {
-            _ = linux.close(wfd);
-            _ = linux.unlink(@ptrCast(&tmpz));
+        if (sys.errno(sys.fsync(wfd)) != .SUCCESS) {
+            _ = sys.close(wfd);
+            _ = sys.unlink(@ptrCast(&tmpz));
             return false;
         }
-        if (linux.errno(linux.close(wfd)) != .SUCCESS) {
-            _ = linux.unlink(@ptrCast(&tmpz));
+        if (sys.errno(sys.close(wfd)) != .SUCCESS) {
+            _ = sys.unlink(@ptrCast(&tmpz));
             return false;
         }
 
-        if (linux.errno(linux.rename(@ptrCast(&tmpz), @ptrCast(&finalz))) != .SUCCESS) {
-            _ = linux.unlink(@ptrCast(&tmpz));
+        if (sys.errno(sys.rename(@ptrCast(&tmpz), @ptrCast(&finalz))) != .SUCCESS) {
+            _ = sys.unlink(@ptrCast(&tmpz));
             return false;
         }
         return true;
@@ -559,13 +558,13 @@ pub const Control = struct {
 
     /// Best-effort reply to an addressable client. Non-blocking; a full client
     /// buffer or vanished client just drops the reply (never stalls the loop).
-    fn reply(self: *Control, src: *const linux.sockaddr.un, slen: linux.socklen_t, msg: []const u8) void {
-        _ = linux.sendto(self.fd, msg.ptr, msg.len, linux.MSG.DONTWAIT, @ptrCast(src), slen);
+    fn reply(self: *Control, src: *const sys.sockaddr.un, slen: sys.socklen_t, msg: []const u8) void {
+        _ = sys.sendto(self.fd, msg.ptr, msg.len, sys.MSG.DONTWAIT, @ptrCast(src), slen);
     }
 
     /// Apply one command line; reply to `src` for query/persist commands when the
     /// client is addressable (bound source). `policy add` never replies.
-    fn applyLine(self: *Control, line: []const u8, src: *const linux.sockaddr.un, slen: linux.socklen_t) void {
+    fn applyLine(self: *Control, line: []const u8, src: *const sys.sockaddr.un, slen: sys.socklen_t) void {
         const cmd = parseCommand(line) catch return;
         const addressable = slen > ADDR_HDR;
         switch (cmd) {
@@ -606,16 +605,16 @@ pub const Control = struct {
     pub fn handle(self: *Control) void {
         var iters: usize = 0;
         while (iters < MAX_CMDS_PER_TICK) : (iters += 1) {
-            var src: linux.sockaddr.un = undefined;
-            var slen: linux.socklen_t = @sizeOf(linux.sockaddr.un);
-            const rc = linux.recvfrom(self.fd, &self.rxbuf, self.rxbuf.len, linux.MSG.TRUNC, @ptrCast(&src), &slen);
-            const e = linux.errno(rc);
+            var src: sys.sockaddr.un = undefined;
+            var slen: sys.socklen_t = @sizeOf(sys.sockaddr.un);
+            const rc = sys.recvfrom(self.fd, &self.rxbuf, self.rxbuf.len, sys.MSG.TRUNC, @ptrCast(&src), &slen);
+            const e = sys.errno(rc);
             if (e == .INTR) continue; // counter-bounded retry
             if (e == .AGAIN) return; // no more datagrams queued
             if (e != .SUCCESS) return; // transient error: yield this round
             if (rc == 0) continue;
             if (rc > self.rxbuf.len) continue; // MSG_TRUNC: oversized datagram -> drop whole
-            const datagram = self.rxbuf[0..rc];
+            const datagram = self.rxbuf[0..@intCast(rc)];
             var it = std.mem.splitScalar(u8, datagram, '\n');
             while (it.next()) |raw| {
                 const line = std.mem.trim(u8, raw, " \t\r");
@@ -676,52 +675,52 @@ test "formatStatus: renders meta, peers, and counters; never prints secrets" {
 
 /// Send one command datagram to a bound control socket at `path`.
 fn sendCommand(path: []const u8, msg: []const u8) !void {
-    const src = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-    try std.testing.expect(linux.errno(src) == .SUCCESS);
-    const cfd: linux.fd_t = @intCast(src);
-    defer _ = linux.close(cfd);
+    const cfd = try sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, false, true);
+    defer _ = sys.close(cfd);
 
-    var addr = linux.sockaddr.un{ .path = undefined };
+    var addr = sys.sockaddr.un{ .path = undefined };
     @memset(&addr.path, 0);
     @memcpy(addr.path[0..path.len], path);
-    const alen: linux.socklen_t = @intCast(@offsetOf(linux.sockaddr.un, "path") + path.len + 1);
+    const alen: sys.socklen_t = @intCast(@offsetOf(sys.sockaddr.un, "path") + path.len + 1);
 
-    const wrc = linux.sendto(cfd, msg.ptr, msg.len, 0, @ptrCast(&addr), alen);
-    try std.testing.expect(linux.errno(wrc) == .SUCCESS);
+    const wrc = sys.sendto(cfd, msg.ptr, msg.len, 0, @ptrCast(&addr), alen);
+    try std.testing.expect(sys.errno(wrc) == .SUCCESS);
 }
 
 fn unlinkPath(path: []const u8) void {
     var pz: [108]u8 = undefined;
     @memcpy(pz[0..path.len], path);
     pz[path.len] = 0;
-    _ = linux.unlink(@ptrCast(&pz));
+    _ = sys.unlink(@ptrCast(&pz));
 }
 
 test "openDgramSocket: control socket is bound 0600 regardless of umask (#37)" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     // A permissive umask must not widen the control socket: fchmod is explicit.
-    const prev = linux.syscall1(.umask, 0);
-    defer _ = linux.syscall1(.umask, prev);
+    const prev = sys.umask(0);
+    defer _ = sys.umask(prev);
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-perm-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-perm-{d}.sock", .{sys.getpid()});
     defer unlinkPath(path);
 
     const fd = try openDgramSocket(path);
-    defer _ = linux.close(fd);
+    defer _ = sys.close(fd);
 
-    var stx: linux.Statx = undefined;
-    const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .MODE = true }, &stx);
-    try std.testing.expect(linux.errno(rc) == .SUCCESS);
-    try std.testing.expectEqual(@as(u16, 0o600), stx.mode & 0o777);
+    // The on-disk control socket node must be owner-only (0600). Stat the path
+    // (not the fd): macOS fstat(socket_fd) reports the kernel socket object's
+    // mode, not the bound node's, and the raw Linux layer has no fstat anyway.
+    var pz: [72]u8 = undefined;
+    @memcpy(pz[0..path.len], path);
+    pz[path.len] = 0;
+    const mode = try sys.statMode(@ptrCast(&pz));
+    try std.testing.expectEqual(@as(u16, 0o600), mode & 0o777);
 }
 
 test "control: policy add datagram hot-swaps the active tree" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-add-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-add-{d}.sock", .{sys.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
@@ -751,10 +750,9 @@ test "control: policy add datagram hot-swaps the active tree" {
 }
 
 test "control: malformed datagram leaves the tree unchanged" {
-    if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-bad-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-bad-{d}.sock", .{sys.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
@@ -775,7 +773,7 @@ test "control: policy show replies with replayable rules to an addressable clien
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-show-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-show-{d}.sock", .{sys.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
@@ -789,27 +787,25 @@ test "control: policy show replies with replayable rules to an addressable clien
     ctl.handle();
 
     // Addressable client: abstract autobind gives the daemon a return address.
-    const cs = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-    try std.testing.expect(linux.errno(cs) == .SUCCESS);
-    const cfd: linux.fd_t = @intCast(cs);
-    defer _ = linux.close(cfd);
-    var ba = linux.sockaddr.un{ .path = undefined };
-    ba.family = linux.AF.UNIX;
-    try std.testing.expect(linux.errno(linux.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
+    const cfd = try sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, false, true);
+    defer _ = sys.close(cfd);
+    var ba = sys.sockaddr.un{ .path = undefined };
+    ba.family = sys.AF.UNIX;
+    try std.testing.expect(sys.errno(sys.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
 
-    var sa = linux.sockaddr.un{ .path = undefined };
+    var sa = sys.sockaddr.un{ .path = undefined };
     @memset(&sa.path, 0);
     @memcpy(sa.path[0..path.len], path);
-    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
-    const wrc = linux.sendto(cfd, "policy show\n", 12, 0, @ptrCast(&sa), alen);
-    try std.testing.expect(linux.errno(wrc) == .SUCCESS);
+    const alen: sys.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    const wrc = sys.sendto(cfd, "policy show\n", 12, 0, @ptrCast(&sa), alen);
+    try std.testing.expect(sys.errno(wrc) == .SUCCESS);
 
     ctl.handle(); // serves the reply
 
     var out: [512]u8 = undefined;
-    const rrc = linux.recvfrom(cfd, &out, out.len, 0, null, null);
-    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
-    const reply = out[0..rrc];
+    const rrc = sys.recvfrom(cfd, &out, out.len, 0, null, null);
+    try std.testing.expect(sys.errno(rrc) == .SUCCESS);
+    const reply = out[0..@intCast(rrc)];
     try std.testing.expect(std.mem.indexOf(u8, reply, "policy add --src 0.0.0.0/0 --dst 192.168.9.0/24 --action forward --target 5") != null);
 }
 
@@ -817,7 +813,7 @@ test "control: status replies 'unavailable' until bound, then a full report" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-status-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-status-{d}.sock", .{sys.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
@@ -828,47 +824,45 @@ test "control: status replies 'unavailable' until bound, then a full report" {
     defer unlinkPath(path);
 
     // Addressable client socket (abstract autobind return address).
-    const cs = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-    try std.testing.expect(linux.errno(cs) == .SUCCESS);
-    const cfd: linux.fd_t = @intCast(cs);
-    defer _ = linux.close(cfd);
-    var ba = linux.sockaddr.un{ .path = undefined };
-    ba.family = linux.AF.UNIX;
-    try std.testing.expect(linux.errno(linux.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
+    const cfd = try sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, false, true);
+    defer _ = sys.close(cfd);
+    var ba = sys.sockaddr.un{ .path = undefined };
+    ba.family = sys.AF.UNIX;
+    try std.testing.expect(sys.errno(sys.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
 
-    var sa = linux.sockaddr.un{ .path = undefined };
+    var sa = sys.sockaddr.un{ .path = undefined };
     @memset(&sa.path, 0);
     @memcpy(sa.path[0..path.len], path);
-    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    const alen: sys.socklen_t = @intCast(ADDR_HDR + path.len + 1);
 
     // Before bindStatus: status is gracefully unavailable (no null deref).
-    _ = linux.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
+    _ = sys.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
     ctl.handle();
     var out: [1024]u8 = undefined;
-    var rrc = linux.recvfrom(cfd, &out, out.len, 0, null, null);
-    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
-    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "status unavailable") != null);
+    var rrc = sys.recvfrom(cfd, &out, out.len, 0, null, null);
+    try std.testing.expect(sys.errno(rrc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(rrc)], "status unavailable") != null);
 
     // After bindStatus: a full report is served.
     var reg = peer.PeerRegistry.init(1);
     var c = stats.Counters{};
     ctl.bindStatus(.{ .version = "1.2.3", .mode = "raw_direct", .listen_port = 51820, .tun_name = "snr0", .local_id = 1 }, &reg, &c);
 
-    _ = linux.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
+    _ = sys.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
     ctl.handle();
-    rrc = linux.recvfrom(cfd, &out, out.len, 0, null, null);
-    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
-    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "subnetra v1.2.3 [running]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "traffic:") != null);
+    rrc = sys.recvfrom(cfd, &out, out.len, 0, null, null);
+    try std.testing.expect(sys.errno(rrc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(rrc)], "subnetra v1.2.3 [running]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(rrc)], "traffic:") != null);
 }
 
 test "control: save persists a replayable snapshot and acks" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-save-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-save-{d}.sock", .{sys.getpid()});
     var snap_buf: [64]u8 = undefined;
-    const snap = try std.fmt.bufPrint(&snap_buf, "/tmp/subnetra-save-{d}.policy", .{linux.getpid()});
+    const snap = try std.fmt.bufPrint(&snap_buf, "/tmp/subnetra-save-{d}.policy", .{sys.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
@@ -882,46 +876,42 @@ test "control: save persists a replayable snapshot and acks" {
     try sendCommand(path, "policy add --src 10.1.0.0/16 --dst 10.2.0.0/16 --action drop\n");
     ctl.handle();
 
-    const cs = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-    try std.testing.expect(linux.errno(cs) == .SUCCESS);
-    const cfd: linux.fd_t = @intCast(cs);
-    defer _ = linux.close(cfd);
-    var ba = linux.sockaddr.un{ .path = undefined };
-    ba.family = linux.AF.UNIX;
-    try std.testing.expect(linux.errno(linux.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
+    const cfd = try sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, false, true);
+    defer _ = sys.close(cfd);
+    var ba = sys.sockaddr.un{ .path = undefined };
+    ba.family = sys.AF.UNIX;
+    try std.testing.expect(sys.errno(sys.bind(cfd, @ptrCast(&ba), ADDR_HDR)) == .SUCCESS);
 
-    var sa = linux.sockaddr.un{ .path = undefined };
+    var sa = sys.sockaddr.un{ .path = undefined };
     @memset(&sa.path, 0);
     @memcpy(sa.path[0..path.len], path);
-    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
-    try std.testing.expect(linux.errno(linux.sendto(cfd, "save\n", 5, 0, @ptrCast(&sa), alen)) == .SUCCESS);
+    const alen: sys.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    try std.testing.expect(sys.errno(sys.sendto(cfd, "save\n", 5, 0, @ptrCast(&sa), alen)) == .SUCCESS);
 
     ctl.handle();
 
     var ack: [256]u8 = undefined;
-    const rrc = linux.recvfrom(cfd, &ack, ack.len, 0, null, null);
-    try std.testing.expect(linux.errno(rrc) == .SUCCESS);
-    try std.testing.expect(std.mem.indexOf(u8, ack[0..rrc], "saved 1 rule") != null);
+    const rrc = sys.recvfrom(cfd, &ack, ack.len, 0, null, null);
+    try std.testing.expect(sys.errno(rrc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, ack[0..@intCast(rrc)], "saved 1 rule") != null);
 
     // Snapshot file holds the replayable command.
     var snapz: [108]u8 = undefined;
     @memcpy(snapz[0..snap.len], snap);
     snapz[snap.len] = 0;
-    const ofd = linux.open(@ptrCast(&snapz), .{ .ACCMODE = .RDONLY }, 0);
-    try std.testing.expect(linux.errno(ofd) == .SUCCESS);
-    const rfd: linux.fd_t = @intCast(ofd);
-    defer _ = linux.close(rfd);
+    const rfd = try sys.openZ(@ptrCast(&snapz), .{ .ACCMODE = .RDONLY }, 0);
+    defer _ = sys.close(rfd);
     var fbuf: [256]u8 = undefined;
-    const frc = linux.read(rfd, &fbuf, fbuf.len);
-    try std.testing.expect(linux.errno(frc) == .SUCCESS);
-    try std.testing.expect(std.mem.indexOf(u8, fbuf[0..frc], "policy add --src 10.1.0.0/16 --dst 10.2.0.0/16 --action drop") != null);
+    const frc = sys.read(rfd, &fbuf, fbuf.len);
+    try std.testing.expect(sys.errno(frc) == .SUCCESS);
+    try std.testing.expect(std.mem.indexOf(u8, fbuf[0..@intCast(frc)], "policy add --src 10.1.0.0/16 --dst 10.2.0.0/16 --action drop") != null);
 }
 
 test "client: send/request to an absent daemon report DaemonUnavailable" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-absent-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-absent-{d}.sock", .{sys.getpid()});
     unlinkPath(path); // ensure nothing is bound there
 
     try std.testing.expectError(error.DaemonUnavailable, send(path, "policy add --src 0.0.0.0/0 --dst 10.0.0.0/8 --action drop\n"));
@@ -934,19 +924,17 @@ test "client: request times out as NoResponse when the daemon never replies" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-silent-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-silent-{d}.sock", .{sys.getpid()});
 
     // A bound socket that accepts the datagram but never replies.
-    const ss = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-    try std.testing.expect(linux.errno(ss) == .SUCCESS);
-    const sfd: linux.fd_t = @intCast(ss);
-    defer _ = linux.close(sfd);
+    const sfd = try sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, false, true);
+    defer _ = sys.close(sfd);
     defer unlinkPath(path);
-    var sa = linux.sockaddr.un{ .path = undefined };
+    var sa = sys.sockaddr.un{ .path = undefined };
     @memset(&sa.path, 0);
     @memcpy(sa.path[0..path.len], path);
-    const alen: linux.socklen_t = @intCast(ADDR_HDR + path.len + 1);
-    try std.testing.expect(linux.errno(linux.bind(sfd, @ptrCast(&sa), alen)) == .SUCCESS);
+    const alen: sys.socklen_t = @intCast(ADDR_HDR + path.len + 1);
+    try std.testing.expect(sys.errno(sys.bind(sfd, @ptrCast(&sa), alen)) == .SUCCESS);
 
     var out: [64]u8 = undefined;
     try std.testing.expectError(error.NoResponse, request(path, "policy show\n", &out, 150));
@@ -956,7 +944,7 @@ test "client: round-trips a real request() against a served control socket" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-rt-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-rt-{d}.sock", .{sys.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
@@ -971,10 +959,10 @@ test "client: round-trips a real request() against a served control socket" {
 
     const Server = struct {
         fn loop(c: *Control, stop: *std.atomic.Value(bool)) void {
-            const ts = linux.timespec{ .sec = 0, .nsec = 1 * std.time.ns_per_ms };
+            const ts = sys.timespec{ .sec = 0, .nsec = 1 * std.time.ns_per_ms };
             while (!stop.load(.acquire)) {
                 c.handle();
-                _ = linux.nanosleep(&ts, null);
+                _ = sys.nanosleep(&ts, null);
             }
         }
     };

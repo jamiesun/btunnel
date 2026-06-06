@@ -5,6 +5,7 @@
 //! `@import`s here also makes every module's `test` block reachable from
 //! `zig build test`.
 
+pub const sys = @import("sys.zig");
 pub const config = @import("config.zig");
 pub const policy = @import("policy.zig");
 pub const crypto = @import("crypto.zig");
