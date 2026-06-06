@@ -11,9 +11,10 @@ For MikroTik/RouterOS Container deployments, read
 [`routeros-container.md`](routeros-container.md) in addition to this guide. The
 RouterOS model needs dedicated veth routing and container-side forwarding.
 
-To bring up a **macOS host as a spoke** (native `utun`), follow the manual
-real-machine runbook in [`macos-spoke-acceptance.md`](macos-spoke-acceptance.md);
-this Linux-centric guide covers the hub and Linux spokes.
+To bring up a **macOS host as a spoke** (native `utun`), the service setup is in
+§4 (launchd) below, and the end-to-end real-machine acceptance walkthrough is the
+manual runbook in [`macos-spoke-acceptance.md`](macos-spoke-acceptance.md). The
+hub and relay stay Linux/RouterOS; macOS is supported as a **spoke** only.
 
 > Topology (v1): single-hub hub-and-spoke. The Hub relays between spokes; spokes
 > do not relay. Peer **identity** is the per-peer PSK selected by the header
@@ -48,6 +49,14 @@ sudo install -m 0755 zig-out/bin/subnetra  /usr/local/bin/subnetra
 ```
 
 `ldd /usr/local/bin/subnetrad` should report *not a dynamic executable*.
+
+> **macOS:** download `subnetra-<ver>-macos-<arch>.tar.gz` from the
+> [release](https://github.com/jamiesun/subnetra/releases/latest) (or `zig build`),
+> `sudo install -m 0755` both binaries into `/usr/local/bin`, then clear the
+> Gatekeeper quarantine:
+> `sudo xattr -d com.apple.quarantine /usr/local/bin/subnetrad /usr/local/bin/subnetra`.
+> macOS binaries are *minimal-dynamic* (Apple ships no static libc), so use
+> `otool -L` instead of `ldd` — it must show only `/usr/lib/libSystem.B.dylib`.
 
 ## 2. Provision per-node config and secrets
 
@@ -116,7 +125,15 @@ sudo sysctl -w net.ipv4.ip_forward=1
 sudo ip route add 192.168.31.0/24 dev snr0
 ```
 
+> **macOS:** `subnetrad --print-network-plan` emits an `ifconfig`/`route` recipe
+> instead of `ip …`. The `utun` name is **kernel-assigned** (`utunN`), so apply
+> the plan *after* the daemon is up, substituting the real name from the `[ready]`
+> banner (see §4 — launchd — and the runbook). subnetra never mutates routes
+> itself on any platform.
+
 ## 4. Run as a service
+
+### Linux — systemd
 
 Install the unit and start the daemon:
 
@@ -137,6 +154,52 @@ Logs go to the journal:
 ```bash
 journalctl -u subnetrad -f
 ```
+
+### macOS — launchd
+
+On a macOS spoke, run the daemon under `launchd`. Because creating a `utun` needs
+root, it is a **system** daemon (`/Library/LaunchDaemons`, runs as root) — not a
+per-user LaunchAgent. Install
+[`deploy/net.subnetra.subnetrad.plist`](../deploy/net.subnetra.subnetrad.plist)
+(provision the config exactly as in §2 — `/etc/subnetra/config.json`, root-owned
+`0600`):
+
+```bash
+sudo install -m 0644 deploy/net.subnetra.subnetrad.plist \
+    /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+sudo launchctl enable  system/net.subnetra.subnetrad
+# older macOS: sudo launchctl load -w /Library/LaunchDaemons/net.subnetra.subnetrad.plist
+```
+
+The job runs `subnetrad --config /etc/subnetra/config.json` as root, restarts on
+abnormal exit (`KeepAlive.SuccessfulExit=false`, throttled — the analogue of
+`Restart=on-failure`), and logs to `/var/log/subnetrad.log`. Validate the config
+with `subnetrad --check` first so a bad config does not crash-loop. Read the
+kernel-assigned interface from the `[ready]` banner in the log:
+
+```bash
+sudo tail -f /var/log/subnetrad.log
+# subnetra v… (… mode=raw_direct …) tun=utun4 sock=/var/run/subnetra.sock [ready]
+```
+
+**Apply the host network plan separately.** As on every platform the daemon only
+*prints* the plan; on macOS the `utunN` name is kernel-assigned, so apply it
+*after* the daemon is up, substituting the real name from the banner:
+
+```bash
+subnetrad --print-network-plan --config /etc/subnetra/config.json   # ifconfig/route recipe
+sudo ifconfig utun4 inet 10.0.0.2 10.0.0.2 mtu 1400 up
+sudo route add -net 10.0.0.0/24 -interface utun4
+```
+
+> `KeepAlive` may restart the daemon onto a **different** `utunN`; re-read the
+> banner and re-apply the plan. subnetra deliberately leaves routing to you (no
+> automatic route mutation), and macOS is a **spoke** only. Manage the job with
+> `sudo launchctl kickstart -k system/net.subnetra.subnetrad` (restart) and
+> `sudo launchctl bootout system/net.subnetra.subnetrad` (stop + unload). For the
+> full real-machine acceptance procedure see
+> [`macos-spoke-acceptance.md`](macos-spoke-acceptance.md).
 
 ## 5. Install the relay policy (Hub)
 
