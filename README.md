@@ -76,6 +76,7 @@ docs/
   subnetra-develop.md  System requirements & architecture design (PRD & Architecture)
   PROTOCOL.md         Normative wire-protocol spec (v1) — the cross-impl interoperability contract
   deployment.md       Hub + two-spoke production deployment walkthrough (systemd, secrets, upgrade)
+  macos-spoke-acceptance.md  Manual real-machine runbook certifying a macOS utun spoke (#72)
   routeros-container.md RouterOS Container deployment guide (veth, routes, LAN publishing)
 ```
 

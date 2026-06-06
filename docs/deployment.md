@@ -11,6 +11,10 @@ For MikroTik/RouterOS Container deployments, read
 [`routeros-container.md`](routeros-container.md) in addition to this guide. The
 RouterOS model needs dedicated veth routing and container-side forwarding.
 
+To bring up a **macOS host as a spoke** (native `utun`), follow the manual
+real-machine runbook in [`macos-spoke-acceptance.md`](macos-spoke-acceptance.md);
+this Linux-centric guide covers the hub and Linux spokes.
+
 > Topology (v1): single-hub hub-and-spoke. The Hub relays between spokes; spokes
 > do not relay. Peer **identity** is the per-peer PSK selected by the header
 > `key_id` (issue #34), not the source endpoint: a spoke's UDP endpoint is the
