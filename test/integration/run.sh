@@ -22,6 +22,15 @@
 #      full recovery, and endpoint roaming / NAT remap (the Hub relearns a spoke
 #      that moves to a new underlay address, with no handshake or restart).
 #      Requires --privileged + /dev/net/tun + tcpdump (netem step needs tc).
+#   7. Active-probe / stealth: unsolicited junk + an unauthenticated forgery sent
+#      to the live relay's UDP port must be PERFECTLY dropped — zero reply on the
+#      wire (proven by capture) — while the honest udp:unknown_peer /
+#      udp:auth_or_invalid drop counters rise and the daemon stays up (PRD §五.2).
+#   8. Memory soak + perf: sustained large-packet relay load; the relay's RSS must
+#      stay flat (iron law #2: zero data-plane allocation) and a rough relayed
+#      throughput baseline is recorded (PRD §五.2). The soak window is short by
+#      default (BTUNNEL_SOAK_SECS, default 15s); the PRD's 10-minute run is the
+#      manual/release acceptance target.
 #
 # Usage (from repo root, on the host):
 #   docker build -t btunnel-dev -f .devcontainer/Dockerfile .
@@ -161,10 +170,18 @@ ok "unit tests green"
 # be rejected by validate (DuplicatePsk) and defeat per-peer isolation.
 PSK_A="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 PSK_B="fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-E2E_NS=(bt_hub bt_a bt_b bt2_hub bt2_a bt2_b)
+E2E_NS=(bt_hub bt_a bt_b bt2_hub bt2_a bt2_b bt_probe)
 declare -a E2E_PIDS=()
 E2E_TMP=""
 E2E_TMP2=""
+HUB_PID=""           # hub relay daemon PID (set in e2e_netns; used by soak/probe)
+A_PID=""             # spoke-A daemon PID
+B_PID=""             # spoke-B daemon PID
+PROBE_RAN=0          # set to 1 once the active-probe / stealth scenario executes
+SOAK_RAN=0           # set to 1 once the memory-soak scenario executes
+SOAK_RSS_BASE="-"    # hub RSS (kB) sampled after warmup
+SOAK_RSS_FINAL="-"   # hub RSS (kB) sampled after the sustained-load window
+SOAK_PPS="-"         # relayed echo packets/sec observed during the soak
 
 e2e_cleanup() {
   set +e
@@ -181,7 +198,7 @@ e2e_cleanup() {
   done
   # Best-effort: reap any root-namespace veth ends left by a partial setup
   # (a veth survives in the root ns if `ip link set ... netns` failed mid-way).
-  for link in veth_ha veth_ah veth_hb veth_bh veth2_ha veth2_ah veth2_hb veth2_bh; do
+  for link in veth_ha veth_ah veth_hb veth_bh veth2_ha veth2_ah veth2_hb veth2_bh veth_hp veth_ph; do
     ip link del "$link" >/dev/null 2>&1
   done
   [ -n "$E2E_TMP" ] && rm -rf "$E2E_TMP"
@@ -288,9 +305,9 @@ e2e_netns() {
     "[ {\"id\":1,\"endpoint\":\"10.100.2.1:51820\",\"allowed_src\":\"10.0.0.0/24\",\"psk\":\"$PSK_B\"} ]"
 
   local hub_sock="$E2E_TMP/hub.sock" a_sock="$E2E_TMP/a.sock" b_sock="$E2E_TMP/b.sock"
-  start_daemon bt_hub "$E2E_TMP/hub" "$hub_sock"
-  start_daemon bt_a   "$E2E_TMP/a"   "$a_sock"
-  start_daemon bt_b   "$E2E_TMP/b"   "$b_sock"
+  start_daemon bt_hub "$E2E_TMP/hub" "$hub_sock"; HUB_PID="${E2E_PIDS[-1]}"
+  start_daemon bt_a   "$E2E_TMP/a"   "$a_sock";   A_PID="${E2E_PIDS[-1]}"
+  start_daemon bt_b   "$E2E_TMP/b"   "$b_sock";   B_PID="${E2E_PIDS[-1]}"
 
   # --- wait for each daemon to create btun0, then bring up the overlay ---
   wait_until 5 ip netns exec bt_hub ip link show btun0 || die "hub btun0 never appeared:\n$(cat "$E2E_TMP/hub/daemon.log")"
@@ -537,12 +554,141 @@ EOF
 }
 e2e_netns_role
 
+# --- scenario 3: active-probe / stealth (PRD §五.2 probe-resistance) ----------
+# The stealth contract: a hostile party that sprays the relay's UDP port with
+# garbage (and with a structurally-valid but unauthenticated forgery) must get
+# NOTHING back — no TCP reset, no ICMP, no UDP — and must not perturb the daemon.
+# A dedicated prober on its own underlay subnet (the Hub has NO peer for it) lets
+# us assert, unambiguously, that the Hub emits ZERO packets toward it. Honest
+# observability is asserted too: junk (a key_id that matches no peer) bumps
+# udp:unknown_peer, and the forgery (real key_id, bad AEAD tag) bumps
+# udp:auth_or_invalid. Bit-exact replay rejection is covered by the crypto
+# sliding-window unit tests; this layer proves the on-wire silence they cannot
+# observe. Reuses scenario 1's still-live star (cleanup happens at script EXIT).
+e2e_active_probe() {
+  if [ "$(id -u)" -ne 0 ]; then return 0; fi   # scenario 1 already emitted the skip
+  [ -n "${PTCTL:-}" ] || { skip "active-probe e2e: scenario 1 setup did not run"; return 0; }
+  { [ -n "${HUB_PID:-}" ] && kill -0 "$HUB_PID" 2>/dev/null; } || { skip "active-probe e2e: hub daemon not alive"; return 0; }
+  command -v tcpdump >/dev/null 2>&1 || { skip "active-probe e2e: tcpdump unavailable"; return 0; }
+
+  log "active-probe / stealth e2e: unsolicited junk to the relay must be perfectly dropped (no reply) ..."
+  local hub_sock="$E2E_TMP/hub.sock"
+
+  # Dedicated prober on a third underlay subnet; the Hub has no peer for 10.100.3.x.
+  ip link add veth_hp type veth peer name veth_ph
+  ip link set veth_hp netns bt_hub
+  ip link set veth_ph netns bt_probe
+  ip netns exec bt_hub   ip addr add 10.100.3.1/24 dev veth_hp
+  ip netns exec bt_hub   ip link set veth_hp up
+  ip netns exec bt_probe ip addr add 10.100.3.2/24 dev veth_ph
+  ip netns exec bt_probe ip link set veth_ph up
+  ip netns exec bt_probe ip link set lo up
+
+  # Capture everything on the prober link: any UDP from 10.100.3.1 is a reply == fail.
+  local probe_pcap="$E2E_TMP/probe.pcap"
+  ip netns exec bt_probe tcpdump -i veth_ph -s0 -U -w "$probe_pcap" >/dev/null 2>&1 &
+  E2E_PIDS+=("$!"); local td_probe=$!
+  sleep 0.5
+
+  local up_base ai_base up_now ai_now
+  up_base=$(status_counter bt_hub "$hub_sock" "udp:" "unknown_peer"); up_base=${up_base:-0}
+  ai_base=$(status_counter bt_hub "$hub_sock" "udp:" "auth_or_invalid"); ai_base=${ai_base:-0}
+
+  # The dev image has no netcat, so send via bash's /dev/udp redirection.
+  local n=20 i
+  # (a) pure garbage — its key_id bytes match no configured peer -> unknown_peer.
+  for ((i = 0; i < n; i++)); do
+    ip netns exec bt_probe bash -c 'printf "%s" "NOT-A-BTUNNEL-DATAGRAM-PURE-GARBAGE-0123456789" > /dev/udp/10.100.3.1/51820' 2>/dev/null || true
+  done
+  # (b) structured forgery: version=1, flags=0, key_id=2 (a real peer), then a
+  #     bogus epoch/seq + body whose AEAD tag cannot verify -> auth_or_invalid.
+  for ((i = 0; i < n; i++)); do
+    ip netns exec bt_probe bash -c 'printf "\x01\x00\x02\x00\x11\x22\x33\x44\x55\x66\x77\x88\x01\x02\x03\x04\x05\x06\x07\x08\xde\xad\xbe\xef\xca\xfe\xba\xbe\x0f\x1e\x2d\x3c\x4b\x5a\x69\x78" > /dev/udp/10.100.3.1/51820' 2>/dev/null || true
+  done
+  sleep 0.5
+  kill "$td_probe" >/dev/null 2>&1 || true; wait "$td_probe" 2>/dev/null || true
+
+  # --- stealth assertion: zero replies from the relay to the prober ---
+  local total reply
+  total=$(tcpdump -r "$probe_pcap" 2>/dev/null | grep -c . || true)
+  [ "${total:-0}" -ge 1 ] || die "active-probe: prober capture is empty (tcpdump attach failed?)"
+  reply=$(tcpdump -r "$probe_pcap" 'udp and src host 10.100.3.1' 2>/dev/null | grep -c . || true)
+  if [ "${reply:-0}" -eq 0 ]; then
+    ok "stealth: relay sent ZERO UDP replies to ${total} captured probe frame(s) — perfect silent drop"
+  else
+    die "STEALTH VIOLATION: relay returned ${reply} packet(s) to an unauthenticated prober:\n$(tcpdump -r "$probe_pcap" 'udp and src host 10.100.3.1' 2>/dev/null)"
+  fi
+
+  # --- observability assertion: the silent drops are honestly counted ---
+  up_now=$(status_counter bt_hub "$hub_sock" "udp:" "unknown_peer"); up_now=${up_now:-0}
+  ai_now=$(status_counter bt_hub "$hub_sock" "udp:" "auth_or_invalid"); ai_now=${ai_now:-0}
+  [ "${up_now}" -gt "${up_base}" ] || die "udp:unknown_peer did not rise for unsolicited junk (${up_base} -> ${up_now}) — drop accounting broken"
+  [ "${ai_now}" -gt "${ai_base}" ] || die "udp:auth_or_invalid did not rise for an unauthenticated forgery (${ai_base} -> ${ai_now})"
+  ok "observability: junk bumped udp:unknown_peer ${up_base}->${up_now}, forgery bumped udp:auth_or_invalid ${ai_base}->${ai_now}"
+
+  # --- liveness assertion: hostile traffic did not crash or wedge the relay ---
+  kill -0 "$HUB_PID" 2>/dev/null || die "active-probe: hub relay daemon died while absorbing junk\n$(cat "$E2E_TMP/hub/daemon.log")"
+  ok "active-probe: hub relay survived $((2 * n)) hostile datagrams and kept serving its control socket"
+  PROBE_RAN=1
+}
+e2e_active_probe
+
+# --- scenario 4: memory soak + perf baseline (PRD §五.2 RSS-flat) -------------
+# Iron law #2 says the data plane is strictly allocation-free, so under sustained
+# load the relay's resident memory must be a flat line. We flood max-size packets
+# spoke-A -> Hub(relay) -> spoke-B, sample the Hub daemon's VmRSS after a warmup
+# and again at the end, and assert it did not grow (a per-packet leak would scale
+# with the packet count and blow far past the page-granularity tolerance). The
+# same flood yields a rough relayed-throughput baseline. The window is short by
+# default; the PRD's 10-minute gigabit run is the manual/release acceptance step.
+e2e_soak() {
+  if [ "$(id -u)" -ne 0 ]; then return 0; fi   # scenario 1 already emitted the skip
+  [ -n "${PTCTL:-}" ] || { skip "memory-soak e2e: scenario 1 setup did not run"; return 0; }
+  { [ -n "${HUB_PID:-}" ] && kill -0 "$HUB_PID" 2>/dev/null; } || { skip "memory-soak e2e: hub daemon not alive"; return 0; }
+  command -v ping >/dev/null 2>&1 || { skip "memory-soak e2e: ping unavailable"; return 0; }
+
+  local secs="${BTUNNEL_SOAK_SECS:-15}" tol="${BTUNNEL_SOAK_RSS_TOL_KB:-64}"
+  log "memory-soak e2e: ${secs}s sustained max-size relay load; the relay RSS must stay flat (iron law #2) ..."
+
+  rss_kb() { awk '/^VmRSS:/{print $2}' "/proc/$1/status" 2>/dev/null; }
+
+  # Warm the relay path so first-touch pages are resident, then snapshot baseline.
+  # -s 1372 => 1372 payload + 8 ICMP + 20 IP = 1400 inner, exactly the btun0 MTU.
+  ip netns exec bt_a ping -f -s 1372 -w 3 10.0.0.3 >/dev/null 2>&1 || true
+  local rss_base; rss_base=$(rss_kb "$HUB_PID"); rss_base=${rss_base:-0}
+  [ "${rss_base}" -gt 0 ] || { skip "memory-soak e2e: could not read hub RSS (/proc/${HUB_PID}/status)"; return 0; }
+
+  # Sustained flood for the full window; capture the delivery count for the baseline.
+  local soak_log="$E2E_TMP/soak.log"
+  ip netns exec bt_a ping -f -s 1372 -w "$secs" 10.0.0.3 >"$soak_log" 2>&1 || true
+  local rss_final; rss_final=$(rss_kb "$HUB_PID"); rss_final=${rss_final:-0}
+
+  kill -0 "$HUB_PID" 2>/dev/null || die "memory-soak: hub relay daemon died under load\n$(cat "$E2E_TMP/hub/daemon.log")"
+
+  local delta=$(( rss_final - rss_base ))
+  SOAK_RSS_BASE="$rss_base"; SOAK_RSS_FINAL="$rss_final"; SOAK_RAN=1
+  if [ "${delta}" -le "${tol}" ]; then
+    ok "memory-soak: relay RSS flat under load (${rss_base}kB -> ${rss_final}kB, delta ${delta}kB <= ${tol}kB tol, ${secs}s)"
+  else
+    die "memory-soak: relay RSS GREW ${delta}kB (${rss_base} -> ${rss_final}) over ${secs}s — possible data-plane leak\n$(cat "$E2E_TMP/hub/daemon.log")"
+  fi
+
+  # Perf baseline: relayed echo packets per second (round-trips through the Hub).
+  local rx_pkts
+  rx_pkts=$(grep -oE '[0-9]+ received' "$soak_log" | grep -oE '^[0-9]+' | head -n1 || true)
+  if [ -n "${rx_pkts:-}" ] && [ "${secs}" -gt 0 ]; then SOAK_PPS=$(( rx_pkts / secs )); fi
+  ok "perf baseline: ~${SOAK_PPS} relayed echo pkt/s (${rx_pkts:-0} in ${secs}s, 1400B inner, spoke-A<->Hub<->spoke-B)"
+}
+e2e_soak
+
 # --- release gate + evidence (issue #26) -----------------------------------
 # In release-gate mode every SKIP already aborts via skip(); this is the final
 # backstop: a release MUST have actually run the live privileged e2e.
 if [ "$RELEASE_GATE" = "1" ]; then
   [ "$SKIP" -eq 0 ] || die "release gate: ${SKIP} step(s) skipped — not acceptable for a release"
   [ "$E2E_RAN" -eq 1 ] || die "release gate: the live netns relay e2e did not run — cannot certify this release"
+  [ "$PROBE_RAN" -eq 1 ] || die "release gate: the active-probe / stealth scenario did not run — cannot certify this release"
+  [ "$SOAK_RAN" -eq 1 ] || die "release gate: the memory-soak scenario did not run — cannot certify this release"
 fi
 
 # Machine-readable evidence block: native build, foreign cross-build,
@@ -550,6 +696,8 @@ fi
 git_commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 zig_ver=$(zig version 2>/dev/null || echo unknown)
 e2e_result=$([ "$E2E_RAN" -eq 1 ] && echo pass || echo skipped)
+probe_result=$([ "$PROBE_RAN" -eq 1 ] && echo pass || echo skipped)
+soak_result=$([ "$SOAK_RAN" -eq 1 ] && echo pass || echo skipped)
 evidence=$(cat <<EOF
 release_gate=${RELEASE_GATE}
 git_commit=${git_commit}
@@ -563,6 +711,11 @@ foreign_static=yes
 size_budget_bytes=${SIZE_BUDGET}
 unit_tests=${EV_UNIT}
 netns_e2e=${e2e_result}
+active_probe=${probe_result}
+memory_soak=${soak_result}
+soak_hub_rss_kb_base=${SOAK_RSS_BASE}
+soak_hub_rss_kb_final=${SOAK_RSS_FINAL}
+soak_relay_pps=${SOAK_PPS}
 EOF
 )
 
