@@ -299,15 +299,9 @@ pub const Reactor = struct {
     /// Loops until EAGAIN.
     pub fn pumpTunToUdp(self: *Reactor) void {
         while (true) {
-            const rc = sys.read(self.tun_fd, &self.rx, self.rx.len);
-            const e = sys.errno(rc);
-            if (e == .AGAIN) return;
-            if (e == .INTR) continue;
-            if (e != .SUCCESS) return; // transient read error: yield this round
-            if (rc == 0) return;
-            const pkt = self.rx[0..@intCast(rc)];
+            const pkt = os.tunRead(self.tun_fd, &self.rx) orelse return;
             self.cInc("tun_rx_packets");
-            self.cAdd("tun_rx_bytes", @intCast(rc));
+            self.cAdd("tun_rx_bytes", @intCast(pkt.len));
 
             const dst = ipv4Dst(pkt) orelse {
                 self.cInc("drop_tun_not_ipv4");
@@ -469,14 +463,11 @@ pub const Reactor = struct {
         }
     }
 
-    /// Write `buf` to the local TUN. Returns true on success, false on a write
-    /// error (counted by the caller).
+    /// Write `buf` (a bare IP packet) to the local TUN. Returns true on success,
+    /// false on a write error (counted by the caller). The backend handles any
+    /// platform framing (e.g. macOS utun's 4-byte address-family prefix).
     fn writeTun(self: *Reactor, buf: []const u8) bool {
-        while (true) {
-            const rc = sys.write(self.tun_fd, buf.ptr, buf.len);
-            if (sys.errno(rc) == .INTR) continue;
-            return sys.errno(rc) == .SUCCESS;
-        }
+        return os.tunWrite(self.tun_fd, buf);
     }
 
     /// This node's own mesh id as the egress `key_id` selector (issue #34). The
