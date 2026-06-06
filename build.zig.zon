@@ -1,7 +1,7 @@
 .{
-    .name = .btunnel,
+    .name = .subnetra,
     .version = "0.4.0",
-    .fingerprint = 0xe5fa7651d260ac00,
+    .fingerprint = 0xe22f5cecfc381dc8,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{

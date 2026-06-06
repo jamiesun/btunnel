@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 #
-# BTunnel local integration / preflight harness.
+# Subnetra local integration / preflight harness.
 #
 # Runs INSIDE the Linux dev container (see .devcontainer/). It is the automated
-# guardian of BTunnel's hard release constraints and the staging ground for the
+# guardian of Subnetra's hard release constraints and the staging ground for the
 # end-to-end tunnel test.
 #
 # What it does TODAY (all of this is real and must pass):
 #   1. Build the static musl binary on the container's NATIVE arch.
 #   2. Enforce iron law #6: fully static (no ELF INTERP) and binary <= 512 KB.
-#   3. Smoke-run the daemon config sanity path (`btunnel --check`).
+#   3. Smoke-run the daemon config sanity path (`subnetrad --check`).
 #   4. Cross-compile the OTHER musl arch and re-check static + size (build-only;
 #      it is not executed, to avoid qemu-user emulation skewing results).
 #   5. Run the unit test suite (`zig build test`).
@@ -29,22 +29,22 @@
 #   8. Memory soak + perf: sustained large-packet relay load; the relay's RSS must
 #      stay flat (iron law #2: zero data-plane allocation) and a rough relayed
 #      throughput baseline is recorded (PRD §五.2). The soak window is short by
-#      default (BTUNNEL_SOAK_SECS, default 15s); the PRD's 10-minute run is the
+#      default (SUBNETRA_SOAK_SECS, default 15s); the PRD's 10-minute run is the
 #      manual/release acceptance target.
 #
 # Usage (from repo root, on the host):
-#   docker build -t btunnel-dev -f .devcontainer/Dockerfile .
+#   docker build -t subnetra-dev -f .devcontainer/Dockerfile .
 #   docker run --rm --privileged --device=/dev/net/tun -v "$PWD":/workspace \
-#       btunnel-dev test/integration/run.sh
+#       subnetra-dev test/integration/run.sh
 set -euo pipefail
 
 readonly SIZE_BUDGET=524288   # 512 KiB, iron law #6
 PASS=0
 SKIP=0
-# Release-gate mode (issue #26): when BTUNNEL_RELEASE_GATE=1 the harness is
+# Release-gate mode (issue #26): when SUBNETRA_RELEASE_GATE=1 the harness is
 # guarding a release candidate, so a SKIP is a HARD FAILURE — a release must be
 # proven by the live privileged e2e, never by an absent prerequisite.
-RELEASE_GATE="${BTUNNEL_RELEASE_GATE:-0}"
+RELEASE_GATE="${SUBNETRA_RELEASE_GATE:-0}"
 E2E_RAN=0          # set to 1 once the live netns relay e2e actually executes
 EV_UNIT="not-run"  # unit-test result captured for the release evidence block
 
@@ -93,14 +93,14 @@ build_target() {
   local target="$1"
   rm -rf zig-out
   zig build -Dtarget="$target" >/dev/null
-  [ -x zig-out/bin/btunnel ] || die "build for $target produced no btunnel binary"
+  [ -x zig-out/bin/subnetrad ] || die "build for $target produced no subnetrad binary"
 }
 
 # --- 1+2+3: native build, constraints, smoke run ---------------------------
 log "building native ($NATIVE_TARGET) ReleaseSmall ..."
 build_target "$NATIVE_TARGET"
-assert_static zig-out/bin/btunnel
-nsize=$(assert_size zig-out/bin/btunnel)
+assert_static zig-out/bin/subnetrad
+nsize=$(assert_size zig-out/bin/subnetrad)
 ok "native binary is static and ${nsize} bytes (<= ${SIZE_BUDGET})"
 
 log "smoke-running the daemon ..."
@@ -108,23 +108,23 @@ log "smoke-running the daemon ..."
 # default is non-runnable, so the smoke run provisions one throwaway peer with a
 # private PSK via config.json.
 smoke_dir=$(mktemp -d)
-cp zig-out/bin/btunnel "$smoke_dir/btunnel"
+cp zig-out/bin/subnetrad "$smoke_dir/subnetrad"
 printf '{ "local_id": 1, "peers": [ { "id": 2, "endpoint": "203.0.113.2:51820", "psk": "%s" } ] }' \
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
   > "$smoke_dir/config.json"
-if ! out=$(cd "$smoke_dir" && ./btunnel --check 2>&1); then
+if ! out=$(cd "$smoke_dir" && ./subnetrad --check 2>&1); then
   rm -rf "$smoke_dir"
   die "daemon exited non-zero:\n$out"
 fi
 rm -rf "$smoke_dir"
-grep -q "btunnel v" <<<"$out" || die "unexpected daemon output:\n$out"
+grep -q "subnetra v" <<<"$out" || die "unexpected daemon output:\n$out"
 ok "daemon smoke run: $(head -n1 <<<"$out")"
 
 # --- 4: foreign cross-build (build-only) -----------------------------------
 log "cross-building foreign ($FOREIGN_TARGET) ReleaseSmall ..."
 build_target "$FOREIGN_TARGET"
-assert_static zig-out/bin/btunnel
-fsize=$(assert_size zig-out/bin/btunnel)
+assert_static zig-out/bin/subnetrad
+fsize=$(assert_size zig-out/bin/subnetrad)
 ok "foreign binary is static and ${fsize} bytes (<= ${SIZE_BUDGET})"
 
 # --- 5: unit tests ---------------------------------------------------------
@@ -144,7 +144,7 @@ ok "unit tests green"
 #
 # Topology (underlay /24s are point-to-point veth pairs):
 #   bt_a  10.100.1.2 <--veth--> 10.100.1.1  bt_hub  10.100.2.1 <--veth--> 10.100.2.2  bt_b
-#   overlay btun0:  a = 10.0.0.2/24   hub = (relay, no overlay IP)   b = 10.0.0.3/24
+#   overlay snr0:  a = 10.0.0.2/24   hub = (relay, no overlay IP)   b = 10.0.0.3/24
 #
 # Mesh ids: hub=1, a=2, b=3. Per-link private PSKs (issue #13):
 #   PSK_A is shared ONLY by the hub<->a link; PSK_B ONLY by the hub<->b link.
@@ -161,9 +161,9 @@ ok "unit tests green"
 # Assertions:
 #   1. Delivery: bt_a ping 10.0.0.3 (spoke-B) succeeds via the Hub relay.
 #   2. Encryption: a plaintext marker in the ICMP payload is ABSENT from the
-#      underlay UDP capture but PRESENT on spoke-B's decrypted btun0 (positive
+#      underlay UDP capture but PRESENT on spoke-B's decrypted snr0 (positive
 #      control), proving the tunnel is the only thing carrying it.
-#   3. Hot-update: an RCU `ptctl policy add` injected mid-stream does not stall
+#   3. Hot-update: an RCU `subnetra policy add` injected mid-stream does not stall
 #      a backgrounded ping (anti-replay drops are covered by unit tests).
 
 # Distinct private PSK per hub link (issue #13): sharing one across links would
@@ -217,20 +217,20 @@ wait_until() {
 }
 
 policy_has() { # policy_has <ns> <sock> <needle>
-  ip netns exec "$1" env BTUNNEL_SOCK="$2" "$PTCTL" policy show 2>/dev/null | grep -qF "$3"
+  ip netns exec "$1" env SUBNETRA_SOCK="$2" "$SUBNETRA_BIN" policy show 2>/dev/null | grep -qF "$3"
 }
 
-ptctl_in() { # ptctl_in <ns> <sock> <args...>
+subnetra_in() { # subnetra_in <ns> <sock> <args...>
   local ns="$1" sock="$2"; shift 2
-  ip netns exec "$ns" env BTUNNEL_SOCK="$sock" "$PTCTL" "$@"
+  ip netns exec "$ns" env SUBNETRA_SOCK="$sock" "$SUBNETRA_BIN" "$@"
 }
 
-# Extract a `<key>=<number>` value from the ptctl-status line matched by a fixed
+# Extract a `<key>=<number>` value from the subnetra-status line matched by a fixed
 # string. Echoes the number (empty if absent). The line filter disambiguates
 # keys that recur across sections (e.g. `no_route=` on both the tun and udp
 # drop lines).
 status_counter() { # status_counter <ns> <sock> <line-match> <key>
-  ip netns exec "$1" env BTUNNEL_SOCK="$2" "$PTCTL" status 2>/dev/null \
+  ip netns exec "$1" env SUBNETRA_SOCK="$2" "$SUBNETRA_BIN" status 2>/dev/null \
     | grep -F "$3" | grep -oE "$4=[0-9]+" | head -n1 | cut -d= -f2
 }
 
@@ -241,7 +241,7 @@ EOF
 }
 
 start_daemon() { # start_daemon <ns> <dir> <sock> -> records PID
-  ip netns exec "$1" bash -c "cd '$2' && exec env BTUNNEL_SOCK='$3' ./btunnel" \
+  ip netns exec "$1" bash -c "cd '$2' && exec env SUBNETRA_SOCK='$3' ./subnetrad" \
     >"$2/daemon.log" 2>&1 &
   E2E_PIDS+=("$!")
 }
@@ -261,18 +261,18 @@ e2e_netns() {
     return 0
   fi
 
-  log "multi-point + relay e2e: building native daemon + ptctl ..."
+  log "multi-point + relay e2e: building native daemon + subnetra ..."
   # Step 4 left a FOREIGN-arch binary in zig-out; rebuild NATIVE before running.
   build_target "$NATIVE_TARGET"
-  PTCTL="$PWD/zig-out/bin/ptctl"
-  [ -x "$PTCTL" ] || die "native build produced no ptctl binary"
+  SUBNETRA_BIN="$PWD/zig-out/bin/subnetra"
+  [ -x "$SUBNETRA_BIN" ] || die "native build produced no subnetra binary"
 
   trap e2e_cleanup EXIT
   # Clean any leftovers from an aborted previous run before (re)creating.
   for ns in "${E2E_NS[@]}"; do ip netns del "$ns" >/dev/null 2>&1 || true; done
   E2E_TMP=$(mktemp -d)
   mkdir -p "$E2E_TMP/hub" "$E2E_TMP/a" "$E2E_TMP/b"
-  for d in hub a b; do cp zig-out/bin/btunnel "$E2E_TMP/$d/btunnel"; done
+  for d in hub a b; do cp zig-out/bin/subnetrad "$E2E_TMP/$d/subnetrad"; done
 
   # --- namespaces + underlay veth pairs ---
   for ns in "${E2E_NS[@]}"; do ip netns add "$ns"; done
@@ -309,27 +309,27 @@ e2e_netns() {
   start_daemon bt_a   "$E2E_TMP/a"   "$a_sock";   A_PID="${E2E_PIDS[-1]}"
   start_daemon bt_b   "$E2E_TMP/b"   "$b_sock";   B_PID="${E2E_PIDS[-1]}"
 
-  # --- wait for each daemon to create btun0, then bring up the overlay ---
-  wait_until 5 ip netns exec bt_hub ip link show btun0 || die "hub btun0 never appeared:\n$(cat "$E2E_TMP/hub/daemon.log")"
-  wait_until 5 ip netns exec bt_a   ip link show btun0 || die "spoke-a btun0 never appeared:\n$(cat "$E2E_TMP/a/daemon.log")"
-  wait_until 5 ip netns exec bt_b   ip link show btun0 || die "spoke-b btun0 never appeared:\n$(cat "$E2E_TMP/b/daemon.log")"
+  # --- wait for each daemon to create snr0, then bring up the overlay ---
+  wait_until 5 ip netns exec bt_hub ip link show snr0 || die "hub snr0 never appeared:\n$(cat "$E2E_TMP/hub/daemon.log")"
+  wait_until 5 ip netns exec bt_a   ip link show snr0 || die "spoke-a snr0 never appeared:\n$(cat "$E2E_TMP/a/daemon.log")"
+  wait_until 5 ip netns exec bt_b   ip link show snr0 || die "spoke-b snr0 never appeared:\n$(cat "$E2E_TMP/b/daemon.log")"
 
   # MTU 1400: inner 1452 + hdr 12 + tag 16 + outer 28 would exceed the 1500 veth.
-  ip netns exec bt_hub ip link set btun0 mtu 1400 up
-  ip netns exec bt_a   ip link set btun0 mtu 1400 up
-  ip netns exec bt_b   ip link set btun0 mtu 1400 up
-  ip netns exec bt_a   ip addr add 10.0.0.2/24 dev btun0
-  ip netns exec bt_b   ip addr add 10.0.0.3/24 dev btun0
+  ip netns exec bt_hub ip link set snr0 mtu 1400 up
+  ip netns exec bt_a   ip link set snr0 mtu 1400 up
+  ip netns exec bt_b   ip link set snr0 mtu 1400 up
+  ip netns exec bt_a   ip addr add 10.0.0.2/24 dev snr0
+  ip netns exec bt_b   ip addr add 10.0.0.3/24 dev snr0
 
   # --- inject routing policy (destination-only match; LOCAL target = 0) ---
-  # ptctl must run INSIDE the daemon's netns: the client's reply socket is an
+  # subnetra must run INSIDE the daemon's netns: the client's reply socket is an
   # abstract AF_UNIX address, and that namespace is per-netns.
-  ptctl_in bt_hub "$hub_sock" policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
-  ptctl_in bt_hub "$hub_sock" policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
-  ptctl_in bt_a   "$a_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 1
-  ptctl_in bt_a   "$a_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
-  ptctl_in bt_b   "$b_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 1
-  ptctl_in bt_b   "$b_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 0
+  subnetra_in bt_hub "$hub_sock" policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
+  subnetra_in bt_hub "$hub_sock" policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
+  subnetra_in bt_a   "$a_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 1
+  subnetra_in bt_a   "$a_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
+  subnetra_in bt_b   "$b_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 1
+  subnetra_in bt_b   "$b_sock"   policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 0
 
   # `policy add` is fire-and-forget: poll `policy show` (a full reactor
   # round-trip) until the rules land — this also proves each UDS is bound and
@@ -350,7 +350,7 @@ e2e_netns() {
   local under_pcap="$E2E_TMP/under.pcap" over_pcap="$E2E_TMP/over.pcap"
   ip netns exec bt_a tcpdump -i veth_ah -s0 -U -w "$under_pcap" udp port 51820 >/dev/null 2>&1 &
   E2E_PIDS+=("$!"); local td_under=$!
-  ip netns exec bt_b tcpdump -i btun0 -s0 -U -w "$over_pcap" icmp >/dev/null 2>&1 &
+  ip netns exec bt_b tcpdump -i snr0 -s0 -U -w "$over_pcap" icmp >/dev/null 2>&1 &
   E2E_PIDS+=("$!"); local td_over=$!
   sleep 0.5  # let both captures attach before generating traffic
   ip netns exec bt_a ping -c5 -W2 -p 4c45414b4d524b21 10.0.0.3 >/dev/null 2>&1 || true
@@ -368,7 +368,7 @@ e2e_netns() {
     die "plaintext marker leaked onto the underlay — traffic is NOT encrypted"
   fi
   if ! grep -aq "LEAKMRK" "$over_pcap"; then
-    die "positive control failed: marker never reached spoke-B's decrypted btun0"
+    die "positive control failed: marker never reached spoke-B's decrypted snr0"
   fi
   ok "on-wire encryption: ${under_pkts} tunnel pkt(s) on underlay, marker absent there, present on decrypted overlay"
 
@@ -379,7 +379,7 @@ e2e_netns() {
   sleep 1
   # The injection must succeed AND visibly land (proves the control plane really
   # processed a hot-update), not merely "ping kept flowing regardless".
-  ptctl_in bt_hub "$hub_sock" policy add --src 0.0.0.0/0 --dst 10.50.0.0/16 --action drop
+  subnetra_in bt_hub "$hub_sock" policy add --src 0.0.0.0/0 --dst 10.50.0.0/16 --action drop
   wait_until 5 policy_has bt_hub "$hub_sock" "10.50.0.0/16" || die "mid-stream policy hot-update never applied"
   wait "$hot_ping" 2>/dev/null || true
   local recv
@@ -446,14 +446,14 @@ e2e_netns() {
   # Generate fresh A->B traffic so the Hub sees spoke-A at its new endpoint.
   ip netns exec bt_a ping -i0.2 -c10 -W2 10.0.0.3 >/dev/null 2>&1 || true
   hub_relearned() {
-    ptctl_in bt_hub "$hub_sock" status 2>/dev/null | grep -qF "id=2 endpoint=10.100.1.3:51820"
+    subnetra_in bt_hub "$hub_sock" status 2>/dev/null | grep -qF "id=2 endpoint=10.100.1.3:51820"
   }
   if wait_until 5 hub_relearned; then
     lrn_now=$(status_counter bt_hub "$hub_sock" "endpoint_learned" "endpoint_learned"); lrn_now=${lrn_now:-0}
     [ "${lrn_now}" -gt "${lrn_base}" ] || die "Hub endpoint reads .3 but endpoint_learned did not rise (${lrn_base} -> ${lrn_now})"
     ok "roaming: Hub relearned spoke-A at 10.100.1.3 (endpoint_learned ${lrn_base} -> ${lrn_now})"
   else
-    die "Hub never relearned spoke-A's roamed endpoint\nhub:$(ptctl_in bt_hub "$hub_sock" status 2>/dev/null)\n$(cat "$E2E_TMP/hub/daemon.log")"
+    die "Hub never relearned spoke-A's roamed endpoint\nhub:$(subnetra_in bt_hub "$hub_sock" status 2>/dev/null)\n$(cat "$E2E_TMP/hub/daemon.log")"
   fi
   # Delivery must work end-to-end over the new endpoint.
   if ip netns exec bt_a ping -c3 -W2 10.0.0.3 >/dev/null 2>&1; then
@@ -468,7 +468,7 @@ e2e_netns
 
 # --- scenario 2: role-based config auto-derives the relay/local policy --------
 # Issue #21. SAME star topology, but each node ships ONLY a `role` + routes and
-# NO `ptctl policy add`: the daemon must derive the full forwarding table from
+# NO `subnetra policy add`: the daemon must derive the full forwarding table from
 # config at boot. We assert (a) the auto-policy is visible via `policy show` on
 # the hub and a spoke, and (b) end-to-end delivery works with zero runtime
 # policy injection. The deeper encryption/hot-update invariants are already
@@ -478,14 +478,14 @@ e2e_netns_role() {
   for tool in ip ping; do command -v "$tool" >/dev/null 2>&1 || return 0; done
   [ -c /dev/net/tun ] || return 0
 
-  log "role-config e2e (#21): same star, policy derived from config (no ptctl) ..."
-  # Scenario 1 owns the native rebuild, the EXIT trap, and $PTCTL. If it skipped
+  log "role-config e2e (#21): same star, policy derived from config (no subnetra) ..."
+  # Scenario 1 owns the native rebuild, the EXIT trap, and $SUBNETRA_BIN. If it skipped
   # (e.g. tcpdump missing) none of those exist, so don't run half-set-up.
-  [ -n "${PTCTL:-}" ] || { skip "role-config e2e (#21): scenario 1 setup did not run"; return 0; }
+  [ -n "${SUBNETRA_BIN:-}" ] || { skip "role-config e2e (#21): scenario 1 setup did not run"; return 0; }
   for ns in bt2_hub bt2_a bt2_b; do ip netns del "$ns" >/dev/null 2>&1 || true; done
   E2E_TMP2=$(mktemp -d)
   mkdir -p "$E2E_TMP2/hub" "$E2E_TMP2/a" "$E2E_TMP2/b"
-  for d in hub a b; do cp zig-out/bin/btunnel "$E2E_TMP2/$d/btunnel"; done
+  for d in hub a b; do cp zig-out/bin/subnetrad "$E2E_TMP2/$d/subnetrad"; done
 
   for ns in bt2_hub bt2_a bt2_b; do ip netns add "$ns"; done
   ip link add veth2_ha type veth peer name veth2_ah
@@ -527,25 +527,25 @@ EOF
   start_daemon bt2_a   "$E2E_TMP2/a"   "$a_sock"
   start_daemon bt2_b   "$E2E_TMP2/b"   "$b_sock"
 
-  wait_until 5 ip netns exec bt2_hub ip link show btun0 || die "role hub btun0 never appeared:\n$(cat "$E2E_TMP2/hub/daemon.log")"
-  wait_until 5 ip netns exec bt2_a   ip link show btun0 || die "role spoke-a btun0 never appeared:\n$(cat "$E2E_TMP2/a/daemon.log")"
-  wait_until 5 ip netns exec bt2_b   ip link show btun0 || die "role spoke-b btun0 never appeared:\n$(cat "$E2E_TMP2/b/daemon.log")"
+  wait_until 5 ip netns exec bt2_hub ip link show snr0 || die "role hub snr0 never appeared:\n$(cat "$E2E_TMP2/hub/daemon.log")"
+  wait_until 5 ip netns exec bt2_a   ip link show snr0 || die "role spoke-a snr0 never appeared:\n$(cat "$E2E_TMP2/a/daemon.log")"
+  wait_until 5 ip netns exec bt2_b   ip link show snr0 || die "role spoke-b snr0 never appeared:\n$(cat "$E2E_TMP2/b/daemon.log")"
 
-  ip netns exec bt2_hub ip link set btun0 mtu 1400 up
-  ip netns exec bt2_a   ip link set btun0 mtu 1400 up
-  ip netns exec bt2_b   ip link set btun0 mtu 1400 up
-  ip netns exec bt2_a   ip addr add 10.0.0.2/24 dev btun0
-  ip netns exec bt2_b   ip addr add 10.0.0.3/24 dev btun0
+  ip netns exec bt2_hub ip link set snr0 mtu 1400 up
+  ip netns exec bt2_a   ip link set snr0 mtu 1400 up
+  ip netns exec bt2_b   ip link set snr0 mtu 1400 up
+  ip netns exec bt2_a   ip addr add 10.0.0.2/24 dev snr0
+  ip netns exec bt2_b   ip addr add 10.0.0.3/24 dev snr0
 
   # --- assertion: the policy was DERIVED FROM CONFIG, not injected at runtime ---
-  wait_until 5 policy_has bt2_hub "$hub_sock" "10.0.0.3/32" || die "role hub did not auto-derive the spoke-B relay rule:\n$(ptctl_in bt2_hub "$hub_sock" policy show 2>&1)"
+  wait_until 5 policy_has bt2_hub "$hub_sock" "10.0.0.3/32" || die "role hub did not auto-derive the spoke-B relay rule:\n$(subnetra_in bt2_hub "$hub_sock" policy show 2>&1)"
   if policy_has bt2_hub "$hub_sock" "target 3" && policy_has bt2_a "$a_sock" "10.0.0.0/24"; then
     ok "role-config (#21): hub auto-derived per-spoke relay rules, spoke auto-derived its hub route"
   else
-    die "role auto-derivation incomplete\nhub:\n$(ptctl_in bt2_hub "$hub_sock" policy show 2>&1)\na:\n$(ptctl_in bt2_a "$a_sock" policy show 2>&1)"
+    die "role auto-derivation incomplete\nhub:\n$(subnetra_in bt2_hub "$hub_sock" policy show 2>&1)\na:\n$(subnetra_in bt2_a "$a_sock" policy show 2>&1)"
   fi
 
-  # --- assertion: delivery works end-to-end with NO ptctl policy injection ---
+  # --- assertion: delivery works end-to-end with NO subnetra policy injection ---
   if ip netns exec bt2_a ping -c3 -W2 10.0.0.3 >/dev/null 2>&1; then
     ok "role-config (#21): spoke-A -> Hub(relay) -> spoke-B with zero runtime policy commands"
   else
@@ -567,7 +567,7 @@ e2e_netns_role
 # observe. Reuses scenario 1's still-live star (cleanup happens at script EXIT).
 e2e_active_probe() {
   if [ "$(id -u)" -ne 0 ]; then return 0; fi   # scenario 1 already emitted the skip
-  [ -n "${PTCTL:-}" ] || { skip "active-probe e2e: scenario 1 setup did not run"; return 0; }
+  [ -n "${SUBNETRA_BIN:-}" ] || { skip "active-probe e2e: scenario 1 setup did not run"; return 0; }
   { [ -n "${HUB_PID:-}" ] && kill -0 "$HUB_PID" 2>/dev/null; } || { skip "active-probe e2e: hub daemon not alive"; return 0; }
   command -v tcpdump >/dev/null 2>&1 || { skip "active-probe e2e: tcpdump unavailable"; return 0; }
 
@@ -598,7 +598,7 @@ e2e_active_probe() {
   local n=20 i
   # (a) pure garbage — its key_id bytes match no configured peer -> unknown_peer.
   for ((i = 0; i < n; i++)); do
-    ip netns exec bt_probe bash -c 'printf "%s" "NOT-A-BTUNNEL-DATAGRAM-PURE-GARBAGE-0123456789" > /dev/udp/10.100.3.1/51820' 2>/dev/null || true
+    ip netns exec bt_probe bash -c 'printf "%s" "NOT-A-SUBNETRA-DATAGRAM-PURE-GARBAGE-0123456789" > /dev/udp/10.100.3.1/51820' 2>/dev/null || true
   done
   # (b) structured forgery: version=1, flags=0, key_id=2 (a real peer), then a
   #     bogus epoch/seq + body whose AEAD tag cannot verify -> auth_or_invalid.
@@ -643,17 +643,17 @@ e2e_active_probe
 # default; the PRD's 10-minute gigabit run is the manual/release acceptance step.
 e2e_soak() {
   if [ "$(id -u)" -ne 0 ]; then return 0; fi   # scenario 1 already emitted the skip
-  [ -n "${PTCTL:-}" ] || { skip "memory-soak e2e: scenario 1 setup did not run"; return 0; }
+  [ -n "${SUBNETRA_BIN:-}" ] || { skip "memory-soak e2e: scenario 1 setup did not run"; return 0; }
   { [ -n "${HUB_PID:-}" ] && kill -0 "$HUB_PID" 2>/dev/null; } || { skip "memory-soak e2e: hub daemon not alive"; return 0; }
   command -v ping >/dev/null 2>&1 || { skip "memory-soak e2e: ping unavailable"; return 0; }
 
-  local secs="${BTUNNEL_SOAK_SECS:-15}" tol="${BTUNNEL_SOAK_RSS_TOL_KB:-64}"
+  local secs="${SUBNETRA_SOAK_SECS:-15}" tol="${SUBNETRA_SOAK_RSS_TOL_KB:-64}"
   log "memory-soak e2e: ${secs}s sustained max-size relay load; the relay RSS must stay flat (iron law #2) ..."
 
   rss_kb() { awk '/^VmRSS:/{print $2}' "/proc/$1/status" 2>/dev/null; }
 
   # Warm the relay path so first-touch pages are resident, then snapshot baseline.
-  # -s 1372 => 1372 payload + 8 ICMP + 20 IP = 1400 inner, exactly the btun0 MTU.
+  # -s 1372 => 1372 payload + 8 ICMP + 20 IP = 1400 inner, exactly the snr0 MTU.
   ip netns exec bt_a ping -f -s 1372 -w 3 10.0.0.3 >/dev/null 2>&1 || true
   local rss_base; rss_base=$(rss_kb "$HUB_PID"); rss_base=${rss_base:-0}
   [ "${rss_base}" -gt 0 ] || { skip "memory-soak e2e: could not read hub RSS (/proc/${HUB_PID}/status)"; return 0; }
@@ -726,7 +726,7 @@ printf '%s\n' "$evidence" | sed 's/^/    /'
 # Surface the same evidence in the GitHub Actions job summary when present.
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
-    echo "## BTunnel release-gate evidence"
+    echo "## Subnetra release-gate evidence"
     echo ""
     echo '```'
     printf '%s\n' "$evidence"

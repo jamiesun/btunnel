@@ -1,4 +1,4 @@
-//! btunnel daemon entry point.
+//! subnetrad daemon entry point.
 //!
 //! Load config (config.json or the comptime default) -> sanity check -> build
 //! the peer registry -> open the TUN device, bind the UDP and AF_UNIX control
@@ -9,16 +9,16 @@
 //!
 //! Environment overrides (used by the integration harness so multiple daemons
 //! can coexist in one mount namespace):
-//!   BTUNNEL_SOCK  control socket path (default uds.SOCKET_PATH)
-//!   BTUNNEL_TUN   TUN interface name  (default "btun0")
+//!   SUBNETRA_SOCK  control socket path (default uds.SOCKET_PATH)
+//!   SUBNETRA_TUN   TUN interface name  (default "snr0")
 
 const std = @import("std");
 const linux = std.os.linux;
-const bt = @import("btunnel");
+const bt = @import("subnetra");
 const build_options = @import("build_options");
 
 // Pre-ARMv6 targets (e.g. armv5te) lack hardware atomics, so the standard
-// library's threaded primitives leave undefined `__sync_*` references. BTunnel
+// library's threaded primitives leave undefined `__sync_*` references. Subnetra
 // is single-threaded (iron law #3), so a plain in-house shim resolves them
 // safely. Only linked in for arm CPUs without the v6 feature.
 const builtin = @import("builtin");
@@ -32,12 +32,12 @@ comptime {
 
 const CONFIG_PATH = "config.json";
 const CONFIG_MAX = 64 * 1024;
-const DEFAULT_TUN = "btun0";
+const DEFAULT_TUN = "snr0";
 
 const USAGE =
-    \\btunnel — stateless L3 UDP tunnel daemon
+    \\subnetrad — stateless L3 UDP tunnel daemon
     \\
-    \\Usage: btunnel [OPTIONS]
+    \\Usage: subnetrad [OPTIONS]
     \\
     \\Options:
     \\  --config PATH         Path to the JSON config (default: ./config.json).
@@ -48,12 +48,12 @@ const USAGE =
     \\  -V, --version         Show the version and exit.
     \\
     \\Environment:
-    \\  BTUNNEL_CONFIG  Config path (overridden by --config).
-    \\  BTUNNEL_SOCK    Control socket path (default /var/run/btunnel.sock).
-    \\  BTUNNEL_TUN     TUN interface name (default btun0).
+    \\  SUBNETRA_CONFIG  Config path (overridden by --config).
+    \\  SUBNETRA_SOCK    Control socket path (default /var/run/subnetra.sock).
+    \\  SUBNETRA_TUN     TUN interface name (default snr0).
     \\
     \\The daemon never mutates host networking; use --print-network-plan to emit
-    \\the commands to run, and `ptctl status` to inspect a running daemon.
+    \\the commands to run, and `subnetra status` to inspect a running daemon.
     \\
 ;
 
@@ -83,7 +83,7 @@ fn validateArgs(args: std.process.Args) !void {
     }
 }
 
-/// Resolve the config path from --config, then BTUNNEL_CONFIG, then the default.
+/// Resolve the config path from --config, then SUBNETRA_CONFIG, then the default.
 /// Returns a NUL-terminated slice usable directly with the open(2) syscall and
 /// whether it was given explicitly (so a missing explicit path fails loudly
 /// instead of silently falling back to the compile-time default).
@@ -91,7 +91,7 @@ fn resolveConfigPath(args: std.process.Args, environ: anytype, buf: []u8) !struc
     var explicit = true;
     const p: []const u8 = if (flagValue(args, "--config")) |v|
         v
-    else if (std.process.Environ.getPosix(environ, "BTUNNEL_CONFIG")) |s|
+    else if (std.process.Environ.getPosix(environ, "SUBNETRA_CONFIG")) |s|
         s
     else blk: {
         explicit = false;
@@ -105,7 +105,7 @@ fn resolveConfigPath(args: std.process.Args, environ: anytype, buf: []u8) !struc
 
 /// Read and parse the config at `path` with raw syscalls (consistent with the
 /// rest of the data path). A missing DEFAULT file falls back to the compile-time
-/// default; a missing EXPLICIT path (--config/BTUNNEL_CONFIG) is an error so a
+/// default; a missing EXPLICIT path (--config/SUBNETRA_CONFIG) is an error so a
 /// typo'd path never silently runs on built-in defaults. Malformed JSON or an
 /// unreadable file is propagated so startup aborts.
 fn loadConfig(allocator: std.mem.Allocator, path: [:0]const u8, explicit: bool) !bt.config.Config {
@@ -172,7 +172,7 @@ fn flagValue(args: std.process.Args, flag: []const u8) ?[]const u8 {
 }
 
 fn envTunName(environ: anytype) []const u8 {
-    return if (std.process.Environ.getPosix(environ, "BTUNNEL_TUN")) |s| s else DEFAULT_TUN;
+    return if (std.process.Environ.getPosix(environ, "SUBNETRA_TUN")) |s| s else DEFAULT_TUN;
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -183,7 +183,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (hasFlag(init.args, "--version") or hasFlag(init.args, "-V")) {
-        std.debug.print("btunnel v{s}\n", .{build_options.version});
+        std.debug.print("subnetra v{s}\n", .{build_options.version});
         return;
     }
     validateArgs(init.args) catch |err| return err;
@@ -219,7 +219,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (hasFlag(init.args, "--check")) {
         std.debug.print(
-            "btunnel v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) [config ok]\n",
+            "subnetra v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) [config ok]\n",
             .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len },
         );
         return;
@@ -244,13 +244,13 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
-    const sock_path: []const u8 = if (std.process.Environ.getPosix(init.environ, "BTUNNEL_SOCK")) |s|
+    const sock_path: []const u8 = if (std.process.Environ.getPosix(init.environ, "SUBNETRA_SOCK")) |s|
         s
     else
         bt.uds.SOCKET_PATH;
     const tun_name: []const u8 = envTunName(init.environ);
 
-    // Snapshot path for `ptctl save`: derive `<sock>.policy` so coexisting
+    // Snapshot path for `subnetra save`: derive `<sock>.policy` so coexisting
     // daemons (shared mount ns) never collide on the snapshot file.
     var save_buf: [108]u8 = undefined;
     const suffix = ".policy";
@@ -276,12 +276,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer _ = linux.close(udp_fd);
 
     // Data-plane counters (issue #24): shared by reference between the reactor
-    // (writer) and the control plane (reader for `ptctl status`). Single-threaded
+    // (writer) and the control plane (reader for `subnetra status`). Single-threaded
     // reactor, so plain increments are race-free.
     var counters = bt.stats.Counters{};
 
     // The policy tree's bootstrap depends on `role` (issue #21): `manual` starts
-    // empty (operators install rules via ptctl), `hub`/`spoke` auto-derive the
+    // empty (operators install rules via subnetra), `hub`/`spoke` auto-derive the
     // initial forwarding/delivery rules from the config. Derived AFTER the peer
     // registry so every target id is known-valid. The buffer must outlive the
     // bindInPlace call (which copies it into the Control's double buffer).
@@ -307,7 +307,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }, &registry, &counters);
 
     std.debug.print(
-        "btunnel v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) tun={s} sock={s} [ready]\n",
+        "subnetra v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) tun={s} sock={s} [ready]\n",
         .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len, tun.ifname(), sock_path },
     );
 

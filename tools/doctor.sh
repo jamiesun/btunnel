@@ -1,5 +1,5 @@
 #!/bin/sh
-# doctor — offline environment preflight for btunnel (issue #61).
+# doctor — offline environment preflight for subnetra (issue #61).
 #
 # Checks the host prerequisites the daemon needs BEFORE you start it, so a
 # first-run failure on a constrained box (BusyBox / RouterOS container) is a
@@ -33,7 +33,7 @@ if [ "$uid" = "0" ]; then
 elif command -v capsh >/dev/null 2>&1 && capsh --print 2>/dev/null | grep -q 'cap_net_admin'; then
     pass "CAP_NET_ADMIN present (non-root)"
 else
-    fail "no CAP_NET_ADMIN — run as root or grant the capability (e.g. setcap cap_net_admin+ep ./btunnel)"
+    fail "no CAP_NET_ADMIN — run as root or grant the capability (e.g. setcap cap_net_admin+ep ./subnetrad)"
 fi
 
 # 3. iproute2 `ip` — used to bring the interface up and program addresses/routes.
@@ -60,7 +60,7 @@ if [ "$year" -ge 2024 ] 2>/dev/null; then
         warn "clock UTC year is $year but no NTP/RTC sync source detected — ensure time is kept (see docs/deployment.md)"
     fi
 else
-    fail "system clock implausible (UTC year $year) — set the time/NTP before starting btunnel"
+    fail "system clock implausible (UTC year $year) — set the time/NTP before starting subnetrad"
 fi
 
 echo

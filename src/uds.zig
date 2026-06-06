@@ -1,7 +1,7 @@
 //! Task 7: Control-plane Unix domain socket.
 //!
-//! The daemon binds /var/run/btunnel.sock (AF_UNIX, SOCK_DGRAM), receives
-//! plaintext command datagrams from ptctl, tokenizes them, rebuilds the policy
+//! The daemon binds /var/run/subnetra.sock (AF_UNIX, SOCK_DGRAM), receives
+//! plaintext command datagrams from subnetra, tokenizes them, rebuilds the policy
 //! tree, and injects it into the data plane via policy's atomic swap interface
 //! (lock-free RCU).
 //!
@@ -18,14 +18,14 @@ const policy = @import("policy.zig");
 const peer = @import("peer.zig");
 const stats = @import("stats.zig");
 
-pub const SOCKET_PATH = "/var/run/btunnel.sock";
+pub const SOCKET_PATH = "/var/run/subnetra.sock";
 
 /// Default snapshot file `save` serializes the live policy tree to (as replayable
 /// `policy add` command lines). Deliberately NOT config.json: the config schema
 /// carries no policy section in v1, so the operator-driven policy state is
 /// persisted as a separate, replayable command snapshot instead of being merged
 /// back into the daemon's startup config.
-pub const SAVE_PATH = "/var/run/btunnel.policy";
+pub const SAVE_PATH = "/var/run/subnetra.policy";
 
 /// Upper bound on installed policy rules. The control plane keeps two fixed
 /// buffers of this size (double-buffered RCU), so memory is allocation-free and
@@ -63,7 +63,7 @@ pub const ControlError = error{
     TooManyEntries,
 };
 
-/// Errors surfaced to the ptctl client.
+/// Errors surfaced to the subnetra client.
 pub const ClientError = error{
     Unsupported,
     SocketFailed,
@@ -186,7 +186,7 @@ fn openDgramSocket(path: []const u8) ControlError!linux.fd_t {
     return fd;
 }
 
-// --- ptctl client -----------------------------------------------------------
+// --- subnetra client -----------------------------------------------------------
 
 /// Fire-and-forget delivery of one command line to the daemon socket at `path`.
 /// Used for `policy add`, which expects no reply. A missing/closed socket maps
@@ -303,7 +303,7 @@ fn formatEntry(e: policy.PolicyEntry, buf: []u8) []const u8 {
 }
 
 
-/// Static daemon identity surfaced by `ptctl status`. Passed in from `main` so
+/// Static daemon identity surfaced by `subnetra status`. Passed in from `main` so
 /// the control plane never imports `build_options` or other executable-context
 /// modules (keeps `uds` unit-testable and reusable).
 pub const DaemonMeta = struct {
@@ -331,7 +331,7 @@ pub fn formatStatus(
         }
     };
 
-    W.p(out, &len, "btunnel v{s} [running]\n", .{meta.version});
+    W.p(out, &len, "subnetra v{s} [running]\n", .{meta.version});
     W.p(out, &len, "mode={s} local_id={d} udp_port={d} tun={s} peers={d}\n", .{
         meta.mode, meta.local_id, meta.listen_port, meta.tun_name, registry.len,
     });
@@ -451,7 +451,7 @@ pub const Control = struct {
         self.status_counters = null;
     }
 
-    /// Wire the optional status sources for `ptctl status` (issue #24). Call
+    /// Wire the optional status sources for `subnetra status` (issue #24). Call
     /// after `bindInPlace`. The pointers must outlive the Control (they live in
     /// `main`'s frame alongside it).
     pub fn bindStatus(
@@ -657,14 +657,14 @@ test "formatStatus: renders meta, peers, and counters; never prints secrets" {
         .version = "9.9.9",
         .mode = "raw_direct",
         .listen_port = 51820,
-        .tun_name = "btun0",
+        .tun_name = "snr0",
         .local_id = 1,
     };
 
     var buf: [4096]u8 = undefined;
     const s = formatStatus(&buf, meta, &reg, &c);
 
-    try std.testing.expect(std.mem.indexOf(u8, s, "btunnel v9.9.9 [running]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "subnetra v9.9.9 [running]") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "local_id=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "id=2 endpoint=203.0.113.7:51820 allowed_src=10.0.0.2/32") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "tun_rx packets=5") != null);
@@ -705,7 +705,7 @@ test "openDgramSocket: control socket is bound 0600 regardless of umask (#37)" {
     defer _ = linux.syscall1(.umask, prev);
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-perm-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-perm-{d}.sock", .{linux.getpid()});
     defer unlinkPath(path);
 
     const fd = try openDgramSocket(path);
@@ -721,13 +721,13 @@ test "control: policy add datagram hot-swaps the active tree" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-add-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-add-{d}.sock", .{linux.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
 
     var ctl: Control = undefined;
-    try ctl.bindInPlace(path, "/tmp/btunnel-add.policy", &active, &.{});
+    try ctl.bindInPlace(path, "/tmp/subnetra-add.policy", &active, &.{});
     defer ctl.deinit();
     defer unlinkPath(path);
 
@@ -754,13 +754,13 @@ test "control: malformed datagram leaves the tree unchanged" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-bad-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-bad-{d}.sock", .{linux.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
 
     var ctl: Control = undefined;
-    try ctl.bindInPlace(path, "/tmp/btunnel-bad.policy", &active, &.{});
+    try ctl.bindInPlace(path, "/tmp/subnetra-bad.policy", &active, &.{});
     defer ctl.deinit();
     defer unlinkPath(path);
 
@@ -775,13 +775,13 @@ test "control: policy show replies with replayable rules to an addressable clien
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-show-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-show-{d}.sock", .{linux.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
 
     var ctl: Control = undefined;
-    try ctl.bindInPlace(path, "/tmp/btunnel-show.policy", &active, &.{});
+    try ctl.bindInPlace(path, "/tmp/subnetra-show.policy", &active, &.{});
     defer ctl.deinit();
     defer unlinkPath(path);
 
@@ -817,13 +817,13 @@ test "control: status replies 'unavailable' until bound, then a full report" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-status-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-status-{d}.sock", .{linux.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
 
     var ctl: Control = undefined;
-    try ctl.bindInPlace(path, "/tmp/btunnel-status.policy", &active, &.{});
+    try ctl.bindInPlace(path, "/tmp/subnetra-status.policy", &active, &.{});
     defer ctl.deinit();
     defer unlinkPath(path);
 
@@ -852,13 +852,13 @@ test "control: status replies 'unavailable' until bound, then a full report" {
     // After bindStatus: a full report is served.
     var reg = peer.PeerRegistry.init(1);
     var c = stats.Counters{};
-    ctl.bindStatus(.{ .version = "1.2.3", .mode = "raw_direct", .listen_port = 51820, .tun_name = "btun0", .local_id = 1 }, &reg, &c);
+    ctl.bindStatus(.{ .version = "1.2.3", .mode = "raw_direct", .listen_port = 51820, .tun_name = "snr0", .local_id = 1 }, &reg, &c);
 
     _ = linux.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
     ctl.handle();
     rrc = linux.recvfrom(cfd, &out, out.len, 0, null, null);
     try std.testing.expect(linux.errno(rrc) == .SUCCESS);
-    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "btunnel v1.2.3 [running]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "subnetra v1.2.3 [running]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out[0..rrc], "traffic:") != null);
 }
 
@@ -866,9 +866,9 @@ test "control: save persists a replayable snapshot and acks" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-save-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-save-{d}.sock", .{linux.getpid()});
     var snap_buf: [64]u8 = undefined;
-    const snap = try std.fmt.bufPrint(&snap_buf, "/tmp/btunnel-save-{d}.policy", .{linux.getpid()});
+    const snap = try std.fmt.bufPrint(&snap_buf, "/tmp/subnetra-save-{d}.policy", .{linux.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
@@ -921,7 +921,7 @@ test "client: send/request to an absent daemon report DaemonUnavailable" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-absent-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-absent-{d}.sock", .{linux.getpid()});
     unlinkPath(path); // ensure nothing is bound there
 
     try std.testing.expectError(error.DaemonUnavailable, send(path, "policy add --src 0.0.0.0/0 --dst 10.0.0.0/8 --action drop\n"));
@@ -934,7 +934,7 @@ test "client: request times out as NoResponse when the daemon never replies" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-silent-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-silent-{d}.sock", .{linux.getpid()});
 
     // A bound socket that accepts the datagram but never replies.
     const ss = linux.socket(linux.AF.UNIX, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
@@ -956,13 +956,13 @@ test "client: round-trips a real request() against a served control socket" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
     var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/tmp/btunnel-rt-{d}.sock", .{linux.getpid()});
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/subnetra-rt-{d}.sock", .{linux.getpid()});
 
     var empty = policy.PolicyTree{ .entries = &.{} };
     var active = policy.ActiveTree.init(&empty);
 
     var ctl: Control = undefined;
-    try ctl.bindInPlace(path, "/tmp/btunnel-rt.policy", &active, &.{});
+    try ctl.bindInPlace(path, "/tmp/subnetra-rt.policy", &active, &.{});
     defer ctl.deinit();
     defer unlinkPath(path);
 

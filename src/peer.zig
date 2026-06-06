@@ -36,7 +36,7 @@ pub const Peer = struct {
     /// Receive session: forward-only epoch + per-session anti-replay window.
     rx: crypto.RxSession,
     /// Wall-clock ns of the last authenticated datagram from this peer (issue
-    /// #34). Observability only (`ptctl status`); never drives protocol logic.
+    /// #34). Observability only (`subnetra status`); never drives protocol logic.
     last_seen_wall_ns: u64 = 0,
 };
 
@@ -79,7 +79,7 @@ const MIN_BOOT_EPOCH_NS: u64 = 1_704_067_200 * std.time.ns_per_s;
 /// epoch may be lower than a peer's last-seen epoch, and that peer will reject the
 /// new session until wall time advances past the old epoch. Operators must keep
 /// the clock monotonic across restarts (RTC/NTP) or restart both ends. There is
-/// no in-protocol symmetric fix: BTunnel performs no handshake by design (AGENT.md
+/// no in-protocol symmetric fix: Subnetra performs no handshake by design (AGENT.md
 /// iron law #8), so this is mitigated operationally (see docs/deployment.md),
 /// never by an epoch-exchange handshake.
 pub fn bootEpoch() RegistryError!u64 {

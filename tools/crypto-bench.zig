@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const bt = @import("btunnel");
+const bt = @import("subnetra");
 const build_options = @import("build_options");
 
 const crypto = bt.crypto;
@@ -18,7 +18,7 @@ const TAG_LEN = crypto.TAG_LEN;
 const USAGE =
     \\Usage: crypto-bench [--size BYTES] [--iters N]
     \\
-    \\Microbenchmark btunnel's AEAD seal/open and key-derivation primitives.
+    \\Microbenchmark subnetra's AEAD seal/open and key-derivation primitives.
     \\Reports an upper bound (crypto cost only) for capacity planning.
     \\
     \\  --size BYTES   plaintext size per op (default 1400, max 1452)
@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (hasFlag(args, "--version") or hasFlag(args, "-V")) {
         var vbuf: [80]u8 = undefined;
-        const v = std.fmt.bufPrint(&vbuf, "crypto-bench (btunnel v{s})\n", .{build_options.version}) catch return;
+        const v = std.fmt.bufPrint(&vbuf, "crypto-bench (subnetra v{s})\n", .{build_options.version}) catch return;
         writeOut(io, v);
         return;
     }

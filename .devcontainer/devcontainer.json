@@ -1,5 +1,5 @@
 {
-  "name": "BTunnel (Linux dev & integration test)",
+  "name": "Subnetra (Linux dev & integration test)",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."

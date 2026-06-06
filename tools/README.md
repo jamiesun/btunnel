@@ -1,20 +1,20 @@
 # tools/
 
-Out-of-tree **auxiliary utilities** for BTunnel (issue #57). Nothing here is part
+Out-of-tree **auxiliary utilities** for Subnetra (issue #57). Nothing here is part
 of the shipped daemon. The goal is to keep useful helpers — key generation,
 offline config validation, packet inspection, environment preflight — *outside*
-the single static `btunnel` / `ptctl` binaries so the data plane stays minimal
+the single static `subnetra` / `subnetra` binaries so the data plane stays minimal
 and the iron laws in [`AGENT.md`](../AGENT.md) are never bent for a convenience
 feature.
 
 ## Conventions (binding for every tool added here)
 
-1. **Never shipped by default.** A bare `zig build` installs only `btunnel` and
-   `ptctl`. Each Zig tool is exposed via its own `zig build tool:<name>` step and
+1. **Never shipped by default.** A bare `zig build` installs only `subnetra` and
+   `subnetra`. Each Zig tool is exposed via its own `zig build tool:<name>` step and
    is **never** `installArtifact`-ed into the default install. Building a tool
    explicitly drops its binary under `zig-out/tools/`. This keeps the
    release artifacts and the ≤512KB static-size budget untouched.
-2. **One-way dependency.** Tools MAY `@import("btunnel")` to reuse `config`,
+2. **One-way dependency.** Tools MAY `@import("subnetra")` to reuse `config`,
    `crypto`, `protocol`, etc. The data plane under `src/` MUST NOT import anything
    from `tools/`. Reuse flows tools → core, never core → tools.
 3. **Zero third-party dependencies.** Pure Zig standard library, or POSIX `sh`
@@ -48,7 +48,7 @@ zig-out/tools/keygen --count 3    # one per peer link
 
 ### `config-lint` (issue #59)
 Validate a `config.json` offline using the daemon's **own** parser and sanity
-checks, so it can never drift from runtime behaviour. Unlike `btunnel --check`,
+checks, so it can never drift from runtime behaviour. Unlike `subnetrad --check`,
 it has **no dependency on a sane system clock** and never opens a socket, so it
 is safe in CI / on a skewed-clock box. Exits non-zero on any failure and never
 prints PSK material.

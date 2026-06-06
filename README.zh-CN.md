@@ -1,25 +1,25 @@
-# BTunnel
+# Subnetra
 
 **纯 Zig 编写、零依赖的三层 UDP 隧道，最终产出一个小于 512KB 的静态单二进制文件。**
 
-[![CI](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/ci.yml)
-[![Release](https://github.com/jamiesun/btunnel/actions/workflows/release.yml/badge.svg)](https://github.com/jamiesun/btunnel/actions/workflows/release.yml)
-[![Latest release](https://img.shields.io/github/v/release/jamiesun/btunnel?sort=semver)](https://github.com/jamiesun/btunnel/releases/latest)
-[![License: MIT](https://img.shields.io/github/license/jamiesun/btunnel)](LICENSE)
+[![CI](https://github.com/jamiesun/subnetra/actions/workflows/ci.yml/badge.svg)](https://github.com/jamiesun/subnetra/actions/workflows/ci.yml)
+[![Release](https://github.com/jamiesun/subnetra/actions/workflows/release.yml/badge.svg)](https://github.com/jamiesun/subnetra/actions/workflows/release.yml)
+[![Latest release](https://img.shields.io/github/v/release/jamiesun/subnetra?sort=semver)](https://github.com/jamiesun/subnetra/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/jamiesun/subnetra)](LICENSE)
 [![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
 ![Binary size](https://img.shields.io/badge/binary-%E2%89%A4512KB-44cc11)
-[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5-2b90d9)](https://github.com/jamiesun/btunnel/releases/latest)
+[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5-2b90d9)](https://github.com/jamiesun/subnetra/releases/latest)
 
 [English](README.md) · **简体中文**
 
 <p align="center">
-  <img src="btunnel.png" alt="BTunnel — 三层 UDP 隧道，纯 Zig，静态单二进制：TUN 入口、加密封装、星型中继、策略路由、Spoke 出口" width="100%">
+  <img src="subnetra.png" alt="Subnetra — 三层 UDP 隧道，纯 Zig，静态单二进制：TUN 入口、加密封装、星型中继、策略路由、Spoke 出口" width="100%">
 </p>
 
 > 用**纯 Zig**（锁定 2026 最新标准库 `std.posix`）编写的虚拟三层（Layer 3）自适应组网工具。
 > 面向通用 Linux 环境（含轻量级容器如 BusyBox / Container），零依赖、零动态分配、强隐蔽。
 
-BTunnel 在物理专线之上构建虚拟子网，采用**星型拓扑（Hub-and-Spoke）**，通过私有 UDP 隧道
+Subnetra 在物理专线之上构建虚拟子网，采用**星型拓扑（Hub-and-Spoke）**，通过私有 UDP 隧道
 转发裸 IP 包。它**不依赖任何第三方网络框架**——TUN 网卡、加密、防重放、
 策略引擎全部自研，最终产出一个完全静态链接的单二进制文件。
 
@@ -36,7 +36,7 @@ BTunnel 在物理专线之上构建虚拟子网，采用**星型拓扑（Hub-and
 ## 📦 项目结构
 
 ```
-build.zig            双产物构建（btunnel 守护进程 + ptctl 控制工具），静态 musl 交叉编译
+build.zig            双产物构建（subnetra 守护进程 + subnetra 控制工具），静态 musl 交叉编译
 build.zig.zon        包清单
 config.example.json  示例配置（复制为 config.json 使用）
 src/
@@ -47,15 +47,15 @@ src/
   reactor.zig  packed 私有报头 + egress 出口分发 + epoll 反应堆
   tun.zig      TUN 网卡系统驱动
   uds.zig      控制面 Unix 域套接字 + 指令分词器
-  main.zig     btunnel 守护进程入口
-  ptctl.zig    ptctl 控制工具入口
+  main.zig     subnetra 守护进程入口
+  subnetra.zig    subnetra 控制工具入口
 tools/               独立辅助工具，绝不打进守护进程二进制（见 tools/README.md）
   keygen.zig         生成每条链路的 64 位十六进制 PSK（zig build tool:keygen）
   config-lint.zig    离线校验 config.json，不依赖系统时钟（zig build tool:config-lint）
   wire-decode.zig    离线只读数据报解码器（zig build tool:wire-decode）
   doctor.sh          环境预检：/dev/net/tun、CAP_NET_ADMIN、ip、时钟
 docs/
-  btunnel-develop.md  系统需求与架构设计说明书（PRD & Architecture）
+  subnetra-develop.md  系统需求与架构设计说明书（PRD & Architecture）
 ```
 
 ## 🛠 构建
@@ -79,10 +79,10 @@ zig build test
 zig build run
 ```
 
-产物位于 `zig-out/bin/`：`btunnel`（守护进程）与 `ptctl`（控制工具）。
+产物位于 `zig-out/bin/`：`subnetra`（守护进程）与 `subnetra`（控制工具）。
 
 > **ARMv5 说明：** ARMv5 没有硬件原子指令（无 `LDREX`/`STREX`），标准库的线程化
-> I/O 脚手架会引用 musl 未提供的旧式 `__sync_*` 内建函数。由于 BTunnel 严格
+> I/O 脚手架会引用 musl 未提供的旧式 `__sync_*` 内建函数。由于 Subnetra 严格
 > 单线程（铁律 #3），[`src/atomic_shim.zig`](src/atomic_shim.zig) 提供了这些内建
 > 函数的可证明正确的普通（非原子）实现。该 shim 在 comptime 门控，仅对 ARMv6
 > 之前的目标编译进去——其它所有架构都逐字节不受影响。
@@ -96,17 +96,17 @@ zig build run
 
 ```bash
 # 拉取多架构镜像（Docker 自动选择对应架构）
-docker pull ghcr.io/jamiesun/btunnel:latest
+docker pull ghcr.io/jamiesun/subnetra:latest
 
 # 运行守护进程：需要 NET_ADMIN + TUN 设备，并把 config.json 挂载到
-# 其工作目录（/etc/btunnel）。
-docker run -d --name btunnel \
+# 其工作目录（/etc/subnetra）。
+docker run -d --name subnetra \
     --cap-add=NET_ADMIN --device=/dev/net/tun \
-    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
-    ghcr.io/jamiesun/btunnel:latest
+    -v "$PWD/config.json":/etc/subnetra/config.json:ro \
+    ghcr.io/jamiesun/subnetra:latest
 ```
 
-镜像内置 Docker `HEALTHCHECK`（`ptctl status`），因此 `docker ps`／Compose／
+镜像内置 Docker `HEALTHCHECK`（`subnetra status`），因此 `docker ps`／Compose／
 Kubernetes 会在守护进程开始对外提供控制套接字后标记为 `healthy`，停止响应时标记为
 `unhealthy`。
 
@@ -122,15 +122,15 @@ amd64、arm64 与 arm/v7 镜像基于 `busybox:musl` 构建，包含两个静态
 ### 离线 / 内网隔离安装
 
 无法访问镜像仓库的设备，可使用每个 GitHub Release 附带的分架构
-`docker load` 镜像包（`btunnel-image-<版本>-<架构>.tar.gz`）：
+`docker load` 镜像包（`subnetra-image-<版本>-<架构>.tar.gz`）：
 
 ```bash
 # 把对应架构的 tar 包拷贝到目标设备，然后：
-docker load < btunnel-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/btunnel:v0.1.0
-docker run -d --name btunnel \
+docker load < subnetra-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/subnetra:v0.1.0
+docker run -d --name subnetra \
     --cap-add=NET_ADMIN --device=/dev/net/tun \
-    -v "$PWD/config.json":/etc/btunnel/config.json:ro \
-    ghcr.io/jamiesun/btunnel:v0.1.0
+    -v "$PWD/config.json":/etc/subnetra/config.json:ro \
+    ghcr.io/jamiesun/subnetra:v0.1.0
 ```
 
 加载前请用 Release 中的 `SHA256SUMS.txt` 校验文件完整性。
@@ -152,15 +152,15 @@ musl 二进制。
 
 ```bash
 # 构建 Linux 工具链镜像（Debian-slim + 锁定版 Zig 0.16.0）
-docker build -t btunnel-dev -f .devcontainer/Dockerfile .
+docker build -t subnetra-dev -f .devcontainer/Dockerfile .
 
 # 在容器内运行集成/预检脚本
 docker run --rm --privileged --device=/dev/net/tun \
-    -v "$PWD":/workspace btunnel-dev test/integration/run.sh
+    -v "$PWD":/workspace subnetra-dev test/integration/run.sh
 ```
 
 [`test/integration/run.sh`](test/integration/run.sh) 会在容器原生架构上构建
-二进制，强制校验静态链接与 ≤ 512KB 约束，冒烟运行守护进程（`btunnel --check`），
+二进制，强制校验静态链接与 ≤ 512KB 约束，冒烟运行守护进程（`subnetrad --check`），
 交叉编译另一个 musl 架构，运行单元测试，最后运行**多点 + 中继端到端测试**：
 在网络命名空间中搭建 3 节点 Hub-and-Spoke 星型拓扑（一个 Hub 中继 + 两个
 Spoke），断言端到端投递 spoke-A → Hub（中继）→ spoke-B、链路加密（明文标记
@@ -181,12 +181,12 @@ cp config.example.json config.json
 # 没有合法的每对端 PSK，守护进程将拒绝启动（配置自检：InvalidPsk）。
 
 # 启动守护进程（从工作目录读取 config.json）
-./zig-out/bin/btunnel
+./zig-out/bin/subnetrad
 
 # 动态注入策略（通过 UDS 热更新，无需重启）
-./ptctl policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3
-./ptctl policy show
-./ptctl save
+./subnetra policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3
+./subnetra policy show
+./subnetra save
 ```
 
 配置示例见 [`config.example.json`](config.example.json)。
@@ -205,7 +205,7 @@ cp config.example.json config.json
 | 5 密码学管道 | `crypto.zig` | ✅ 完成（AEAD / 每链路密钥 / 会话 epoch / 防重放） |
 | 6 核心反应堆 | `reactor.zig`、`peer.zig` | ✅ 完成（epoll ET 主循环；多对端注册表 + 每链路独立密钥 + 每次重启的会话 epoch；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
 | 7 控制面 UDS | `uds.zig` | ✅ 完成（分词器 + AF_UNIX 数据报监听；原子 RCU 策略热替换，双缓冲） |
-| 8 控制工具 | `ptctl.zig` | ✅ 完成（UDS 投递；`policy add` 即发即弃，`policy show`/`save` 读取守护进程回包；守护进程未运行时非零退出） |
+| 8 控制工具 | `subnetra.zig` | ✅ 完成（UDS 投递；`policy add` 即发即弃，`policy show`/`save` 读取守护进程回包；守护进程未运行时非零退出） |
 | 9 守护进程主循环 + e2e | `main.zig`、`test/integration/run.sh` | ✅ 完成（接线 TUN + UDP + UDS + 反应堆；落地多点 + 中继网络命名空间端到端测试） |
 
 > **当前可验证**：`zig build test` 全绿（Linux 开发容器内 48/48；macOS 宿主
@@ -216,7 +216,7 @@ cp config.example.json config.json
 > （网络命名空间中的 3 节点 Hub-and-Spoke 星型）：真实投递 spoke-A → Hub（中继）
 > → spoke-B、链路加密、以及负载下的 RCU 策略热更新。
 
-详细架构、内存模型与验收清单见 [`docs/btunnel-develop.md`](docs/btunnel-develop.md)。
+详细架构、内存模型与验收清单见 [`docs/subnetra-develop.md`](docs/subnetra-develop.md)。
 
 ## 📄 许可证
 

@@ -10,7 +10,7 @@
 //! output as secret. NOT part of the shipped daemon.
 
 const std = @import("std");
-const bt = @import("btunnel");
+const bt = @import("subnetra");
 const build_options = @import("build_options");
 
 const crypto = bt.crypto;
@@ -19,7 +19,7 @@ const USAGE =
     \\Usage: key-derive --psk <64hex> --from <id> --to <id> [--epoch <ns>]
     \\
     \\Print the directional link key for (from -> to), and — if --epoch is given —
-    \\the per-session key for that boot epoch. Uses btunnel's own key schedule.
+    \\the per-session key for that boot epoch. Uses subnetra's own key schedule.
     \\
     \\  --psk   <64hex>  the link pre-shared key
     \\  --from  <id>     sender mesh id
@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) !void {
     }
     if (hasFlag(args, "--version") or hasFlag(args, "-V")) {
         var vbuf: [80]u8 = undefined;
-        const v = std.fmt.bufPrint(&vbuf, "key-derive (btunnel v{s})\n", .{build_options.version}) catch return;
+        const v = std.fmt.bufPrint(&vbuf, "key-derive (subnetra v{s})\n", .{build_options.version}) catch return;
         writeOut(io, v);
         return;
     }
@@ -127,13 +127,13 @@ test "derives the golden v1-basic-link-1-to-2 link and session keys" {
 
     const link_key = crypto.deriveLinkKey(psk, 1, 2);
     try std.testing.expectEqualStrings(
-        "6b9b5d6f603359710fddd04e10ac772bd0e33aedab75b236d871ec936bea522a",
+        "09f50c1eca5fc09f4ba26677dfa8ab632484adcc131c1464485ca610ff0a5c31",
         &std.fmt.bytesToHex(link_key, .lower),
     );
 
     const session_key = crypto.deriveSessionKey(link_key, epoch);
     try std.testing.expectEqualStrings(
-        "0f0404b8e2405e37a3504e51bcf70f912b81f92fba5d99581510cf52950c871e",
+        "65331bff082c4350cc24a06ac42e6ef81a1d1fdf5ad960fcf0b6fee232cd0d5c",
         &std.fmt.bytesToHex(session_key, .lower),
     );
 }

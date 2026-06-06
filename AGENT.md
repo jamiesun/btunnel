@@ -8,7 +8,7 @@
 
 ## 1. What this software is
 
-**BTunnel** is a virtual Layer-3 adaptive networking tool written in **pure Zig**
+**Subnetra** is a virtual Layer-3 adaptive networking tool written in **pure Zig**
 (pinned to the 2026 latest standard library `std.posix`). It builds a virtual
 subnet over a physical leased line using a **hub-and-spoke topology**, forwarding
 raw IP packets through a private, fully-encrypted UDP tunnel.
@@ -17,7 +17,7 @@ It targets **general Linux environments**, including extremely constrained
 containers (BusyBox / RouterOS Container). The end product is **one statically
 linked binary** with zero third-party dependencies.
 
-The authoritative design is [`docs/btunnel-develop.md`](docs/btunnel-develop.md)
+The authoritative design is [`docs/subnetra-develop.md`](docs/subnetra-develop.md)
 (PRD & Architecture). That document is the single source of truth for *what* to
 build; this file governs *how you must behave* while building it.
 
@@ -25,7 +25,7 @@ build; this file governs *how you must behave* while building it.
 
 **DO NOT DEVIATE FROM THE GOAL. EVER.**
 
-You are building exactly the system described in `docs/btunnel-develop.md` — no
+You are building exactly the system described in `docs/subnetra-develop.md` — no
 more, no less. You do not get to redefine the project, swap its core technology,
 relax its constraints, or "modernize" it because something is easier. Scope creep,
 silent redesigns, and unsolicited rewrites are failures, not contributions.
@@ -62,7 +62,7 @@ a hard failure regardless of how "clean" the result looks.
    with tests. `zig build test` must stay green before any commit.
 8. **Stateless, handshake-free transport.** Every datagram is self-describing and
    independently decodable — the per-packet `epoch` *is* the entire
-   session-establishment mechanism. BTunnel performs **no connection-establishment
+   session-establishment mechanism. Subnetra performs **no connection-establishment
    round-trip, no challenge/response, no in-band session negotiation** — not in
    v1, and not in v2. Reliability state (a future ARQ/FEC layer) may live in an
    independent arena but must never become a handshake; any future transport mode
@@ -96,7 +96,7 @@ and do not delete the v2 reservation points.
 - **Make surgical, goal-aligned changes only.** No unrelated refactors, no
   reformat-the-world commits, no speculative abstractions.
 - **Preserve the language policy.** All code, comments, and root-level docs are in
-  **English**. The Chinese files are: `docs/btunnel-develop.md` (the design doc)
+  **English**. The Chinese files are: `docs/subnetra-develop.md` (the design doc)
   and `docs/AGENT.zh-CN.md` (the mirror of this file). Do not translate the design
   doc; do keep the mirror in sync.
 - **Keep the status honest.** The development-status table in `README.md` reflects

@@ -5,7 +5,7 @@
 > ships **no implementation** and changes **no `src/` behaviour**. Per
 > [`AGENT.md`](../AGENT.md) §2 and §4, v2 code must not begin until the
 > maintainer signs off on this design. The authoritative *what* remains
-> [`docs/btunnel-develop.md`](btunnel-develop.md); the normative v1 wire
+> [`docs/subnetra-develop.md`](subnetra-develop.md); the normative v1 wire
 > contract remains [`docs/PROTOCOL.md`](PROTOCOL.md). Where this RFC and either
 > of those disagree, **they win and this RFC is wrong.**
 
@@ -232,7 +232,7 @@ fragments at the boundary.
 
 ## 7. `fec_xor` re-evaluation (the PRD's own warning)
 
-`docs/btunnel-develop.md` already records that **4:1 XOR only recovers exactly
+`docs/subnetra-develop.md` already records that **4:1 XOR only recovers exactly
 one loss per 5-packet group and is useless against bursty loss** — which is the
 loss pattern that actually matters. This RFC does **not** propose shipping naïve
 4:1 XOR. Options, in increasing order of capability/cost:

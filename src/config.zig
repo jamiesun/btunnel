@@ -26,7 +26,7 @@ pub const Psk = [32]u8;
 
 /// Deployment role for the simplified config (issue #21). `manual` (the default)
 /// preserves the original low-level behavior: the policy tree starts empty and
-/// the operator installs rules at runtime via `ptctl`. `hub`/`spoke` make the
+/// the operator installs rules at runtime via `subnetra`. `hub`/`spoke` make the
 /// daemon AUTO-DERIVE the initial policy from the peer/route declarations so no
 /// hand-written forwarding rules are needed. The peer registry, key derivation,
 /// and data plane are identical across roles — only the bootstrap policy differs.

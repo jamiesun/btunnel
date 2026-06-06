@@ -15,8 +15,8 @@
 # Usage (from anywhere in the repo):
 #   sudo scripts/release-gate.sh
 #   # or non-interactively in CI, preserving PATH + the gate flag:
-#   sudo --preserve-env=PATH,BTUNNEL_RELEASE_GATE \
-#       env "PATH=$PATH" BTUNNEL_RELEASE_GATE=1 scripts/release-gate.sh
+#   sudo --preserve-env=PATH,SUBNETRA_RELEASE_GATE \
+#       env "PATH=$PATH" SUBNETRA_RELEASE_GATE=1 scripts/release-gate.sh
 #
 # Exit status: 0 == release-certifiable; non-zero == do NOT release.
 set -euo pipefail
@@ -29,5 +29,5 @@ if [ ! -c /dev/net/tun ]; then
   modprobe tun 2>/dev/null || sudo modprobe tun 2>/dev/null || true
 fi
 
-export BTUNNEL_RELEASE_GATE=1
+export SUBNETRA_RELEASE_GATE=1
 exec bash test/integration/run.sh

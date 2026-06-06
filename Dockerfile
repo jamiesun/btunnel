@@ -1,4 +1,4 @@
-# BTunnel runtime / deployment image.
+# Subnetra runtime / deployment image.
 #
 # This is the SHIPPING image, distinct from .devcontainer/Dockerfile (which is a
 # fat dev/test box). The product contract is unchanged: a single static musl
@@ -21,8 +21,8 @@
 # Runtime requirements (the binary is an L3 tunnel daemon):
 #   docker run --rm \
 #     --cap-add=NET_ADMIN --device=/dev/net/tun \
-#     -v "$PWD/config.json:/etc/btunnel/config.json:ro" \
-#     ghcr.io/jamiesun/btunnel:latest
+#     -v "$PWD/config.json:/etc/subnetra/config.json:ro" \
+#     ghcr.io/jamiesun/subnetra:latest
 
 # Runtime base for the final stage. Overridable so arm/v5 (which busybox:musl
 # does not publish) can build independently with RUNTIME_BASE=scratch.
@@ -95,22 +95,22 @@ RUN set -eux; \
 # arm/v5 build. Either base is tiny and the daemon stays fully static.
 FROM ${RUNTIME_BASE}
 
-COPY --from=build /src/zig-out/bin/btunnel /usr/local/bin/btunnel
-COPY --from=build /src/zig-out/bin/ptctl /usr/local/bin/ptctl
-COPY --from=build /src/config.example.json /etc/btunnel/config.example.json
+COPY --from=build /src/zig-out/bin/subnetrad /usr/local/bin/subnetrad
+COPY --from=build /src/zig-out/bin/subnetra /usr/local/bin/subnetra
+COPY --from=build /src/config.example.json /etc/subnetra/config.example.json
 
 # The daemon reads ./config.json from its working directory; mount the real
-# config at /etc/btunnel/config.json. Neither busybox:musl nor scratch ships a
+# config at /etc/subnetra/config.json. Neither busybox:musl nor scratch ships a
 # /var/run, so create it (via WORKDIR) for the default control socket
-# /var/run/btunnel.sock, then settle the working dir at /etc/btunnel.
+# /var/run/subnetra.sock, then settle the working dir at /etc/subnetra.
 WORKDIR /var/run
-WORKDIR /etc/btunnel
+WORKDIR /etc/subnetra
 
-# Liveness for orchestrators (docker/compose/k8s): `ptctl status` exits non-zero
+# Liveness for orchestrators (docker/compose/k8s): `subnetra status` exits non-zero
 # when the control socket is absent or the daemon is unresponsive. Exec form +
 # absolute path so it works on both busybox:musl and the shell-less scratch base.
-# It honors BTUNNEL_SOCK from the container environment.
+# It honors SUBNETRA_SOCK from the container environment.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD ["/usr/local/bin/ptctl", "status"]
+    CMD ["/usr/local/bin/subnetra", "status"]
 
-ENTRYPOINT ["/usr/local/bin/btunnel"]
+ENTRYPOINT ["/usr/local/bin/subnetrad"]
