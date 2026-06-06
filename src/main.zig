@@ -43,7 +43,8 @@ const USAGE =
     \\Options:
     \\  --config PATH         Path to the JSON config (default: ./config.json).
     \\  --check               Validate the config + peer registry and exit.
-    \\  --print-network-plan  Print the host ip(8) commands for this config and exit.
+    \\  --print-network-plan  Print the host bring-up commands for this config and exit.
+    \\                        Linux: ip(8); macOS: ifconfig(8)/route(8). Print-only.
     \\  --path-mtu N          Path MTU used by --print-network-plan (default 1420).
     \\  -h, --help            Show this help and exit.
     \\  -V, --version         Show the version and exit.
@@ -228,7 +229,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
         else
             bt.netplan.DEFAULT_PATH_MTU;
         var plan_buf: [8192]u8 = undefined;
-        const plan = bt.netplan.render(&plan_buf, cfg, envTunName(init.environ), path_mtu) catch |err| {
+        // macOS utun names are kernel-assigned (`utunN`) and not known until the
+        // device opens, so the pre-flight plan prints the `utunN` placeholder;
+        // Linux uses the configured interface name. The command dialect
+        // (`ip …` vs `ifconfig`/`route …`) is selected at comptime to match.
+        const plan_iface: []const u8 = switch (builtin.os.tag) {
+            .macos => "utunN",
+            else => envTunName(init.environ),
+        };
+        const plan = bt.netplan.render(&plan_buf, cfg, plan_iface, path_mtu, bt.netplan.nativeDialect()) catch |err| {
             std.debug.print("network plan render failed: {s}\n", .{@errorName(err)});
             return err;
         };
