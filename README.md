@@ -117,9 +117,10 @@ Artifacts are placed in `zig-out/bin/`: `subnetra` (daemon) and `subnetra` (cont
 ## 📦 Container images & releases
 
 Tagged releases (`vX.Y.Z`) are produced by
-[`.github/workflows/release.yml`](.github/workflows/release.yml) and ship **both**
-static binary tarballs **and** a multi-arch container image, each covering four
-architectures: `amd64`, `arm64`, `armv7`, and `armv5`.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) and ship Linux
+**static binary tarballs** and a **multi-arch container image** — each covering
+`amd64`, `arm64`, `armv7`, and `armv5` — plus native **macOS spoke binaries**
+(`arm64`, `amd64`; see [below](#macos-spoke-binary)).
 
 ```bash
 # Pull the multi-arch image (Docker selects the right arch automatically)
@@ -163,6 +164,31 @@ docker run -d --name subnetra \
 ```
 
 Verify any asset against the release's `SHA256SUMS.txt` before loading.
+
+### macOS spoke binary
+
+Each release also attaches native macOS binaries for running subnetra as a
+**spoke** — `subnetra-<version>-macos-<arch>.tar.gz` for `arm64` (Apple Silicon)
+and `amd64` (Intel). They are Mach-O binaries that link **only `libSystem`** (zero
+third-party deps); per iron law #6 they are *minimal-dynamic* rather than fully
+static, so the Linux ≤ 512 KB size gate does not apply and they are produced
+without the Linux `ldd`-static check. Zig cross-compiles them on the Linux release
+runner, so no Apple toolchain is involved.
+
+```bash
+tar -xzf subnetra-<version>-macos-arm64.tar.gz
+cd subnetra-<version>-macos-arm64
+# Gatekeeper quarantines downloaded binaries — clear it (or build from source):
+xattr -d com.apple.quarantine subnetrad subnetra 2>/dev/null || true
+./subnetra --print-network-plan --config config.json   # preview the host plan
+sudo ./subnetrad --config config.json                  # utun creation needs root
+```
+
+Creating the `utun` interface and applying the `ifconfig`/`route` plan both
+require root. macOS is supported as a **spoke** only (the hub stays
+Linux/RouterOS), and these binaries are **runbook-certified**, not CI-gated —
+follow [`docs/macos-spoke-acceptance.md`](docs/macos-spoke-acceptance.md) to
+qualify a host.
 
 ### Cutting a release
 

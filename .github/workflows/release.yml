@@ -137,9 +137,70 @@ jobs:
           path: dist/*.tar.gz
           retention-days: 1
 
+  macos-binaries:
+    name: Build macOS binaries (${{ matrix.arch }})
+    # Zig cross-compiles a Mach-O that links only libSystem (Apple ships no static
+    # libc), so no macOS runner or SDK is needed — Zig's bundled libc stubs suffice.
+    # Iron law #6 (macOS amendment): minimal-dynamic, libSystem-only, with its own
+    # recorded size baseline; the static/ldd gate stays Linux-only.
+    needs: guard
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-macos
+          - arch: amd64
+            target: x86_64-macos
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Cross-build macOS binaries (ReleaseSmall)
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          zig build -Dtarget="${{ matrix.target }}" -Doptimize=ReleaseSmall
+          for bin in subnetrad subnetra; do
+            path="zig-out/bin/${bin}"
+            # Sanity: a Mach-O for this arch, not a stray host build.
+            if ! file "$path" | grep -q "Mach-O"; then
+              echo "ERROR: ${path} is not a Mach-O binary" >&2; file "$path"; exit 1
+            fi
+            # Iron law #6 (macOS): no static/budget gate — record the size baseline.
+            # Zero third-party deps (iron law #1) ⇒ libSystem-only, verified by the
+            # acceptance runbook's `otool -L` on a real Mac.
+            echo "${bin} (macos-${{ matrix.arch }}): $(stat -c%s "$path") bytes"
+          done
+          stage="subnetra-${version}-macos-${{ matrix.arch }}"
+          mkdir -p "dist/$stage"
+          cp zig-out/bin/subnetrad zig-out/bin/subnetra "dist/$stage/"
+          cp config.example.json README.md README.zh-CN.md LICENSE "dist/$stage/"
+          tar -C dist -czf "dist/${stage}.tar.gz" "$stage"
+          rm -rf "dist/$stage"
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: subnetra-macos-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          retention-days: 1
+
   release:
     name: Publish GitHub Release
-    needs: [binaries, image, release-gate]
+    needs: [binaries, macos-binaries, image, release-gate]
     runs-on: ubuntu-latest
     steps:
       - name: Download all build artifacts
