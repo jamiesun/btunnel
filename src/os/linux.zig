@@ -87,8 +87,34 @@ pub const TunDevice = struct {
     }
 };
 
-// --- Readiness primitive (epoll) ----------------------------------------------
+/// Read one IP packet from the TUN fd into `buf`, returning the packet slice or
+/// `null` on EAGAIN / EOF / transient error (i.e. "stop draining this tick").
+/// Retries on EINTR. Linux `tun` with `IFF_NO_PI` already delivers a bare L3
+/// packet, so this is a thin pass-through; the macOS backend strips utun's
+/// 4-byte address-family header here so the reactor core stays platform-blind.
+pub fn tunRead(fd: posix.fd_t, buf: []u8) ?[]u8 {
+    while (true) {
+        const rc = sys.read(fd, buf.ptr, buf.len);
+        const e = sys.errno(rc);
+        if (e == .INTR) continue;
+        if (e != .SUCCESS) return null;
+        if (rc == 0) return null;
+        return buf[0..@intCast(rc)];
+    }
+}
 
+/// Write one bare IP packet `pkt` to the TUN fd. Returns true once the kernel
+/// accepts it. Retries on EINTR. Linux writes the packet verbatim; macOS
+/// prepends the 4-byte AF header inside its own backend.
+pub fn tunWrite(fd: posix.fd_t, pkt: []const u8) bool {
+    while (true) {
+        const rc = sys.write(fd, pkt.ptr, pkt.len);
+        if (sys.errno(rc) == .INTR) continue;
+        return sys.errno(rc) == .SUCCESS;
+    }
+}
+
+// --- Readiness primitive (epoll) ----------------------------------------------
 /// Single-threaded epoll readiness source. `.edge` registrations are EPOLLET
 /// (the reactor drains each ready fd to EAGAIN); `.level` registrations are
 /// level-triggered (the control handler processes a bounded number of commands

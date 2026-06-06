@@ -1,45 +1,158 @@
-//! Darwin (macOS) OS backend (issue #75): interface-conformant stubs.
+//! Darwin (macOS) OS backend (issue #76): a real `utun` L3 TUN device plus the
+//! 4-byte address-family framing utun requires, behind the same interface as
+//! `os/linux.zig`. The readiness primitive (`Poller`) is still a stub until the
+//! macOS `poll(2)` loop (#77).
 //!
-//! These expose the same `TunDevice` / `Poller` surface as `os/linux.zig` so the
-//! reactor and `main` compile against the comptime-selected backend with no
-//! runtime OS branch, but every entry point returns `error.Unsupported`. The
-//! real implementations land in their own issues: `utun` TUN device (#76) and
-//! the `poll(2)` readiness loop (#77).
+//! A utun is created not via a `/dev` node but by `connect`-ing a
+//! `PF_SYSTEM` / `SYSPROTO_CONTROL` socket to the kernel control
+//! `com.apple.net.utun_control`. Each frame on the fd is prefixed with a 4-byte
+//! protocol family (big-endian `AF_INET` for v1's IPv4 data plane); `tunRead`
+//! strips it and `tunWrite` prepends it via `writev`, so the reactor core and
+//! its resident rx/tx buffers only ever see a bare IP packet.
 
 const std = @import("std");
 const posix = std.posix;
+const system = std.posix.system;
 const sys = @import("../sys.zig");
 const Trigger = @import("mod.zig").Trigger;
+
+// utun control plane (xnu: bsd/sys/kern_control.h, bsd/sys/sys_domain.h,
+// bsd/net/if_utun.h).
+const PF_SYSTEM: u32 = 32;
+const AF_SYSTEM: u8 = 32;
+const SYSPROTO_CONTROL: u32 = 2;
+const AF_SYS_CONTROL: u16 = 2;
+const UTUN_OPT_IFNAME: u32 = 2;
+const UTUN_CONTROL_NAME = "com.apple.net.utun_control";
+const MAX_KCTL_NAME: usize = 96;
+// _IOWR('N', 3, struct ctl_info); struct ctl_info is 100 bytes.
+const CTLIOCGINFO: u32 = 0xc0644e03;
+
+// utun frames carry a 4-byte protocol family ahead of the IP packet. v1 is
+// IPv4-only, so the family is AF_INET (2) encoded as a big-endian u32.
+const AF_INET_PREFIX = [4]u8{ 0, 0, 0, 2 };
+
+const ctl_info = extern struct {
+    ctl_id: u32 = 0,
+    ctl_name: [MAX_KCTL_NAME]u8 = [_]u8{0} ** MAX_KCTL_NAME,
+};
+
+const sockaddr_ctl = extern struct {
+    sc_len: u8,
+    sc_family: u8,
+    ss_sysaddr: u16,
+    sc_id: u32,
+    sc_unit: u32,
+    sc_reserved: [5]u32 = [_]u32{0} ** 5,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(ctl_info) == 100);
+    std.debug.assert(@sizeOf(sockaddr_ctl) == 32);
+}
 
 // utun interface names ("utunN") fit the BSD IFNAMSIZ of 16.
 pub const IFNAMSIZ: usize = 16;
 
 pub const TunError = error{
     Unsupported,
-    OpenFailed,
+    SocketFailed,
     IoctlFailed,
+    ConnectFailed,
+    GetNameFailed,
+    FcntlFailed,
 } || posix.OpenError;
 
 pub const TunDevice = struct {
     fd: posix.fd_t,
     name: [IFNAMSIZ]u8,
 
-    /// Stub until the macOS `utun` backend (#76): PF_SYSTEM/SYSPROTO_CONTROL
-    /// socket, `UTUN_CONTROL_NAME` ctl_info, 4-byte AF address prefix.
+    /// Create and configure a non-blocking L3 `utun` interface. The kernel
+    /// assigns the next free `utunN` (sc_unit = 0) and the resolved name is read
+    /// back via `UTUN_OPT_IFNAME`. `if_name` is accepted for symmetry with the
+    /// Linux backend but ignored — macOS does not let the caller name a utun.
+    /// Requires root; returns `error.AccessDenied` otherwise so callers can tell
+    /// a privilege gap from a real failure.
     pub fn open(if_name: []const u8) TunError!TunDevice {
         _ = if_name;
-        return TunError.Unsupported;
+
+        const fd = sys.socket(PF_SYSTEM, sys.SOCK.DGRAM, SYSPROTO_CONTROL, false, true) catch
+            return TunError.SocketFailed;
+        errdefer _ = sys.close(fd);
+
+        // Resolve the utun kernel-control id by name.
+        var info = ctl_info{};
+        @memcpy(info.ctl_name[0..UTUN_CONTROL_NAME.len], UTUN_CONTROL_NAME);
+        if (sys.errno(system.ioctl(fd, @as(c_int, @bitCast(CTLIOCGINFO)), &info)) != .SUCCESS)
+            return TunError.IoctlFailed;
+
+        // Attach to the control; sc_unit 0 means "next free utun".
+        const addr = sockaddr_ctl{
+            .sc_len = @sizeOf(sockaddr_ctl),
+            .sc_family = AF_SYSTEM,
+            .ss_sysaddr = AF_SYS_CONTROL,
+            .sc_id = info.ctl_id,
+            .sc_unit = 0,
+        };
+        const crc = system.connect(fd, @ptrCast(&addr), @sizeOf(sockaddr_ctl));
+        switch (sys.errno(crc)) {
+            .SUCCESS => {},
+            .PERM, .ACCES => return TunError.AccessDenied,
+            else => return TunError.ConnectFailed,
+        }
+
+        // Read back the kernel-assigned interface name ("utunN").
+        var name = std.mem.zeroes([IFNAMSIZ]u8);
+        var nlen: sys.socklen_t = @intCast(name.len);
+        if (sys.errno(system.getsockopt(fd, @as(i32, @intCast(SYSPROTO_CONTROL)), UTUN_OPT_IFNAME, &name, &nlen)) != .SUCCESS)
+            return TunError.GetNameFailed;
+
+        sys.setNonblock(fd) catch return TunError.FcntlFailed;
+
+        return .{ .fd = fd, .name = name };
     }
 
+    /// NUL-terminated slice of the resolved interface name.
     pub fn ifname(self: *const TunDevice) []const u8 {
         const end = std.mem.indexOfScalar(u8, &self.name, 0) orelse self.name.len;
         return self.name[0..end];
     }
 
     pub fn close(self: *TunDevice) void {
-        _ = self;
+        _ = sys.close(self.fd);
     }
 };
+
+/// Read one IP packet from the utun fd, stripping the 4-byte AF header so the
+/// reactor sees a bare L3 packet. Returns null on EAGAIN / EOF / a runt frame /
+/// transient error ("stop draining this tick"). Retries on EINTR.
+pub fn tunRead(fd: posix.fd_t, buf: []u8) ?[]u8 {
+    while (true) {
+        const rc = sys.read(fd, buf.ptr, buf.len);
+        const e = sys.errno(rc);
+        if (e == .INTR) continue;
+        if (e != .SUCCESS) return null;
+        const n: usize = @intCast(rc);
+        if (n <= AF_INET_PREFIX.len) return null; // header-only / runt: nothing to forward
+        return buf[AF_INET_PREFIX.len..n];
+    }
+}
+
+/// Write one bare IP packet to the utun fd, prepending the 4-byte AF header via
+/// `writev` so the reactor's tx buffer stays a bare packet (no prepend copy).
+/// Returns true once the kernel accepts the frame. Retries on EINTR.
+pub fn tunWrite(fd: posix.fd_t, pkt: []const u8) bool {
+    var af = AF_INET_PREFIX;
+    var iov = [2]posix.iovec_const{
+        .{ .base = &af, .len = af.len },
+        .{ .base = pkt.ptr, .len = pkt.len },
+    };
+    while (true) {
+        const rc = system.writev(fd, &iov, iov.len);
+        if (sys.errno(rc) == .INTR) continue;
+        return sys.errno(rc) == .SUCCESS;
+    }
+}
 
 /// Stub until the macOS `poll(2)` readiness loop (#77). macOS `poll` is
 /// level-triggered, so `Trigger` collapses to a no-op there.

@@ -7,6 +7,9 @@
 //!
 //!   - `TunDevice`: `open(name) !TunDevice`, `ifname() []const u8`, `close()`,
 //!     with resident `fd` / `name` fields the data plane reads directly.
+//!   - `tunRead(fd, buf) ?[]u8` / `tunWrite(fd, pkt) bool`: per-packet TUN I/O.
+//!     Linux is a verbatim read/write; Darwin strips / prepends the 4-byte utun
+//!     address-family header so the reactor only ever sees a bare IP packet.
 //!   - `Poller`: `init() !Poller`, `add(fd, Trigger) !void`,
 //!     `wait(out: []fd_t) !usize` (block until ≥1 ready, write the ready fds,
 //!     retry on EINTR), `deinit()`. Pumps drain each ready fd to `EAGAIN`.
@@ -32,12 +35,18 @@ pub const backend = switch (builtin.os.tag) {
 pub const TunDevice = backend.TunDevice;
 pub const Poller = backend.Poller;
 
+/// Per-packet TUN I/O, resolved to the native backend at comptime. `tunRead`
+/// returns the bare IP packet (or null to stop draining this tick); `tunWrite`
+/// returns whether the kernel accepted the frame.
+pub const tunRead = backend.tunRead;
+pub const tunWrite = backend.tunWrite;
+
 /// Comptime conformance check: both backends must present the surface the
 /// reactor compiles against, so the data path selects an implementation at
 /// comptime with no runtime OS conditional. Validated against *both* files
 /// (not just the native one) so a stub drift on either platform fails the build.
 fn assertBackend(comptime B: type) void {
-    for ([_][]const u8{ "TunDevice", "Poller" }) |decl| {
+    for ([_][]const u8{ "TunDevice", "Poller", "tunRead", "tunWrite" }) |decl| {
         if (!@hasDecl(B, decl)) @compileError("os backend missing '" ++ decl ++ "'");
     }
     for ([_][]const u8{ "open", "ifname", "close" }) |m| {
