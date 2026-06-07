@@ -1,222 +1,173 @@
 # Subnetra
 
-**纯 Zig 编写、零依赖的三层 UDP 隧道，最终产出一个小于 512KB 的静态单二进制文件。**
+**把你的服务器、站点和设备连接成一张私有的加密网络——只需一个随处可跑的小巧二进制文件，从云主机到 MikroTik 路由器都能部署。**
 
 [![CI](https://github.com/jamiesun/subnetra/actions/workflows/ci.yml/badge.svg)](https://github.com/jamiesun/subnetra/actions/workflows/ci.yml)
 [![Release](https://github.com/jamiesun/subnetra/actions/workflows/release.yml/badge.svg)](https://github.com/jamiesun/subnetra/actions/workflows/release.yml)
 [![Latest release](https://img.shields.io/github/v/release/jamiesun/subnetra?sort=semver)](https://github.com/jamiesun/subnetra/releases/latest)
 [![License: MIT](https://img.shields.io/github/license/jamiesun/subnetra)](LICENSE)
-[![Zig](https://img.shields.io/badge/Zig-0.16.0-f7a41d?logo=zig&logoColor=white)](https://ziglang.org/)
 ![Binary size](https://img.shields.io/badge/binary-%E2%89%A4512KB-44cc11)
-[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5-2b90d9)](https://github.com/jamiesun/subnetra/releases/latest)
+[![Arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64%20%7C%20armv7%20%7C%20armv5%20%7C%20macOS-2b90d9)](https://github.com/jamiesun/subnetra/releases/latest)
 
 [English](README.md) · **简体中文**
 
 <p align="center">
-  <img src="subnetra.png" alt="Subnetra — 三层 UDP 隧道，纯 Zig，静态单二进制：TUN 入口、加密封装、星型中继、策略路由、Spoke 出口" width="100%">
+  <img src="subnetra.png" alt="Subnetra —— 私有三层组网：各 Spoke 把加密流量打到 Hub，由 Hub 按策略路由在彼此之间中继" width="100%">
 </p>
 
-> 用**纯 Zig**（锁定 2026 最新标准库 `std.posix`）编写的虚拟三层（Layer 3）自适应组网工具。
-> 面向通用 Linux 环境（含轻量级容器如 BusyBox / Container），零依赖、零动态分配、强隐蔽。
+## Subnetra 是什么？
 
-Subnetra 在物理专线之上构建虚拟子网，采用**星型拓扑（Hub-and-Spoke）**，通过私有 UDP 隧道
-转发裸 IP 包。它**不依赖任何第三方网络框架**——TUN 网卡、加密、防重放、
-策略引擎全部自研，最终产出一个完全静态链接的单二进制文件。
+Subnetra 把分散在不同地点的机器——分支办公室、数据中心、移动办公的笔记本、家庭实验室、容器、路由器——
+连接成**一张扁平的私有子网**。
 
-## ✨ 特性
+它采用**星型拓扑（Hub-and-Spoke）**：一个可达的 **Hub** 在各个 **Spoke** 之间中继流量，
+于是任意节点都能用一个固定的虚拟 IP 访问其他任意节点——**哪怕大多数节点都藏在 NAT 后面**。
+每个数据包都在普通的 UDP 隧道里**全程加密**传输，而整套东西就是**一个自包含的二进制文件**——
+无需额外安装任何东西，没有内核模块，也没有一堆守护进程。
 
-- **零依赖单二进制**：基于 musl-libc 全静态链接，`ldd` 显示 `not a dynamic executable`，体积 ≤ 512KB。
-- **分层零动态内存分配**：数据面（reactor / crypto）严格零分配，缓冲区启动时锁死在常驻内存。
-- **单线程事件驱动反应堆**：基于 Linux epoll 边缘触发（`EPOLLET`），无锁、无并发竞争。
-- **无状态混淆**：ChaCha20-Poly1305 全加密，密文无固定魔数，认证失败静默 Drop，对探测物理隐形。
-- **传输安全**：每个对端独立的私有预共享密钥（每条 Hub 链路一把，绝非全网共享）+ 每链路方向密钥 + 每次重启的会话 epoch（每个进程生命周期派生全新会话密钥）+ 64-bit 单调递增 nonce（绝不复用）+ 每会话滑动窗口防重放。
-- **无锁 RCU 热更新**：策略树以原子指针交换整体替换，热更新零拷贝、零抖动。
-- **多网段策略引擎**：CIDR 逆序最长前缀匹配，支持 Site-to-Site 路由。
+## 你能用它做什么
 
-## 📦 项目结构
+- 🏢 **打通分支办公室与数据中心**——在一张私有 overlay 上做站点到站点（site-to-site）的整段子网路由。
+- 💻 **给移动办公的笔记本一个固定私有 IP**——它会随你在 Wi-Fi、4G/5G、家庭网络之间漫游而保持不变。
+- 🧪 **访问家庭实验室 / IoT / 容器里的服务**——就像它们和你在同一个局域网里一样。
+- 🛰 **从 NAT 后面对外发布一整段局域网**——例如让 MikroTik 路由器把 `192.168.88.0/24` 暴露给整张网。
+- 📦 **在塞不下重型 VPN 的地方运行**——资源受限的容器、BusyBox、小型 ARM 设备、边缘路由器。
 
-```
-build.zig            双产物构建（subnetra 守护进程 + subnetra 控制工具），静态 musl 交叉编译
-build.zig.zon        包清单
-config.example.json  示例配置（复制为 config.json 使用）
-src/
-  root.zig     core 库，汇聚各模块
-  config.zig   配置解析 + 防呆自检（MTU 区间 / 子网重叠）
-  policy.zig   CIDR 解析 + 最长前缀匹配 + 无锁 RCU ActiveTree
-  crypto.zig   ChaCha20-Poly1305 + 单调 nonce + 滑动窗口防重放
-  reactor.zig  packed 私有报头 + egress 出口分发 + epoll 反应堆
-  tun.zig      TUN 网卡系统驱动
-  uds.zig      控制面 Unix 域套接字 + 指令分词器
-  main.zig     subnetra 守护进程入口
-  subnetra.zig    subnetra 控制工具入口
-tools/               独立辅助工具，绝不打进守护进程二进制（见 tools/README.md）
-  keygen.zig         生成每条链路的 64 位十六进制 PSK（zig build tool:keygen）
-  config-lint.zig    离线校验 config.json，不依赖系统时钟（zig build tool:config-lint）
-  wire-decode.zig    离线只读数据报解码器（zig build tool:wire-decode）
-  doctor.sh          环境预检：/dev/net/tun、CAP_NET_ADMIN、ip、时钟
-docs/
-  subnetra-develop.md  系统需求与架构设计说明书（PRD & Architecture）
-```
+## ✨ 核心亮点
 
-## 🛠 构建
+- **随处可跑，一个文件即装**——单个静态二进制（Linux 下**小于 512KB**），**零外部依赖**。
+  可直接丢进云主机、容器、BusyBox、树莓派以及 **MikroTik RouterOS**。支持
+  `amd64` / `arm64` / `armv7` / `armv5`，外加一个原生 **macOS** Spoke。
+- **默认加密，链路上不可见**——每个包都用 ChaCha20-Poly1305 加密，**每条链路独立密钥**，
+  带**防重放**。没有任何特征字（magic bytes），未通过认证的包会被**静默丢弃**——
+  在端口扫描器看来，这个隧道就像没有任何东西在监听。
+- **一张带策略路由的扁平私有子网**——给每个节点分配一个 overlay IP，按整段子网做站点到站点路由，
+  并由 Hub 做 **Spoke 到 Spoke** 的中继，让 NAT 后的节点也能互相访问。
+- **天生穿透 NAT**——Spoke 通过**内置保活（keepalive）**维持自己的 NAT 映射，
+  Hub 则会在 Spoke 漫游到新地址时**自动重新学习**它的端点——无需外部 ping 脚本，无需手动重连。
+- **路由可热改**——运行时注入或更新转发规则，**零中断**：不重启、不丢包。
+- **为运维而生**——同时提供人类可读**和** JSON 两种状态输出、按原因细分的丢包计数器
+  （告诉你流量*为什么*没通）、每个对端的健康/`online` 标志，以及用于告警的 **Prometheus** 导出器。
+- **简单的声明式配置**——把一个节点声明成 `hub` 或 `spoke`，转发表会自动推导出来。
+  还能给对端起名字，让 `status` 里显示的是 `bj-office-gw`，而不是 `id=2`。
 
-需要 **Zig 0.16.0** 及以上。
+## 🚀 快速上手
+
+最快的方式是用容器镜像（Hub 通常是一台公网云主机）：
 
 ```bash
-# 本机构建（默认 ReleaseSmall；本地开发可加 -Doptimize=Debug）
-zig build
+# 1. 创建配置——一个 Hub，一个或多个 Spoke。
+cp config.example.json config.json
+#    给每条对端链路设置一把唯一的 64 位十六进制密钥：openssl rand -hex 32
 
-# 静态交叉编译
-zig build -Dtarget=x86_64-linux-musl     # amd64
-zig build -Dtarget=aarch64-linux-musl    # arm64
-zig build -Dtarget=arm-linux-musleabihf  # armv7（硬浮点）
-zig build -Dtarget=arm-linux-musleabi    # armv5（软浮点）
-
-# 运行测试
-zig build test
-
-# 运行守护进程
-zig build run
-```
-
-产物位于 `zig-out/bin/`：`subnetra`（守护进程）与 `subnetra`（控制工具）。
-
-> **ARMv5 说明：** ARMv5 没有硬件原子指令（无 `LDREX`/`STREX`），标准库的线程化
-> I/O 脚手架会引用 musl 未提供的旧式 `__sync_*` 内建函数。由于 Subnetra 严格
-> 单线程（铁律 #3），[`src/atomic_shim.zig`](src/atomic_shim.zig) 提供了这些内建
-> 函数的可证明正确的普通（非原子）实现。该 shim 在 comptime 门控，仅对 ARMv6
-> 之前的目标编译进去——其它所有架构都逐字节不受影响。
-
-## 📦 容器镜像与发布
-
-打标签的发布（`vX.Y.Z`）由
-[`.github/workflows/release.yml`](.github/workflows/release.yml) 产出，**同时**提供
-静态二进制 tar 包**和**多架构容器镜像，二者均覆盖四种架构：`amd64`、`arm64`、
-`armv7`、`armv5`。
-
-```bash
-# 拉取多架构镜像（Docker 自动选择对应架构）
-docker pull ghcr.io/jamiesun/subnetra:latest
-
-# 运行守护进程：需要 NET_ADMIN + TUN 设备，并把 config.json 挂载到
-# 其工作目录（/etc/subnetra）。
+# 2. 运行（隧道需要 TUN 设备 + NET_ADMIN）。
 docker run -d --name subnetra \
     --cap-add=NET_ADMIN --device=/dev/net/tun \
     -v "$PWD/config.json":/etc/subnetra/config.json:ro \
     ghcr.io/jamiesun/subnetra:latest
+
+# 3. 查看状态。
+docker exec subnetra subnetra status
 ```
 
-镜像内置 Docker `HEALTHCHECK`（`subnetra status`），因此 `docker ps`／Compose／
-Kubernetes 会在守护进程开始对外提供控制套接字后标记为 `healthy`，停止响应时标记为
-`unhealthy`。
+更喜欢裸二进制？从[**最新发布**](https://github.com/jamiesun/subnetra/releases/latest)
+下载对应架构的静态构建，放一个 `config.json` 在旁边，运行 `./subnetrad` 即可。
+完整的「一个 Hub + 两个 Spoke」生产部署演练见
+[**部署指南**](docs/deployment.md)。
 
-amd64、arm64 与 arm/v7 镜像基于 `busybox:musl` 构建，包含两个静态二进制、
-`config.example.json`，以及一个极小的 BusyBox shell 和核心工具，方便在容器内
-排障；守护进程本身完全静态、不依赖基础镜像。由于没有任何 musl 版 BusyBox 发布
-`linux/arm/v5`，arm/v5 镜像单独基于 `scratch` 独立构建（仍为静态 musl，但不带
-调试 shell），并合并进同一个 `:latest`/`:version` manifest。构建阶段使用锁定到
-`$BUILDPLATFORM` 的 Zig 交叉编译，因此无需 QEMU 模拟。运行时镜像见
-[`Dockerfile`](Dockerfile)，开发/测试工具链见
-[`.devcontainer/Dockerfile`](.devcontainer/Dockerfile)。
+## ⚙️ 配置速览
 
-### 离线 / 内网隔离安装
+设置一个 `role`，Subnetra 就会为你推导路由表。一个对外暴露自己 overlay IP、
+其余流量都走 Hub 的家庭/办公 **Spoke**，只需要：
 
-无法访问镜像仓库的设备，可使用每个 GitHub Release 附带的分架构
-`docker load` 镜像包（`subnetra-image-<版本>-<架构>.tar.gz`）：
+```json
+{
+  "role": "spoke",
+  "virtual_subnet": "10.0.0.0/24",
+  "local_id": 2,
+  "local_tun_ip": "10.0.0.2/24",
+  "local_routes": ["10.0.0.2/32"],
+  "peers": [
+    { "id": 1, "name": "cloud-hub", "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 位十六进制…" }
+  ]
+}
+```
+
+与之配对的 **Hub** 只需列出它的各个 Spoke——每个对端都会变成通往该节点的一条路由：
+
+```json
+{
+  "role": "hub",
+  "virtual_subnet": "10.0.0.0/24",
+  "local_id": 1,
+  "peers": [
+    { "id": 2, "name": "bj-office-gw", "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "…64 位十六进制…" },
+    { "id": 3, "name": "alice-laptop", "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32", "psk": "…64 位十六进制…" }
+  ]
+}
+```
+
+每条对端链路都使用**各自**的私有预共享密钥（用 `openssl rand -hex 32` 生成）；
+多条链路共用一把密钥会被拒绝。Spoke 会自动开启 NAT 保活。
+所有字段详见 [`config.example.json`](config.example.json) 和
+[部署指南](docs/deployment.md)，可用 `subnetrad --check` 离线校验配置。
+
+## 📡 运维与可观测
+
+`subnetra status` 把那些「设计上静默丢弃」的包变成可计数的信号，
+让你能判断流量*为什么*通或不通：
+
+```text
+subnetra v0.5.1 [running]
+mode=raw_direct local_id=1 udp_port=51820 tun=snr0 peers=2
+peers:
+  id=2 name=bj-office-gw endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
+  id=3 name=alice-laptop endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
+traffic: tun_rx / udp_tx / udp_rx / tun_tx / relay / keepalive …
+drops:   unknown_peer / auth_or_invalid / spoof / no_route …
+```
+
+- `subnetra status --json` 把同样的数据输出为一个稳定、带版本号的 JSON 对象——
+  其中包含每个对端的 `last_seen_age_seconds` 和 `online` 标志——便于监控与自动化
+  （永远不会序列化任何密钥）。
+- 一个开箱即用的 **Prometheus** [textfile 导出器](deploy/subnetra-textfile-exporter.sh)
+  能把它变成可抓取的指标与告警。
+
+完整的状态字段、丢包分类和告警示例见[部署指南 §6–§7](docs/deployment.md)。
+
+## 🔌 安装方式
+
+| 目标 | 方法 |
+|---|---|
+| **容器**（amd64 / arm64 / armv7 / armv5） | `docker pull ghcr.io/jamiesun/subnetra:latest`——内置 `HEALTHCHECK`，编排系统能直接报告 `healthy`/`unhealthy`。 |
+| **静态二进制** | 从 [Releases](https://github.com/jamiesun/subnetra/releases/latest) 下载 `subnetra-<version>-<arch>.tar.gz`——无任何运行时依赖。 |
+| **离线 / 内网隔离** | 加载每个 release 附带的、可 `docker load` 的镜像 tar 包；用 `SHA256SUMS.txt` 校验。 |
+| **macOS Spoke** | `subnetra-<version>-macos-arm64.tar.gz`（Apple Silicon）/ `…-amd64`（Intel）——已通过 runbook 验收，见 [`docs/macos-spoke-acceptance.md`](docs/macos-spoke-acceptance.md)。 |
+| **MikroTik RouterOS** | [`deploy/routeros/`](deploy/routeros/) 提供脚本化的容器启停——见 [`docs/routeros-container.md`](docs/routeros-container.md)。 |
+| **systemd / launchd** | [`deploy/`](deploy/) 下有可直接改用的 unit 文件和 hub/spoke 配置。 |
+
+## 📚 文档与资源
+
+- 📘 [**部署指南**](docs/deployment.md)——「一个 Hub + 两个 Spoke」生产演练：密钥管理、主机网络、升级、HA/故障切换、密钥轮换、监控。
+- 📐 [**线路协议规范**](docs/PROTOCOL.md)——规范化的 v1 链路协议（用于互操作与审阅）。
+- 🍏 [**macOS Spoke runbook**](docs/macos-spoke-acceptance.md) · 🛰 [**RouterOS 容器指南**](docs/routeros-container.md)
+- 🏗 [**设计与架构**](docs/subnetra-develop.md)——产品需求与系统设计。
+- 📦 [**发布页**](https://github.com/jamiesun/subnetra/releases/latest) · 🐳 [**容器镜像**](https://github.com/jamiesun/subnetra/pkgs/container/subnetra) · ⚙️ [**示例配置**](config.example.json)
+
+## 🛠 从源码构建
+
+只需要 [Zig](https://ziglang.org/) 0.16.0 工具链——别无他求。
 
 ```bash
-# 把对应架构的 tar 包拷贝到目标设备，然后：
-docker load < subnetra-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/subnetra:v0.1.0
-docker run -d --name subnetra \
-    --cap-add=NET_ADMIN --device=/dev/net/tun \
-    -v "$PWD/config.json":/etc/subnetra/config.json:ro \
-    ghcr.io/jamiesun/subnetra:v0.1.0
+zig build                                   # 本机构建
+zig build -Dtarget=aarch64-linux-musl       # 静态交叉编译（也支持 x86_64 / arm-*）
+zig build test                              # 运行测试套件
 ```
 
-加载前请用 Release 中的 `SHA256SUMS.txt` 校验文件完整性。
-
-### 发布流程
-
-版本号单一来源于 [`build.zig.zon`](build.zig.zon) 的 `.version`，在构建期注入
-守护进程横幅。发布 `vX.Y.Z`：把 `.version` 升到 `X.Y.Z`，合并到 `main`，再推送
-对应的 `vX.Y.Z` 标签。若标签与 `build.zig.zon` 不一致，发布工作流会拒绝发布。
-
-## 🧪 本地集成测试（开发容器）
-
-系统调用密集的数据通路（TUN 设备、epoll 反应堆、AF_UNIX 控制套接字）只能在
-Linux 上运行，因此在 [`.devcontainer/`](.devcontainer/) 下提供了一个可复现的
-Linux 容器。它**仅用于开发/测试**——最终交付物依然是单个零三方依赖的静态
-musl 二进制。
-
-可在支持开发容器的编辑器中直接打开该目录，或以无界面方式运行预检脚本：
-
-```bash
-# 构建 Linux 工具链镜像（Debian-slim + 锁定版 Zig 0.16.0）
-docker build -t subnetra-dev -f .devcontainer/Dockerfile .
-
-# 在容器内运行集成/预检脚本
-docker run --rm --privileged --device=/dev/net/tun \
-    -v "$PWD":/workspace subnetra-dev test/integration/run.sh
-```
-
-[`test/integration/run.sh`](test/integration/run.sh) 会在容器原生架构上构建
-二进制，强制校验静态链接与 ≤ 512KB 约束，冒烟运行守护进程（`subnetrad --check`），
-交叉编译另一个 musl 架构，运行单元测试，最后运行**多点 + 中继端到端测试**：
-在网络命名空间中搭建 3 节点 Hub-and-Spoke 星型拓扑（一个 Hub 中继 + 两个
-Spoke），断言端到端投递 spoke-A → Hub（中继）→ spoke-B、链路加密（明文标记
-不会泄漏到底层）、负载下 RCU 策略热更新不阻塞数据面、丢弃计数器的可观测性真实
-（未路由的 overlay 包会让 `tun: no_route` 自增）、底层丢包（netem）下的韧性与完整
-恢复，以及端点漫游 / NAT 重映射（Hub 在 spoke 迁移到新底层地址后无需握手或重启即可
-重新学习）。该测试需要 `--privileged` + `--device=/dev/net/tun`。
-
-## 🚀 使用
-
-```bash
-# v1 强制每个对端链路都要有私有非零 PSK（铁律 #5，issue #13）。
-cp config.example.json config.json
-# 然后把每个 peers[].psk 设为 32 字节随机数（64 个十六进制字符），例如：
-#   openssl rand -hex 32
-# 每条链路必须用各自不同的密钥（多条链路共用一把会被 DuplicatePsk 拒绝）。
-# 已不再有全网共享的顶层 "psk"；仍携带它的旧配置会被拒绝（InvalidPsk）。
-# 没有合法的每对端 PSK，守护进程将拒绝启动（配置自检：InvalidPsk）。
-
-# 启动守护进程（从工作目录读取 config.json）
-./zig-out/bin/subnetrad
-
-# 动态注入策略（通过 UDS 热更新，无需重启）
-./subnetra policy add --src 192.168.1.0/24 --dst 192.168.2.0/24 --action forward --target 3
-./subnetra policy show
-./subnetra save
-```
-
-配置示例见 [`config.example.json`](config.example.json)。
-
-## 📊 开发进度
-
-当前框架层、纯算法层与系统调用数据通路（TUN、epoll 反应堆、AF_UNIX 控制面、
-守护进程主循环）均已落地，并在开发容器中完成端到端验证。
-
-| 任务 | 模块 | 状态 |
-|---|---|---|
-| 1 编译配置 | `build.zig` | ✅ 完成（musl 静态、ReleaseSmall、双产物） |
-| 2 配置自检 | `config.zig` | ✅ 完成（std.json 解析 + 私有每对端十六进制 PSK + CIDR；边界熔断） |
-| 3 策略匹配 | `policy.zig` | ✅ 完成（CIDR / 最长前缀 / RCU） |
-| 4 系统驱动 | `os/linux.zig` | ✅ 完成（TUNSETIFF ioctl，非阻塞 L3 fd；经 `os/mod.zig` 的 comptime 平台后端，macOS `utun` 桩在 `os/darwin.zig`） |
-| 5 密码学管道 | `crypto.zig` | ✅ 完成（AEAD / 每链路密钥 / 会话 epoch / 防重放） |
-| 6 核心反应堆 | `reactor.zig`、`peer.zig`、`os/linux.zig` | ✅ 完成（epoll ET 主循环置于 `os.Poller` 之后；多对端注册表 + 每链路独立密钥 + 每次重启的会话 epoch；封包转发、解封防重放、源端过滤、内层源地址绑定、Hub 中继） |
-| 7 控制面 UDS | `uds.zig` | ✅ 完成（分词器 + AF_UNIX 数据报监听；原子 RCU 策略热替换，双缓冲） |
-| 8 控制工具 | `subnetra.zig` | ✅ 完成（UDS 投递；`policy add` 即发即弃，`policy show`/`save` 读取守护进程回包；守护进程未运行时非零退出） |
-| 9 守护进程主循环 + e2e | `main.zig`、`test/integration/run.sh` | ✅ 完成（接线 TUN + UDP + UDS + 反应堆；落地多点 + 中继网络命名空间端到端测试） |
-
-> **当前可验证**：`zig build test` 全绿（Linux 开发容器内 48/48；macOS 宿主
-> 37 通过 + 11 个仅 Linux 用例跳过），可产出 < 512KB 静态二进制。
-> Linux 开发容器（[`.devcontainer/`](.devcontainer/)）提供集成/预检脚本
-> （[`test/integration/run.sh`](test/integration/run.sh)），在两个 musl 目标上
-> 强制校验静态链接与体积约束，**并运行一套真实的多点 + 中继端到端隧道测试**
-> （网络命名空间中的 3 节点 Hub-and-Spoke 星型）：真实投递 spoke-A → Hub（中继）
-> → spoke-B、链路加密、以及负载下的 RCU 策略热更新。
-
-详细架构、内存模型与验收清单见 [`docs/subnetra-develop.md`](docs/subnetra-develop.md)。
+产物输出在 `zig-out/bin/`（`subnetrad` 守护进程 + `subnetra` 控制工具）。
+Linux 开发容器与集成/基准测试脚本位于 [`.devcontainer/`](.devcontainer/) 和
+[`test/integration/`](test/integration/)；发布流程是修改
+[`build.zig.zon`](build.zig.zon) 里的 `.version` 并推送对应的 `vX.Y.Z` 标签。
 
 ## 📄 许可证
 
@@ -224,5 +175,5 @@ cp config.example.json config.json
 
 ---
 
-> 🔁 本文件是 [`README.md`](README.md) 的中文镜像。
-> **两者必须保持同步：修改任意一方时，需在同一次改动中更新另一方。**
+> 🔁 本文档的英文版位于 [`README.md`](README.md)。
+> **两者必须保持同步：修改其中之一时，请在同一次改动里更新另一个。**
