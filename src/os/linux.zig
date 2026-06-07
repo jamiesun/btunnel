@@ -145,15 +145,23 @@ pub const Poller = struct {
         if (sys.errno(rc) != .SUCCESS) return error.EpollCtlFailed;
     }
 
-    /// Block until at least one fd is ready, write the ready fds into `out`, and
-    /// return the count (bounded by `out.len`). Retries internally on EINTR.
-    pub fn wait(self: *Poller, out: []sys.fd_t) !usize {
+    /// Block until at least one fd is ready (or `timeout_ms` elapses), write the
+    /// ready fds into `out`, and return the count (bounded by `out.len`). A
+    /// negative `timeout_ms` blocks forever; `0` polls without blocking; otherwise
+    /// it caps the wait so the reactor can fire a due keepalive (issue #96). On a
+    /// finite deadline EINTR returns 0 (a spurious wake; the caller recomputes the
+    /// deadline and its clock-gated keepalive self-corrects); an infinite wait
+    /// retries on EINTR as before.
+    pub fn wait(self: *Poller, out: []sys.fd_t, timeout_ms: i32) !usize {
         var events: [16]linux.epoll_event = undefined;
         const cap = @min(out.len, events.len);
         while (true) {
-            const nrc = linux.epoll_wait(self.epfd, &events, @intCast(cap), -1);
+            const nrc = linux.epoll_wait(self.epfd, &events, @intCast(cap), timeout_ms);
             const e = sys.errno(nrc);
-            if (e == .INTR) continue;
+            if (e == .INTR) {
+                if (timeout_ms < 0) continue;
+                return 0;
+            }
             if (e != .SUCCESS) return error.EpollWaitFailed;
             const n: usize = @intCast(nrc);
             var i: usize = 0;

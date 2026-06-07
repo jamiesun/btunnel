@@ -73,7 +73,11 @@ a hard failure regardless of how "clean" the result looks.
    v1, and not in v2. Reliability state (a future ARQ/FEC layer) may live in an
    independent arena but must never become a handshake; any future transport mode
    is chosen by **static per-link config** (the reserved
-   `negotiation_version`/`flags` fields), never negotiated on the wire. Two
+   `negotiation_version`/`flags` fields), never negotiated on the wire. (`flags`
+   bit 0 = `KEEPALIVE`, issue #96, is a one-way, **never-acknowledged** spoke→hub
+   NAT-pinhole datagram gated by the static `keepalive_secs` config — it is **not**
+   a handshake and does not weaken this law; bits 1–7 stay reserved for static
+   mode selection.) Two
    consequences are accepted **by design, not deferred**: (a) an on-path attacker
    may replay a captured datagram of a not-yet-observed epoch to *transiently*
    relocate a peer's endpoint — it self-heals on the peer's next genuine packet
@@ -89,8 +93,9 @@ a hard failure regardless of how "clean" the result looks.
 - **v2 (roadmap, interface only):** `kcp_arq` and `fec_xor` — in-house
   reliability modes, **selected by static per-link config, never an on-wire
   handshake** (see iron law #8). In v1 you **only reserve** the `egress` branch
-  and the header `negotiation_version`/`flags` fields — you do **not** implement
-  these. v2 branches return `error.NotImplemented`. **There is no handshake on
+  and the header `negotiation_version`/`flags` fields (except `flags` bit 0
+  `KEEPALIVE`, issue #96, which v1 **does** implement as a one-way NAT keepalive) —
+  you do **not** implement these. v2 branches return `error.NotImplemented`. **There is no handshake on
   the roadmap**; the symmetric fixes for issue #42 and clock-backward that a
   handshake would have enabled are intentionally *not* pursued (iron law #8).
 

@@ -242,7 +242,9 @@ straight at the cause: `unknown_peer` (header `key_id` matches no configured
 peer), `auth_or_invalid` (PSK/epoch/wire mismatch), `spoof` (inner source outside
 `allowed_src`), or `no_route` (no matching policy). The `endpoint_learned`
 counter rises whenever an authenticated peer is observed at a new UDP endpoint
-(roaming/NAT remap — see issue #34). PSKs are never printed.
+(roaming/NAT remap — see issue #34). The `keepalive rx`/`tx` line counts the
+built-in NAT keepalives (§7): `tx` rises on a spoke that emits them, `rx` on the
+hub that receives them. PSKs are never printed.
 
 **Upgrade / rollback:** install the new binary and restart; the on-wire format is
 versioned and the data path is stateless across restarts (a fresh session epoch
@@ -281,6 +283,30 @@ sudo systemctl restart subnetrad
 - If a spoke's NAT mapping changes, the Hub re-learns the spoke's new endpoint
   from its next authenticated datagram (issue #34), so replies follow it
   automatically. Keep the **Hub** endpoint stable; spokes always initiate.
+
+### NAT keepalive (built-in)
+
+A NAT/stateful-firewall mapping for an **idle** spoke eventually times out (often
+~30 s for UDP), after which the Hub can no longer reach that spoke until it sends
+again — inbound relays to an idle spoke silently blackhole. To prevent this,
+`role=spoke` nodes run a **built-in keepalive** (issue #96): every
+`keepalive_secs` the spoke emits one tiny authenticated datagram to its Hub,
+holding the pinhole open and keeping the Hub's learned endpoint (issue #34) fresh.
+
+- It is **on by default** for `role=spoke` (default `keepalive_secs = 20`, under
+  the typical NAT timeout). `role=hub`/`role=manual` default to `0` (disabled).
+- Set `keepalive_secs` explicitly to tune the interval, or to `0` to disable it
+  (e.g. a spoke that is not behind NAT, or one that always has host traffic):
+
+  ```json
+  { "role": "spoke", "local_id": 2, "keepalive_secs": 20, "peers": [ … ] }
+  ```
+
+- It is allocation-free and adds no thread or external process: one ~36-byte
+  datagram per interval, driven by the reactor's own poll timeout. Confirm it on
+  the spoke with `subnetra status` (the `keepalive tx` counter rises) and on the
+  Hub (`keepalive rx` rises). This **replaces** the external pinger/`netwatch`
+  sidecars that earlier deployments used purely to hold the pinhole open.
 
 ### Hub on a dynamic IP (DDNS)
 

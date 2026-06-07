@@ -138,7 +138,7 @@ A Subnetra UDP payload is:
 | Offset | Size | Field      | Encoding   | v1 value / meaning                                   |
 |-------:|-----:|------------|------------|------------------------------------------------------|
 | 0      | 1    | `version`  | u8         | **MUST be `1`**                                      |
-| 1      | 1    | `flags`    | u8         | **MUST be `0`** in v1 (reserved)                    |
+| 1      | 1    | `flags`    | u8         | bit 0 = `KEEPALIVE` (§3.3); bits 1–7 reserved, **MUST be `0`** |
 | 2      | 2    | `key_id`   | u16 **LE** | sender's mesh id — the receiver's peer selector (§5) |
 | 4      | 8    | `epoch`    | u64 **LE** | sender boot epoch (§2.3); never `0`                 |
 | 12     | 8    | `seq`      | u64 **LE** | per-session monotonic sequence number / nonce basis |
@@ -164,6 +164,20 @@ nonce(seq), aad = "", plaintext = inner_ip_packet)`.
 The inner plaintext is a complete IPv4 packet. The ciphertext has the **same
 length** as the plaintext; the tag adds a fixed 16 bytes.
 
+### 3.3 Keepalive (`flags` bit 0)
+
+A datagram with `flags` bit 0 (`KEEPALIVE = 0x01`) set is a one-way spoke→hub
+keepalive (issue #96), not a tunnelled packet. It is sealed exactly like a data
+datagram (§3.2) but over an **empty** inner plaintext, so its body is just the
+16-byte tag and the total wire length is `20 + 16 = 36` bytes. It rides the same
+monotonic `seq` + epoch + anti-replay machinery as data; it is **not** a handshake
+and is **never** acknowledged. Its only purpose is to hold a NATed spoke's UDP
+pinhole open and refresh the hub's learned endpoint (§5 step 6a) when no host
+traffic would otherwise flow. The `KEEPALIVE` bit is a **backward-compatible**
+addition under `wire_version = 1`: a sender that never emits keepalives is
+unaffected, and a receiver that predates this bit simply drops keepalives (its
+strict `flags == 0` check) without any effect on data delivery.
+
 ---
 
 ## 4. Sender behaviour (egress)
@@ -182,6 +196,11 @@ A sender **MUST** treat the `(session_key, nonce)` uniqueness invariant as
 absolute. On any event that could reset the counter (e.g. process restart) it
 **MUST** also obtain a fresh `epoch` (and therefore a fresh `session_key`).
 
+A NATed spoke **MAY** additionally emit a **keepalive** (§3.3) to its hub on an
+idle timer: identical steps, but with `flags = KEEPALIVE` and an **empty**
+plaintext `P = ""`. The keepalive consumes a `seq` from the same counter like any
+datagram, so the uniqueness invariant above applies unchanged.
+
 ---
 
 ## 5. Receiver behaviour (ingress)
@@ -197,7 +216,8 @@ On a received UDP datagram from source endpoint `S`:
 2. **Header validation** — drop silently if **any** of:
    - `len(datagram) < 20`;
    - `version != 1`;
-   - `flags != 0`;
+   - any reserved `flags` bit is set (i.e. `flags & ~KEEPALIVE != 0`; bit 0
+     `KEEPALIVE` is permitted, all other bits **MUST** be `0`);
    - `epoch == 0`.
 3. **Epoch ordering (forward-only).** Let `cur` be the highest epoch already
    accepted on this link (`0` if none).
@@ -214,6 +234,14 @@ On a received UDP datagram from source endpoint `S`:
    `cur = epoch`, cache its key, and **reset** the anti-replay window.
 6. **Anti-replay.** Apply the 64-entry sliding window (§6) to `seq`. If the
    sequence is a replay or older than the window, **drop silently**.
+6a. **Keepalive short-circuit (§3.3).** If `flags & KEEPALIVE != 0`, the datagram
+   has fully authenticated (steps 4–6) and is genuinely `P`. The receiver records
+   `S` as `P`'s current endpoint (the endpoint-learning of step 8) and refreshes
+   `P`'s last-seen time, then **stops**: a keepalive carries no inner packet, so
+   the inner-source check (step 7) and routing (step 9) are skipped and nothing is
+   delivered to the TUN. An **unauthenticated** keepalive never reaches this step —
+   it was already dropped at step 4 — so the `flags` bit being outside the AEAD
+   grants an attacker no endpoint-move or delivery power they did not already have.
 7. **Inner source check.** The decrypted IPv4 packet's **source address MUST**
    fall within `P`'s `allowed_src` prefix. Otherwise **drop silently** (defeats
    inner-source spoofing by an authenticated peer).
@@ -270,10 +298,10 @@ The window is **reset** whenever a strictly newer epoch is adopted (§5.5).
 
 ## 7. Stealth / failure handling
 
-On **any** rejection — unknown `key_id`, malformed header, non-zero `flags`,
-stale/zero epoch, authentication failure, replay, or inner-source violation —
-the endpoint **MUST silently drop** the datagram. It **MUST NOT** emit a TCP
-RST, an ICMP error, or any other observable response. The ciphertext **MUST
+On **any** rejection — unknown `key_id`, malformed header, an unknown reserved
+`flags` bit, stale/zero epoch, authentication failure, replay, or inner-source
+violation — the endpoint **MUST silently drop** the datagram. It **MUST NOT** emit
+a TCP RST, an ICMP error, or any other observable response. The ciphertext **MUST
 NOT** contain any fixed magic number. These rules make Subnetra
 indistinguishable from background noise to an external prober.
 
@@ -299,11 +327,15 @@ byte underlay path the largest safe inner MTU is `1500 - 64 = 1436`; operators
 - This document specifies **`wire_version = 1`**. A v1 receiver **MUST** drop any
   datagram whose `version` byte is not `1` (there is no in-band negotiation in
   v1).
-- The `flags` byte is **reserved for future static per-link mode selection**
-  (there is **no** on-wire handshake or in-band negotiation — a deliberate design
-  constraint) and **MUST be zero** in v1, on both send and receive. Header bytes
-  [2..4] carry the `key_id` selector (§3.1) — in v1 this is the sender's mesh id;
-  it is **not** a free negotiation field.
+- The `flags` byte carries `KEEPALIVE` (bit 0, §3.3); bits 1–7 remain **reserved
+  for future static per-link mode selection** (there is **no** on-wire handshake
+  or in-band negotiation — a deliberate design constraint) and **MUST be zero** in
+  v1, on both send and receive. Adding `KEEPALIVE` did **not** bump `wire_version`
+  because it is backward compatible: it only widens the set of datagrams a v1
+  receiver accepts (an empty-bodied, flagged keepalive that an older receiver
+  simply drops), and never changes how a `flags == 0` data datagram is emitted or
+  decided. Header bytes [2..4] carry the `key_id` selector (§3.1) — in v1 this is
+  the sender's mesh id; it is **not** a free negotiation field.
 - Two egress modes are reserved for v2 and are **not** part of the v1 wire
   contract: `kcp_arq` (in-house ARQ, MTU 1428) and `fec_xor` (forward error
   correction). A v1 implementation does not implement them.

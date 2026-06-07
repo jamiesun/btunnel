@@ -65,6 +65,14 @@ pub const HEADER_LEN = @divExact(@bitSizeOf(WireHeader), 8);
 /// On-wire protocol version for v1.
 pub const WIRE_VERSION: u8 = 1;
 
+/// `WireHeader.flags` bit 0 (issue #96): this datagram is a one-way spoke→hub
+/// keepalive, not a tunnelled packet. Its sealed body carries NO inner IP packet
+/// (zero-length plaintext). The hub authenticates it like any datagram, uses it
+/// only to keep the NAT pinhole open and refresh the learned endpoint, then drops
+/// it before any inner-IPv4 parsing or routing. Every other flag bit stays
+/// reserved (must be zero); a datagram setting one is dropped by `decodeIngress`.
+pub const FLAG_KEEPALIVE: u8 = 0b0000_0001;
+
 /// Egress flow-control mode. New modes add a branch here and in `egress`.
 pub const EgressMode = enum {
     raw_direct, // v1: skip retransmission, MTU 1452
@@ -114,10 +122,26 @@ pub fn egress(mode: EgressMode, pkt: []const u8) EgressError!void {
 /// epoch-bound session key, and `seq` is drawn from the per-session monotonic
 /// counter (never reused with the same key).
 pub fn encodeEgress(tx: *crypto.TxSession, key_id: u16, ip_pkt: []const u8, out: []u8) usize {
+    return encodeFramed(tx, key_id, 0, ip_pkt, out);
+}
+
+/// Seal a one-way keepalive (issue #96): the same header + seal path as a data
+/// packet, but with the `KEEPALIVE` flag set and an EMPTY inner payload. Returns
+/// the total wire length (`HEADER_LEN + crypto.TAG_LEN`). The sealed empty body
+/// still authenticates and rides the monotonic nonce + replay window exactly like
+/// a data packet, so it is not a handshake and needs no reply (iron law #8).
+pub fn encodeKeepalive(tx: *crypto.TxSession, key_id: u16, out: []u8) usize {
+    return encodeFramed(tx, key_id, FLAG_KEEPALIVE, &.{}, out);
+}
+
+/// Shared header serialization + seal for `encodeEgress` (flags 0) and
+/// `encodeKeepalive` (flags `KEEPALIVE`, empty body). Allocation-free: writes
+/// straight into `out`.
+fn encodeFramed(tx: *crypto.TxSession, key_id: u16, flags: u8, ip_pkt: []const u8, out: []u8) usize {
     std.debug.assert(out.len >= HEADER_LEN + ip_pkt.len + crypto.TAG_LEN);
     const seq = tx.counter.next();
     out[0] = WIRE_VERSION;
-    out[1] = 0; // flags
+    out[1] = flags;
     std.mem.writeInt(u16, out[2..][0..2], key_id, .little); // key_id (sender mesh id)
     std.mem.writeInt(u64, out[4..][0..8], tx.epoch, .little);
     std.mem.writeInt(u64, out[12..][0..8], seq, .little);
@@ -156,7 +180,7 @@ pub fn parseKeyId(datagram: []const u8) ?u16 {
 pub fn decodeIngress(rx: *crypto.RxSession, datagram: []const u8, out: []u8) ?usize {
     if (datagram.len < HEADER_LEN) return null;
     if (datagram[0] != WIRE_VERSION) return null;
-    if (datagram[1] != 0) return null; // flags reserved in v1
+    if (datagram[1] & ~FLAG_KEEPALIVE != 0) return null; // only the KEEPALIVE flag (bit 0) is defined; other bits reserved
     const pkt_epoch = std.mem.readInt(u64, datagram[4..][0..8], .little);
     if (pkt_epoch == 0) return null; // zero is the "no session" sentinel, never valid on the wire
     const seq = std.mem.readInt(u64, datagram[12..][0..8], .little);
@@ -227,6 +251,17 @@ pub const Reactor = struct {
     /// about observability; set by `main` so `subnetra status` can read them. Plain
     /// increments are safe under the single-threaded reactor (no atomics).
     counters: ?*stats.Counters = null,
+    /// Spoke→hub keepalive (issue #96). `keepalive_ns == 0` disables it (the
+    /// default, and the only setting for hub/manual roles); a NATed spoke sets a
+    /// non-zero interval so it emits a tiny authenticated keepalive to its single
+    /// hub peer, holding the NAT pinhole open and the hub's learned endpoint fresh
+    /// with NO external sidecar. Wired by `main` for `role=spoke` only.
+    keepalive_ns: u64 = 0,
+    /// The hub peer id keepalives are sent to (the spoke's single hub). Only read
+    /// when `keepalive_ns > 0`.
+    keepalive_peer_id: u32 = 0,
+    /// Monotonic-clock deadline (ns) of the next keepalive, armed in `run()`.
+    keepalive_due_ns: u64 = 0,
     rx: [BUF_LEN]u8 = undefined,
     tx: [BUF_LEN]u8 = undefined,
     /// Third resident buffer for hub relay: an inbound datagram decoded into
@@ -269,9 +304,21 @@ pub const Reactor = struct {
         // of commands per tick, and the poller re-notifies while datagrams remain.
         if (self.control) |c| try poller.add(c.fd, .level);
 
+        // Arm the first keepalive (issue #96). When disabled (keepalive_ns == 0)
+        // the poll blocks forever as before — zero timer overhead on the hub.
+        if (self.keepalive_ns != 0) self.keepalive_due_ns = monoNs() + self.keepalive_ns;
+
         var ready: [16]sys.fd_t = undefined;
         while (true) {
-            const n = try poller.wait(&ready);
+            // Emit a due keepalive, then derive the poll timeout from the next
+            // deadline. Driven purely by the poll timeout in this single loop —
+            // no threads, no timerfd, no second OS branch (issue #96).
+            const now = monoNs();
+            if (self.keepalive_ns != 0 and now >= self.keepalive_due_ns) {
+                self.sendKeepalive();
+                self.keepalive_due_ns = now + self.keepalive_ns;
+            }
+            const n = try poller.wait(&ready, self.keepaliveTimeoutMs(now));
             var i: usize = 0;
             while (i < n) : (i += 1) {
                 const fd = ready[i];
@@ -284,6 +331,28 @@ pub const Reactor = struct {
                 }
             }
         }
+    }
+
+    /// Milliseconds the poll should block before the next keepalive is due, given
+    /// the current monotonic `now_ns`; `-1` (block forever) when keepalive is
+    /// disabled. Pure (takes the clock as an argument) so the schedule is
+    /// unit-testable without sleeping. Rounds UP so the loop never busy-spins on a
+    /// sub-millisecond remainder.
+    fn keepaliveTimeoutMs(self: *const Reactor, now_ns: u64) i32 {
+        if (self.keepalive_ns == 0) return -1;
+        if (now_ns >= self.keepalive_due_ns) return 0;
+        const ms = (self.keepalive_due_ns - now_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
+        return if (ms > std.math.maxInt(i32)) std.math.maxInt(i32) else @intCast(ms);
+    }
+
+    /// Seal and send one keepalive to the configured hub peer (issue #96).
+    /// Best-effort: a vanished hub or a transient send error is counted-or-ignored,
+    /// never fatal — the next interval simply tries again. Reuses the resident `tx`
+    /// buffer (idle between pump dispatches in the single-threaded loop).
+    fn sendKeepalive(self: *Reactor) void {
+        const hub = self.registry.findById(self.keepalive_peer_id) orelse return;
+        const wire_len = encodeKeepalive(&hub.tx, self.localKeyId(), &self.tx);
+        if (self.sendTo(hub.endpoint, self.tx[0..wire_len])) self.cInc("keepalive_tx");
     }
 
     inline fn cInc(self: *Reactor, comptime field: []const u8) void {
@@ -379,6 +448,23 @@ pub const Reactor = struct {
                 self.cInc("drop_udp_auth_or_invalid");
                 continue;
             };
+
+            // Keepalive (issue #96): the datagram has authenticated AND passed the
+            // anti-replay window inside `decodeIngress`, so it is genuinely
+            // `src_peer` and not a replay. A keepalive carries NO inner packet, so
+            // it refreshes the learned endpoint + `last_seen` (the whole point —
+            // keeping a NATed spoke reachable) and is then dropped before any
+            // inner-IPv4 parsing or routing. The flag byte is unauthenticated, but
+            // an attacker can only set it on a datagram that already authenticates
+            // and is not a replay, which grants no endpoint-move or delivery power
+            // they did not already have (see issue #34's residual). An
+            // UNauthenticated keepalive never reaches here — `decodeIngress`
+            // dropped it above, so it changes nothing.
+            if (dgram[1] & FLAG_KEEPALIVE != 0) {
+                self.maybeLearnEndpoint(src_peer, src);
+                self.cInc("keepalive_rx");
+                continue;
+            }
             const pkt = self.tx[0..plen];
 
             // Inner-source binding: the decoded source IP must belong to the
@@ -481,9 +567,12 @@ pub const Reactor = struct {
 
     /// Update a peer's learned UDP endpoint from an authenticated datagram's
     /// source (issue #34). MUST be called only after the datagram has fully
-    /// authenticated and passed the inner-source binding check, so an
-    /// unauthenticated, replayed, or spoofed packet can never move the endpoint.
-    /// The endpoint is runtime state only — it is never written back to config.
+    /// authenticated (decode + anti-replay), so an unauthenticated or replayed
+    /// packet can never move the endpoint. For a routed data packet the caller
+    /// also applies the inner-source binding check first; a keepalive (issue #96)
+    /// carries no inner packet, so its authenticity rests entirely on auth+replay
+    /// and it skips that check. The endpoint is runtime state only — it is never
+    /// written back to config.
     fn maybeLearnEndpoint(self: *Reactor, p: *peer.Peer, src: sys.sockaddr.in) void {
         p.last_seen_wall_ns = wallNs();
         if (p.endpoint.addr != src.addr or p.endpoint.port != src.port) {
@@ -502,6 +591,18 @@ fn wallNs() u64 {
     if (builtin.os.tag != .linux) return 0;
     var ts: sys.timespec = undefined;
     if (sys.errno(sys.clock_gettime(sys.CLOCK.REALTIME, &ts)) != .SUCCESS) return 0;
+    if (ts.sec < 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// Monotonic nanoseconds for keepalive scheduling (issue #96). Unlike `wallNs`
+/// (REALTIME, Linux-only, observability) this MUST work on every platform the
+/// reactor runs on, including macOS spokes, because it drives a real timer; it is
+/// also immune to wall-clock steps. Returns 0 only on an impossible clock failure,
+/// which at worst makes one keepalive fire early.
+fn monoNs() u64 {
+    var ts: sys.timespec = undefined;
+    if (sys.errno(sys.clock_gettime(sys.CLOCK.MONOTONIC, &ts)) != .SUCCESS) return 0;
     if (ts.sec < 0) return 0;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
@@ -560,9 +661,10 @@ test "codec: decodeIngress drops tampered, replayed, and malformed datagrams" {
     badver[0] = 2;
     try std.testing.expect(decodeIngress(&rx, badver[0..wlen], &out) == null);
 
-    // Set reserved flags byte -> drop.
+    // Set a still-reserved flag bit (bit 1) -> drop. Bit 0 is now KEEPALIVE and
+    // is accepted; every other bit remains reserved and must be rejected.
     var badflags = wire;
-    badflags[1] = 1;
+    badflags[1] = 0b0000_0010;
     try std.testing.expect(decodeIngress(&rx, badflags[0..wlen], &out) == null);
 
     // Zero epoch (the "no session" sentinel) -> drop.
@@ -607,6 +709,57 @@ test "codec: session epoch is forward-only (stale dropped, newer resets window)"
 
     // Replay within the live session 2 is still rejected.
     try std.testing.expect(decodeIngress(&rx, w2[0..l2], &out) == null);
+}
+
+test "keepalive: encodeKeepalive seals an empty KEEPALIVE-flagged datagram (issue #96)" {
+    const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
+    const link = crypto.deriveLinkKey(psk, 2, 1);
+    var tx = crypto.TxSession.init(link, TEST_EPOCH);
+    var rx = crypto.RxSession.init(link);
+
+    var wire: [MAX_WIRE]u8 = undefined;
+    const wlen = encodeKeepalive(&tx, 2, &wire);
+    // A keepalive is exactly a header + a tag over an empty body — no inner packet.
+    try std.testing.expectEqual(@as(usize, HEADER_LEN + crypto.TAG_LEN), wlen);
+    try std.testing.expectEqual(WIRE_VERSION, wire[0]);
+    try std.testing.expect(wire[1] & FLAG_KEEPALIVE != 0);
+
+    // It authenticates and decodes to a zero-length plaintext (carries no packet).
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    const plen = decodeIngress(&rx, wire[0..wlen], &out);
+    try std.testing.expectEqual(@as(?usize, 0), plen);
+
+    // Tampering the sealed body still fails authentication like any datagram.
+    var tampered = wire;
+    tampered[HEADER_LEN] ^= 0xFF;
+    var rx2 = crypto.RxSession.init(link);
+    try std.testing.expect(decodeIngress(&rx2, tampered[0..wlen], &out) == null);
+}
+
+test "keepalive: keepaliveTimeoutMs reflects the schedule (issue #96)" {
+    var reg = peer.PeerRegistry.init(1);
+    var tree = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&tree);
+    var r = Reactor.init(-1, -1, null, &active, &reg);
+
+    // Disabled -> block forever.
+    r.keepalive_ns = 0;
+    try std.testing.expectEqual(@as(i32, -1), r.keepaliveTimeoutMs(0));
+    try std.testing.expectEqual(@as(i32, -1), r.keepaliveTimeoutMs(999));
+
+    // Enabled, due in the future -> milliseconds remaining.
+    r.keepalive_ns = 20 * std.time.ns_per_s;
+    r.keepalive_due_ns = 1000 * std.time.ns_per_ms; // due at t=1000ms
+    try std.testing.expectEqual(@as(i32, 1000), r.keepaliveTimeoutMs(0));
+    try std.testing.expectEqual(@as(i32, 500), r.keepaliveTimeoutMs(500 * std.time.ns_per_ms));
+
+    // Due now / overdue -> 0 (fire immediately, never negative).
+    try std.testing.expectEqual(@as(i32, 0), r.keepaliveTimeoutMs(1000 * std.time.ns_per_ms));
+    try std.testing.expectEqual(@as(i32, 0), r.keepaliveTimeoutMs(5000 * std.time.ns_per_ms));
+
+    // A sub-millisecond remainder rounds UP so the loop never busy-spins on it.
+    r.keepalive_due_ns = 1; // 1 ns from t=0
+    try std.testing.expectEqual(@as(i32, 1), r.keepaliveTimeoutMs(0));
 }
 
 // ---- Live-socket pump tests (Linux only; skip elsewhere / on permission gaps) ----
@@ -1136,6 +1289,109 @@ test "pump: an authenticated non-IPv4 inner packet is dropped before endpoint le
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_not_ipv4);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
     try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, fakeAddr(9)));
+}
+
+test "keepalive: a spoke emits a sealed KEEPALIVE datagram to its hub with no host traffic (issue #96)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
+
+    const udp_hub = try makeUdpLoopback(); // the hub: receives the keepalive
+    defer _ = sys.close(udp_hub);
+    const udp_spoke = try makeUdpLoopback(); // the spoke's own UDP socket (egress)
+    defer _ = sys.close(udp_spoke);
+
+    const hub_addr = try addrOf(udp_hub);
+
+    // A spoke (local_id=2) whose single hub peer is id=1 at hub_addr.
+    var reg = peer.PeerRegistry.init(2);
+    _ = try reg.add(psk, 1, hub_addr, ANY_SRC, TEST_EPOCH);
+
+    var tree = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&tree);
+    var r = Reactor.init(-1, udp_spoke, null, &active, &reg);
+    var ctr = stats.Counters{};
+    r.counters = &ctr;
+    r.keepalive_ns = 20 * std.time.ns_per_s;
+    r.keepalive_peer_id = 1;
+
+    // Emit one keepalive directly (no TUN/host traffic involved).
+    r.sendKeepalive();
+    try std.testing.expectEqual(@as(u64, 1), ctr.keepalive_tx);
+
+    // The hub receives exactly a header + tag, KEEPALIVE-flagged, and it
+    // authenticates + decodes to a zero-length plaintext (no inner packet).
+    var recv: [MAX_WIRE]u8 = undefined;
+    const rc = sys.read(udp_hub, &recv, recv.len);
+    try std.testing.expect(sys.errno(rc) == .SUCCESS);
+    const got: usize = @intCast(rc);
+    try std.testing.expectEqual(@as(usize, HEADER_LEN + crypto.TAG_LEN), got);
+    try std.testing.expect(recv[1] & FLAG_KEEPALIVE != 0);
+
+    var hub_rx = crypto.RxSession.init(crypto.deriveLinkKey(psk, 2, 1));
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    try std.testing.expectEqual(@as(?usize, 0), decodeIngress(&hub_rx, recv[0..got], &out));
+}
+
+test "keepalive: hub authenticated keepalive refreshes the endpoint and is not injected into the TUN (issue #96)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const psk: crypto.Key = [_]u8{0x55} ** crypto.KEY_LEN;
+
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
+
+    const udp_hub = try makeUdpLoopback(); // hub's UDP socket (reactor udp_fd)
+    defer _ = sys.close(udp_hub);
+    const udp_spoke = try makeUdpLoopback(); // the spoke's ACTUAL (roamed) endpoint
+    defer _ = sys.close(udp_spoke);
+
+    const hub_addr = try addrOf(udp_hub);
+    const spoke_addr = try addrOf(udp_spoke);
+
+    // The hub (local_id=1) has the spoke (id=2) CONFIGURED at a stale endpoint;
+    // the spoke really transmits from udp_spoke.
+    var reg = peer.PeerRegistry.init(1);
+    _ = try reg.add(psk, 2, fakeAddr(9), try policy.parseCidr("10.0.0.2/32"), TEST_EPOCH);
+    try std.testing.expect(!sameEndpoint(reg.findById(2).?.endpoint, spoke_addr));
+
+    var tree = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&tree);
+    var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
+    var ctr = stats.Counters{};
+    r.counters = &ctr;
+
+    var spoke_tx = crypto.TxSession.init(crypto.deriveLinkKey(psk, 2, 1), TEST_EPOCH);
+    var wire: [MAX_WIRE]u8 = undefined;
+    var buf: [MAX_PLAINTEXT]u8 = undefined;
+
+    // The idle spoke sends one keepalive from its roamed endpoint.
+    const wl = encodeKeepalive(&spoke_tx, 2, &wire);
+    _ = sys.sendto(udp_spoke, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
+    r.pumpUdpIngress();
+
+    // It is counted as a keepalive, relearns the endpoint + refreshes last_seen,
+    // and writes NOTHING to the TUN (it carries no inner packet).
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expectEqual(@as(u64, 1), ctr.keepalive_rx);
+    try std.testing.expectEqual(@as(u64, 0), ctr.tun_tx_packets);
+    try std.testing.expectEqual(@as(u64, 1), ctr.udp_endpoint_learned);
+    try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, spoke_addr));
+    try std.testing.expect(reg.findById(2).?.last_seen_wall_ns > 0);
+
+    // A keepalive sealed with the WRONG key fails authentication: it is dropped
+    // before the keepalive branch, so it moves nothing.
+    const bad_psk: crypto.Key = [_]u8{0x66} ** crypto.KEY_LEN;
+    var bad_tx = crypto.TxSession.init(crypto.deriveLinkKey(bad_psk, 2, 1), TEST_EPOCH);
+    const wlb = encodeKeepalive(&bad_tx, 2, &wire);
+    _ = sys.sendto(udp_spoke, &wire, wlb, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
+    r.pumpUdpIngress();
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
+    try std.testing.expectEqual(@as(u64, 1), ctr.keepalive_rx);
+    try std.testing.expectEqual(@as(u64, 1), ctr.udp_endpoint_learned);
+    try std.testing.expect(sameEndpoint(reg.findById(2).?.endpoint, spoke_addr));
 }
 
 fn fuzzIngressDecode(_: void, smith: *std.testing.Smith) anyerror!void {

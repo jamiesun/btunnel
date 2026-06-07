@@ -137,8 +137,8 @@
           "epoch_after": 0
         },
         {
-          "note": "non-zero flags is dropped",
-          "datagram": "01010700000065011710a61701000000000000004b5014337330ada6b7601a7e538bee24cdf045db6592f14d02a4e4ecd1029d016509b7fa",
+          "note": "an unknown reserved flag bit is dropped",
+          "datagram": "01020700000065011710a61701000000000000004b5014337330ada6b7601a7e538bee24cdf045db6592f14d02a4e4ecd1029d016509b7fa",
           "expect": "drop",
           "plaintext": null,
           "epoch_after": 0
@@ -226,6 +226,27 @@
           "expect": "accept",
           "plaintext": "4500001400004000401100000a0000020a000003",
           "epoch_after": 1704067200000010000
+        }
+      ]
+    },
+    {
+      "name": "keepalive-flag-accepted",
+      "link": { "psk": "abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea", "from_id": 8, "to_id": 9 },
+      "init_epoch": 0,
+      "steps": [
+        {
+          "note": "keepalive flag (bit 0) with an empty body is accepted and recovers an empty plaintext",
+          "datagram": "01010800000065011710a61701000000000000000571839a44681babe1fea5af354a2882",
+          "expect": "accept",
+          "plaintext": "",
+          "epoch_after": 1704067200000000000
+        },
+        {
+          "note": "a byte-identical keepalive replay is dropped",
+          "datagram": "01010800000065011710a61701000000000000000571839a44681babe1fea5af354a2882",
+          "expect": "drop",
+          "plaintext": null,
+          "epoch_after": 1704067200000000000
         }
       ]
     }

@@ -7,6 +7,7 @@
   "local_id": 2,
   "local_tun_ip": "10.0.0.2/24",
   "local_routes": ["10.0.0.2/32"],
+  "keepalive_secs": 20,
   "peers": [
     { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
   ]
