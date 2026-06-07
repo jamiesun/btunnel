@@ -30,6 +30,7 @@ concurrency:
 
 env:
   MDBOOK_VERSION: "0.5.3"
+  MDBOOK_MERMAID_VERSION: "0.17.0"
 
 jobs:
   build:
@@ -47,6 +48,16 @@ jobs:
           sudo tar -xzf /tmp/mdbook.tar.gz -C /opt/mdbook
           sudo ln -sf /opt/mdbook/mdbook /usr/local/bin/mdbook
           mdbook --version
+
+      - name: Install mdbook-mermaid ${{ env.MDBOOK_MERMAID_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/badboy/mdbook-mermaid/releases/download/v${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-v${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL "$url" -o /tmp/mdbook-mermaid.tar.gz
+          sudo mkdir -p /opt/mdbook-mermaid
+          sudo tar -xzf /tmp/mdbook-mermaid.tar.gz -C /opt/mdbook-mermaid
+          sudo ln -sf /opt/mdbook-mermaid/mdbook-mermaid /usr/local/bin/mdbook-mermaid
+          mdbook-mermaid --version
 
       - name: Build EN + ZH books
         run: |

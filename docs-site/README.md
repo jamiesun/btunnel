@@ -39,14 +39,23 @@ current path and keep the reader on the same page.
 
 ## Prerequisites
 
-[mdBook](https://rust-lang.github.io/mdBook/guide/installation.html) **0.5.3+**:
+[mdBook](https://rust-lang.github.io/mdBook/guide/installation.html) **0.5.3+**
+and the [mdbook-mermaid](https://github.com/badboy/mdbook-mermaid) preprocessor
+**0.17.0+** (the architecture diagrams are mermaid flowcharts):
 
 ```bash
 # macOS
 brew install mdbook
 # or, any platform with Rust
 cargo install mdbook --version 0.5.3
+
+# mermaid preprocessor (not in brew — install via cargo or a release binary)
+cargo install mdbook-mermaid --version 0.17.0
 ```
+
+`mdbook-mermaid` must be on your `PATH`; each book's `book.toml` references it as
+`command = "mdbook-mermaid"`. The `mermaid.min.js` / `mermaid-init.js` assets are
+already committed next to each `book.toml`, so you only need the binary to build.
 
 ## Preview locally
 
