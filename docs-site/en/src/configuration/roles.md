@@ -15,9 +15,57 @@ runtime.
 
 ## `manual` (default)
 
-Keeps the original behavior: the initial policy is empty and you inject every rule
-yourself over the control socket. Existing configs that predate roles are
-unchanged.
+`manual` is the original, explicit mode and the default. The daemon derives **no**
+policy at boot — the forwarding table starts **empty** and you install every rule
+yourself over the control socket. Configs that predate roles keep working unchanged.
+
+**What `manual` changes vs. a derived role:**
+
+- **No derived policy.** You build the table with `subnetra policy add`.
+- **No role-specific `--check`.** `subnetrad --check` still runs the universal sanity
+  checks (MTU range, 16-bit ids, host-subnet overlap), but it does **not** apply the
+  `hub`/`spoke` structural rules (per-peer `allowed_src`, exactly-one-hub, a local
+  target, no `0.0.0.0/0` local route). A malformed forwarding intent is yours to catch.
+- **Keepalive defaults to `0`.** If a `manual` node sits behind NAT, set
+  `keepalive_secs` yourself (a `spoke` does this for you).
+
+**What `manual` does _not_ change — security is identical.** Role only chooses the
+*bootstrap* policy; it never touches the data plane. Per-link encryption, session-epoch
+ordering, anti-replay, and — crucially — the **per-peer `allowed_src` inner-source
+check** all run exactly the same. Policy match is destination-only (longest-prefix);
+each peer's `allowed_src` independently binds which inner source addresses that peer
+may assert. A hand-built `manual` table therefore cannot be tricked into accepting a
+spoofed inner source — you give up the *derived convenience table* and the
+*role-specific guardrails*, **not** the cryptographic guarantees.
+
+### When to use `manual`
+
+- Topologies the `hub`/`spoke` shapes can't express in a single node — e.g. a node
+  that is a **spoke upstream and a relay downstream** at the same time (the `hub`/`spoke`
+  roles each validate one posture; `manual` lets one node hold both). This is outside
+  the single-tier model the derived roles validate, so the table — and the upstream
+  hub's `allowed_src` aggregation — is on you.
+- Reproducing a hand-tuned policy table verbatim, or backward compatibility with a
+  pre-role config.
+
+### Building the table by hand
+
+Rules are destination-matched longest-prefix; `src` is permissive (`0.0.0.0/0`).
+`--target 0` delivers to the local TUN, any other target relays to that peer id:
+
+```bash
+export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
+# Deliver this node's own overlay address locally.
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.9/32  --action forward --target 0
+# Relay a downstream prefix to peer 5; send everything else up to the hub (peer 1).
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.32/27 --action forward --target 5
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/24  --action forward --target 1
+sudo -E subnetra policy show      # verify ordering
+sudo -E subnetra save             # persist across restarts
+```
+
+Each peer must still carry the right `allowed_src` for the inner sources it is allowed
+to assert — that binding is enforced regardless of these rules.
 
 ## `spoke`
 

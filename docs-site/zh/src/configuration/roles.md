@@ -13,8 +13,50 @@
 
 ## `manual`（默认）
 
-保持原有行为：初始策略为空，你通过控制套接字自行注入每条规则。早于角色特性的既有配置
-不受影响。
+`manual` 是原始的显式模式，也是默认值。守护进程在启动时**不推导任何**策略——转发表从
+**空**开始，你通过控制套接字自行安装每一条规则。早于角色特性的既有配置照常工作、不受影响。
+
+**`manual` 相对推导角色改变了什么：**
+
+- **不推导策略。** 你用 `subnetra policy add` 自行构建转发表。
+- **没有角色专属的 `--check`。** `subnetrad --check` 仍会跑通用合理性检查（MTU 范围、
+  16 位 id、与主机子网重叠），但**不会**施加 `hub`/`spoke` 的结构性规则（每对端的
+  `allowed_src`、恰好一个 Hub、一个本地目标、无 `0.0.0.0/0` 本地路由）。配错的转发意图
+  要你自己发现。
+- **保活默认为 `0`。** 若一个 `manual` 节点位于 NAT 之后，请自行设置 `keepalive_secs`
+  （`spoke` 会替你处理）。
+
+**`manual` _没有_ 改变什么——安全性完全一致。** 角色只选择**启动期**策略，绝不触及数据面。
+每链路加密、会话 epoch 排序、抗重放，以及——关键的——**每对端 `allowed_src` 内层源校验**
+全都照旧运行。策略仅按目的地匹配（最长前缀）；每个对端的 `allowed_src` 独立地约束该对端
+可声称的内层源地址。因此手工构建的 `manual` 表**无法**被诱骗去接受伪造的内层源——你放弃的
+是*推导出来的便捷表*与*角色专属护栏*，**而非**密码学保证。
+
+### 何时使用 `manual`
+
+- `hub`/`spoke` 形态在单个节点上无法表达的拓扑——例如一个节点同时是**对上的 Spoke、对下的
+  中继**（`hub`/`spoke` 各自只校验一种姿态；`manual` 让一个节点兼具两者）。这超出了推导
+  角色所验证的单层模型，因此转发表——以及上游 Hub 的 `allowed_src` 聚合——由你负责。
+- 逐字复现一张手调的策略表，或与早于角色的配置向后兼容。
+
+### 手工构建转发表
+
+规则按目的地最长前缀匹配；`src` 取宽松值（`0.0.0.0/0`）。`--target 0` 投递到本地 TUN，
+其它任何 target 则中继给该对端 id：
+
+```bash
+export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
+# 把本节点自身的叠加地址本地投递。
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.9/32  --action forward --target 0
+# 把一个下游前缀中继给 peer 5；其余一切上送 Hub（peer 1）。
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.32/27 --action forward --target 5
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/24  --action forward --target 1
+sudo -E subnetra policy show      # 核对顺序
+sudo -E subnetra save             # 跨重启持久化
+```
+
+每个对端仍必须带上正确的 `allowed_src`，以匹配它被允许声称的内层源——该绑定无论这些规则
+如何都会被强制执行。
 
 ## `spoke`
 
