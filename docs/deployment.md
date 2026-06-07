@@ -515,7 +515,67 @@ cur=$(grep -oE '[0-9.]+:[0-9]+' /etc/subnetra/config.json | head -1 | cut -d: -f
 Resolving the name only once at boot would **not** be DDNS — it would miss any
 address change after startup, which is exactly the case this watcher handles.
 
-## 8. Cross-ISP / cross-region traffic shaping (运营商跨区整形)
+## 8. High availability / failover
+
+v1 is **single-hub** hub-and-spoke (`PROTOCOL.md`): a hub loss partitions the mesh.
+The instinctive fix — an automatic in-daemon health-probe that switches paths — is
+**forbidden by design** (iron law #8; the data plane is stateless, handshake-free,
+and **single-path** — see §9, "never an auto-switching path manager"). So HA is
+achieved with **redundant hubs plus a failover decision made outside the daemon**,
+not with a new daemon state machine. The daemon stays single-path; the host /
+network / operator picks which live hub a spoke uses.
+
+**Pattern A — shared hub VIP (network-driven failover).** Run two hub instances
+behind **one** virtual address — a VRRP/`keepalived` VIP on a shared LAN, or an
+anycast prefix across two sites. Every spoke dials that single stable `endpoint`;
+the host/network moves the address to the surviving hub on failure, and the spoke's
+next datagram lands on it with **no spoke reconfiguration** (the endpoint never
+changed). The two hubs must be **indistinguishable** to a spoke: same `local_id`,
+the **same** per-spoke PSKs, and the same relay policy (§5).
+
+> **Epoch caveat (required reading).** A receiver orders sessions **forward-only**
+> by boot epoch (§6, "Time synchronization"). On takeover the surviving hub must not
+> present a **lower** epoch than the one the spokes last accepted, or spokes reject
+> it until their stored epoch is surpassed (the link silently blackholes and
+> `auth_or_invalid` climbs). Keep both hubs disciplined by NTP/`chrony`; the safest
+> shape is **active/standby where the standby is (re)started at takeover** so it
+> boots with a fresh, highest epoch. If you need symmetric/active-active failover
+> without this coupling, use Pattern B.
+
+**Pattern B — static multi-hub, distinct identities (no epoch coupling).** Run two
+fully independent hubs, each with its **own** `local_id` and its **own** per-spoke
+PSKs. Each spoke lists **both** hubs as peers:
+
+```jsonc
+// spoke config — two hub peers; one active next-hop for the overlay, one standby
+"peers": [
+  { "id": 1,  "endpoint": "hub-a.example:51820", "allowed_src": "10.66.0.0/24", "psk": "…A…" },
+  { "id": 11, "endpoint": "hub-b.example:51820", "allowed_src": "10.66.0.0/24", "psk": "…B…" }
+]
+```
+
+Because each hub is a **distinct session** (distinct `key_id`), there is no epoch
+confusion. The single-path data plane will **not** auto-pick between two overlapping
+next-hops, so failover is an **external** decision: an OS route metric over the two
+tunnels, split overlay prefixes per hub, or an operator/script that repoints traffic
+to the standby. (`config-gen` can emit the per-spoke peer entries; keep each link's
+PSK unique per §2.)
+
+**Observe-only health (what drives the switch).** Read each hub's liveness with
+`subnetra status` / `subnetra status --json` (§6) — `last_seen` / `last_seen_age_seconds`
+/ `online` per peer, and a flat `auth_or_invalid` — and feed that into whichever
+external mechanism you chose: a `keepalived` health-check script, an anycast route
+health check, or a cron that repoints a host route. The read is **non-mutating**;
+the daemon makes **no** failover decision itself.
+
+**Non-goal (explicit).** subnetra will **not** add an in-daemon health-probe /
+liveness-driven path-switch / packet-striping state machine. The data plane is
+single-path and handshake-free on purpose (iron law #8; §9); failover policy belongs
+where it has full network context (the host, router, or anycast fabric), not inside
+an allocation-free packet pump. Changing this is a v2 / **RFC amending the iron
+law**, not a feature PR — and is intentionally not on the backlog.
+
+## 9. Cross-ISP / cross-region traffic shaping (运营商跨区整形)
 
 On long, cross-ISP or cross-region links, the dominant cause of jitter and loss is
 **not** that the tunnel is "detected" — it is the underlay: ISP interconnect
@@ -606,9 +666,9 @@ by default.
   Hub closer (item 5), not into the code.
 - Bad at night, fine by day → a congestion window, not a regression.
 
-## 9. Benchmarking a live deployment
+## 10. Benchmarking a live deployment
 
-Section 8 is about *tuning*; this is about *measuring* — getting real RTT and
+Section 9 is about *tuning*; this is about *measuring* — getting real RTT and
 throughput/pps numbers from the deployed overlay and attributing any loss. This is
 **field measurement** over the actual mesh (real NAT/WAN, the hub relay, cross-OS
 spokes); it is deliberately not the single-host, reproducible CI baseline tracked in
@@ -674,7 +734,7 @@ does this automatically on Linux):
 
 A clean run shows the traffic counters climbing and the `drop_*` counters flat. If
 `iperf3` reports loss but every `drop_*` is flat **on both ends**, the loss is in the
-**underlay** (Section 8), not in subnetra.
+**underlay** (Section 9), not in subnetra.
 
 > **macOS spokes:** `subnetra status` returns `Unsupported` by design (the control
 > client is Linux-only). Use `deploy/mac-spoke-status.sh` for the spoke's own health,
@@ -685,6 +745,6 @@ A clean run shows the traffic counters climbing and the `drop_*` counters flat. 
 
 Overlay MTU is **1452** (raw_direct); the inner payload must not exceed it. The
 classic signature — small packets fine, large transfers stall — is an MTU/MSS
-problem, not a throughput one (Section 8 item 3; see also #98). Print the safe tunnel
+problem, not a throughput one (Section 9 item 3; see also #98). Print the safe tunnel
 MTU and the MSS-clamp rule with `subnetrad --print-network-plan` before you trust a
 low bulk number.

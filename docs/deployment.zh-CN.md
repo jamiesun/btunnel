@@ -437,7 +437,51 @@ cur=$(grep -oE '[0-9.]+:[0-9]+' /etc/subnetra/config.json | head -1 | cut -d: -f
 只在启动时解析一次主机名**并不是** DDNS——它会漏掉启动之后的任何地址变化，而这正是本监视脚本
 处理的情况。
 
-## 8. 运营商跨区整形（Cross-ISP / cross-region traffic shaping）
+## 8. 高可用 / 故障切换
+
+v1 是**单 hub** 的 hub-and-spoke（见 `PROTOCOL.md`）：hub 一旦失效，mesh 就被切断。
+本能的修法——在守护进程内做自动健康探测并切换路径——是**被设计禁止**的（铁律 #8；数据面是无状态、
+无握手、**单路径**的——见 §9，“永远不做自动切换的 path manager”）。因此高可用要靠**冗余 hub 加一个在
+守护进程之外做出的故障切换决策**来实现，而不是新增守护进程状态机。守护进程保持单路径；由主机／网络／运维
+来决定一个 spoke 使用哪个存活的 hub。
+
+**模式 A —— 共享 hub VIP（网络驱动的切换）。** 在**一个**虚拟地址后面跑两个 hub 实例——共享 LAN 上的
+VRRP/`keepalived` VIP，或跨两个站点的 anycast 前缀。每个 spoke 拨向那个唯一稳定的 `endpoint`；主机／网络
+在故障时把地址迁移到存活的 hub，spoke 下一个数据报就会落到它上面，**无需 spoke 改配置**（端点从未变过）。
+两个 hub 对 spoke 必须**不可区分**：相同的 `local_id`、**相同的**按 spoke PSK、相同的 relay policy（§5）。
+
+> **Epoch 注意事项（必读）。** 接收方按 boot epoch 对 session 做**仅向前**排序（§6，“时间同步”）。切换时
+> 存活的 hub 呈现的 epoch **不能低于** spoke 上次接受的值，否则 spoke 会拒绝它，直到自己存的 epoch 被越过
+> （链路静默黑洞，`auth_or_invalid` 攀升）。用 NTP/`chrony` 约束两个 hub；最安全的形态是**主/备，且备机在
+> 接管时（重）启动**，使其以全新、最高的 epoch 启动。如果你需要对称/双活的切换又不想要这种耦合，用模式 B。
+
+**模式 B —— 静态多 hub、独立身份（无 epoch 耦合）。** 跑两个完全独立的 hub，各有**自己的** `local_id` 和
+**自己的**按 spoke PSK。每个 spoke 把**两个** hub 都列为 peer：
+
+```jsonc
+// spoke 配置 —— 两个 hub peer；overlay 的一个活跃下一跳，一个备用
+"peers": [
+  { "id": 1,  "endpoint": "hub-a.example:51820", "allowed_src": "10.66.0.0/24", "psk": "…A…" },
+  { "id": 11, "endpoint": "hub-b.example:51820", "allowed_src": "10.66.0.0/24", "psk": "…B…" }
+]
+```
+
+由于每个 hub 是**不同的 session**（不同 `key_id`），不存在 epoch 混淆。单路径数据面**不会**在两个重叠的
+下一跳之间自动选择，所以切换是一个**外部**决策：两条隧道上的 OS 路由 metric、按 hub 切分 overlay 前缀，
+或一个把流量重新指向备机的运维/脚本。（`config-gen` 可以生成各 spoke 的 peer 条目；每条链路的 PSK 仍须按
+§2 唯一。）
+
+**只观察的健康检查（驱动切换的依据）。** 用 `subnetra status` / `subnetra status --json`（§6）读取每个 hub
+的存活状态——每个 peer 的 `last_seen` / `last_seen_age_seconds` / `online`，以及保持平稳的 `auth_or_invalid`
+——把它喂给你选定的外部机制：`keepalived` 健康检查脚本、anycast 路由健康检查，或一个重新指向主机路由的
+cron。读取是**非修改性**的；守护进程**自身不做**任何切换决策。
+
+**非目标（明确）。** subnetra **不会**新增守护进程内的健康探测 / 存活驱动的路径切换 / 报文分striping 状态机。
+数据面有意保持单路径、无握手（铁律 #8；§9）；故障切换策略应放在拥有完整网络上下文的地方（主机、路由器或
+anycast fabric），而不是放进一个无分配的报文泵里。改变这一点是 v2 / **修订铁律的 RFC**，不是一个 feature
+PR——也有意不放进 backlog。
+
+## 9. 运营商跨区整形（Cross-ISP / cross-region traffic shaping）
 
 在长距离、跨运营商或跨地域的链路上，抖动和丢包的主要成因**不是**隧道“被识别”，而是 underlay：
 运营商互联拥塞、最后一公里排队、单流速率上限、突发 UDP。Subnetra 刻意是一个
@@ -512,9 +556,9 @@ sudo iptables -t mangle -A POSTROUTING -o eth0 -j DSCP --set-dscp 0
 - 同运营商好、跨运营商坏 → 是**路径**问题，不是协议——把 Hub 挪近（第 5 项），别往代码里改。
 - 晚上坏、白天好 → 是拥塞时段，不是代码突然回归。
 
-## 9. 对生产部署做基准测试（Benchmarking a live deployment）
+## 10. 对生产部署做基准测试（Benchmarking a live deployment）
 
-第 8 节讲的是*调优*，这一节讲的是*测量*——从已部署的 overlay 上取得真实的 RTT 与
+第 9 节讲的是*调优*，这一节讲的是*测量*——从已部署的 overlay 上取得真实的 RTT 与
 吞吐/pps 数字，并定位丢包。这里是对真实 mesh 的**现场测量**（真实 NAT/WAN、hub 中继、
 跨操作系统的 spoke）；它刻意不同于 issue #97 所跟踪的、单机可复现的 CI 基线。用
 `iperf3`（**主机**工具——绝不链接进守护进程，铁律 #1）和 `ping`，然后读守护进程自己的计数器。
@@ -573,7 +617,7 @@ iperf3 -c 10.66.0.1 -u -b 0 -l 64 -t 30  # 64 字节包：小包 pps
 | `relay packets`（位于 `traffic:`） | 正在发生 hub 转发（在 hub 上属预期） |
 
 一次干净的运行：traffic 计数器在涨，而 `drop_*` 计数器保持不动。如果 `iperf3` 报告丢包，
-但**两端**的每个 `drop_*` 都不动，那丢包在 **underlay**（第 8 节），不在 subnetra。
+但**两端**的每个 `drop_*` 都不动，那丢包在 **underlay**（第 9 节），不在 subnetra。
 
 > **macOS spoke：** `subnetra status` 按设计返回 `Unsupported`（控制客户端仅 Linux）。
 > spoke 自身健康用 `deploy/mac-spoke-status.sh`；逐 peer 的 relay/drop/last_seen 计数器到
@@ -582,5 +626,5 @@ iperf3 -c 10.66.0.1 -u -b 0 -l 64 -t 30  # 64 字节包：小包 pps
 ### 结合 MTU 解读结果
 
 overlay MTU 为 **1452**（raw_direct）；内层负载不得超过它。经典特征——小包正常、大块传输卡死——
-是 MTU/MSS 问题，不是吞吐问题（第 8 节第 3 项；另见 #98）。在你相信一个偏低的批量数字之前，
+是 MTU/MSS 问题，不是吞吐问题（第 9 节第 3 项；另见 #98）。在你相信一个偏低的批量数字之前，
 先用 `subnetrad --print-network-plan` 打印安全隧道 MTU 与 MSS-clamp 规则。
