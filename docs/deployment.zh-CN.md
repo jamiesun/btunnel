@@ -239,6 +239,7 @@ subnetra status --json | jq .
   "peers": [
     {
       "id": 2,
+      "name": "bj-office-gw",
       "endpoint": "203.0.113.7:51822",
       "allowed_src": "10.66.0.2/32",
       "last_seen_wall_ns": 1700000095000000000,
@@ -250,6 +251,8 @@ subnetra status --json | jq .
 }
 ```
 
+- `peers[].name`（issue #121）是 `config.json` 里 `peers[].name` 配置的可选人类可读标签——未设置时为空字符串。
+  它**只是元数据**：永远不上线、不参与路由/认证，peer 在线上始终以数字 `id` 标识。用它来给状态行或抓取打标签。
 - `peers[].online` 在该 peer 最近一次已认证报文落在 ~90s 之内时为 `true`——足以容忍几次漏掉的保活（§7）
   而不抖动。用它（或 `last_seen_age_seconds`）做逐 peer 的健康/心跳告警。
 - `counters` 承载文本视图里的**每一个**计数器（流量 + 完整的丢包分类），所以抓取不会漏掉任何字段——

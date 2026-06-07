@@ -267,6 +267,7 @@ subnetra status --json | jq .
   "peers": [
     {
       "id": 2,
+      "name": "bj-office-gw",
       "endpoint": "203.0.113.7:51822",
       "allowed_src": "10.66.0.2/32",
       "last_seen_wall_ns": 1700000095000000000,
@@ -278,6 +279,10 @@ subnetra status --json | jq .
 }
 ```
 
+- `peers[].name` (issue #121) is the optional human label from `config.json`
+  (`peers[].name`) — empty string when unset. It is **metadata only**: it never
+  goes on the wire and never affects routing/auth, so a peer is always identified
+  on the wire by its numeric `id`. Use it to label a scrape or a status line.
 - `peers[].online` is `true` when the peer's last authenticated datagram is within
   ~90 s — long enough to tolerate a few missed keepalives (§7) without flapping.
   Use it (or `last_seen_age_seconds`) for a per-peer health/heartbeat alert.

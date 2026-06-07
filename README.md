@@ -306,11 +306,16 @@ that peer:
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 1,
   "peers": [
-    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" },
-    { "id": 3, "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32", "psk": "…64 hex…" }
+    { "id": 2, "name": "bj-office-gw", "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" },
+    { "id": 3, "name": "alice-laptop", "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32", "psk": "…64 hex…" }
   ]
 }
 ```
+
+Each peer may carry an optional `name` — a short printable-ASCII label (≤48 chars)
+shown in `subnetra status` (human and `--json`) so you can tell spokes apart at a
+glance. It is **metadata only**: peers are always identified on the wire by their
+numeric `id`, never by name.
 
 Validation is strict (`subnetrad --check` enforces it): a `hub` rejects a peer
 with a missing or overlapping `allowed_src`; a `spoke` requires exactly one hub
@@ -357,8 +362,8 @@ silent drops countable so you can tell *why* traffic is not flowing:
 subnetrad v0.1.0 [running]
 mode=raw_direct local_id=1 udp_port=51820 tun=snr0 peers=2
 peers:
-  id=2 endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
-  id=3 endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
+  id=2 name=bj-office-gw endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
+  id=3 name=alice-laptop endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
 traffic:
   tun_rx packets=... bytes=...
   udp_tx packets=... bytes=...

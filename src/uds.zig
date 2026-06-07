@@ -50,7 +50,9 @@ pub const MAX_REPLY = MAX_POLICY_ENTRIES * MAX_RULE_LINE;
 
 /// Stable schema version for `subnetra status --json` (issue #105). Bump on any
 /// breaking change to the JSON shape (a removed/renamed key or a changed type) so
-/// a monitor can pin the contract it parses.
+/// a monitor can pin the contract it parses. Purely ADDITIVE keys (e.g. the
+/// optional `peers[].name` from issue #121) do NOT bump it: a consumer that
+/// ignores unknown keys keeps working unchanged.
 pub const STATUS_SCHEMA_VERSION: u32 = 1;
 
 /// Default freshness window for the per-peer `online` flag in the JSON status
@@ -368,12 +370,25 @@ pub fn formatStatus(
         const a: u32 = std.mem.bigToNative(u32, pr.endpoint.addr);
         const port: u16 = std.mem.bigToNative(u16, pr.endpoint.port);
         const src: u32 = pr.allowed_src.network;
-        W.p(out, &len, "  id={d} endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d} last_seen_wall_ns={d}\n", .{
-            pr.id,
-            (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
-            (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
-            pr.last_seen_wall_ns,
-        });
+        // Optional human label (issue #121): rendered as `name=<...> ` right after
+        // the id when set, otherwise omitted so the line is byte-for-byte as before.
+        // The name is validated to printable ASCII at config parse, so it is safe
+        // to echo straight to the terminal here.
+        if (pr.name_len != 0) {
+            W.p(out, &len, "  id={d} name={s} endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d} last_seen_wall_ns={d}\n", .{
+                pr.id,              pr.nameSlice(),
+                (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
+                (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
+                pr.last_seen_wall_ns,
+            });
+        } else {
+            W.p(out, &len, "  id={d} endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d} last_seen_wall_ns={d}\n", .{
+                pr.id,
+                (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
+                (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
+                pr.last_seen_wall_ns,
+            });
+        }
     }
 
     const c = counters;
@@ -433,6 +448,18 @@ pub fn formatStatusJson(
             const s = std.fmt.bufPrint(buf[off.*..], fmt, args) catch return;
             off.* += s.len;
         }
+        /// Append `s` as the body of a JSON string, escaping the only two
+        /// characters that can appear in a (printable-ASCII, control-free) peer
+        /// name and would otherwise break the JSON: `"` and `\`. The surrounding
+        /// quotes are written by the caller.
+        fn jsonStr(buf: []u8, off: *usize, s: []const u8) void {
+            for (s) |ch| {
+                switch (ch) {
+                    '"', '\\' => p(buf, off, "\\{c}", .{ch}),
+                    else => p(buf, off, "{c}", .{ch}),
+                }
+            }
+        }
     };
 
     W.p(out, &len, "{{\"schema_version\":{d},\"version\":\"{s}\",\"mode\":\"{s}\",\"local_id\":{d},\"listen_port\":{d},\"tun\":\"{s}\",\"peers\":[", .{
@@ -459,8 +486,11 @@ pub fn formatStatusJson(
         const online = seen and age_secs <= freshness_secs;
 
         if (i != 0) W.p(out, &len, ",", .{});
-        W.p(out, &len, "{{\"id\":{d},\"endpoint\":\"{d}.{d}.{d}.{d}:{d}\",\"allowed_src\":\"{d}.{d}.{d}.{d}/{d}\",\"last_seen_wall_ns\":{d},\"last_seen_age_seconds\":", .{
-            pr.id,
+        // `name` (issue #121) is always present for a stable schema — empty string
+        // when unset — and JSON-escaped (it is metadata only, never a secret).
+        W.p(out, &len, "{{\"id\":{d},\"name\":\"", .{pr.id});
+        W.jsonStr(out, &len, pr.nameSlice());
+        W.p(out, &len, "\",\"endpoint\":\"{d}.{d}.{d}.{d}:{d}\",\"allowed_src\":\"{d}.{d}.{d}.{d}/{d}\",\"last_seen_wall_ns\":{d},\"last_seen_age_seconds\":", .{
             (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
             (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
             pr.last_seen_wall_ns,
@@ -761,6 +791,12 @@ test "formatStatus: renders meta, peers, and counters; never prints secrets" {
     const psk: @import("crypto.zig").Key = [_]u8{0xAB} ** 32;
     const ep = try @import("config.zig").parseEndpoint("203.0.113.7:51820");
     _ = try reg.add(psk, 2, ep, try @import("config.zig").parseCidr("10.0.0.2/32"), 1_700_000_000_000_000_000);
+    // A named peer (issue #121): the label appears as `name=...` right after the id.
+    const ep3 = try @import("config.zig").parseEndpoint("203.0.113.8:51820");
+    const p3 = try reg.add(psk, 3, ep3, try @import("config.zig").parseCidr("10.0.0.3/32"), 1_700_000_000_000_000_000);
+    const nm = "bj-office-gw";
+    @memcpy(p3.name[0..nm.len], nm);
+    p3.name_len = nm.len;
 
     var c = stats.Counters{};
     c.tun_rx_packets = 5;
@@ -781,6 +817,9 @@ test "formatStatus: renders meta, peers, and counters; never prints secrets" {
     try std.testing.expect(std.mem.indexOf(u8, s, "subnetra v9.9.9 [running]") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "local_id=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "id=2 endpoint=203.0.113.7:51820 allowed_src=10.0.0.2/32") != null);
+    // The named peer shows `name=` right after the id; the unnamed peer (id=2)
+    // stays id-only, proving an omitted name preserves the pre-#121 line exactly.
+    try std.testing.expect(std.mem.indexOf(u8, s, "id=3 name=bj-office-gw endpoint=203.0.113.8:51820") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "tun_rx packets=5") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "udp_tx packets=0 bytes=1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "spoof=2") != null);
@@ -798,6 +837,11 @@ test "formatStatusJson: valid versioned schema, derived age/online, no secrets (
     const boot: u64 = 1_700_000_000_000_000_000;
     const p2 = try reg.add(psk, 2, ep, try @import("config.zig").parseCidr("10.0.0.2/32"), boot);
     p2.last_seen_wall_ns = 1_700_000_095_000_000_000;
+    // Peer 2 carries a name containing a JSON metacharacter (issue #121) to prove
+    // the emitter escapes it; peer 3 stays nameless (empty-string field).
+    const nm = "edge-\"gw\"";
+    @memcpy(p2.name[0..nm.len], nm);
+    p2.name_len = nm.len;
     _ = try reg.add(psk, 3, ep2, try @import("config.zig").parseCidr("10.0.0.3/32"), boot);
 
     var c = stats.Counters{};
@@ -850,9 +894,13 @@ test "formatStatusJson: valid versioned schema, derived age/online, no secrets (
     try std.testing.expectEqualStrings("10.0.0.2/32", p0.get("allowed_src").?.string);
     try std.testing.expectEqual(@as(i64, 5), p0.get("last_seen_age_seconds").?.integer);
     try std.testing.expect(p0.get("online").?.bool);
+    // The escaped name decodes back to the exact configured label (issue #121).
+    try std.testing.expectEqualStrings("edge-\"gw\"", p0.get("name").?.string);
 
     // Never-seen peer: age is null and the peer is offline.
     const p1 = p_never.?;
+    // An unnamed peer still carries a `name` key (empty string) for schema stability.
+    try std.testing.expectEqualStrings("", p1.get("name").?.string);
     switch (p1.get("last_seen_age_seconds").?) {
         .null => {},
         else => try std.testing.expect(false),

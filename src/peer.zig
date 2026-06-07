@@ -38,6 +38,17 @@ pub const Peer = struct {
     /// Wall-clock ns of the last authenticated datagram from this peer (issue
     /// #34). Observability only (`subnetra status`); never drives protocol logic.
     last_seen_wall_ns: u64 = 0,
+    /// Optional human-readable label (issue #121), copied from config. Resident,
+    /// fixed-capacity, zero-allocation. Observability ONLY (`subnetra status`):
+    /// the data plane and key derivation NEVER read it — peers stay keyed on
+    /// `id`. Empty (`name_len == 0`) means the peer simply renders id-only.
+    name: [config.PEER_NAME_MAX]u8 = [_]u8{0} ** config.PEER_NAME_MAX,
+    name_len: u8 = 0,
+
+    /// The peer's name as a slice (empty when none was configured).
+    pub fn nameSlice(self: *const Peer) []const u8 {
+        return self.name[0..self.name_len];
+    }
 };
 
 pub const RegistryError = error{
@@ -169,7 +180,12 @@ pub const PeerRegistry = struct {
         var i: usize = 0;
         while (i < cfg.peer_count) : (i += 1) {
             const spec = cfg.peers[i];
-            _ = try reg.add(spec.psk, spec.id, spec.endpoint, spec.allowed_src, boot_epoch);
+            const p = try reg.add(spec.psk, spec.id, spec.endpoint, spec.allowed_src, boot_epoch);
+            // The name is pure metadata: copied onto the record AFTER key
+            // derivation and registration, so it can never influence the keys,
+            // the wire key_id, or peer matching (issue #121).
+            @memcpy(p.name[0..spec.name_len], spec.nameSlice());
+            p.name_len = spec.name_len;
         }
         return reg;
     }
@@ -258,6 +274,43 @@ test "registry: fromConfig requires a local_id when peers are present" {
     cfg.local_id = 1;
     const reg = try PeerRegistry.fromConfig(cfg, epoch);
     try std.testing.expectEqual(@as(usize, 1), reg.len);
+}
+
+test "registry: peer name is metadata only — resident, never a key/match input (issue #121)" {
+    const epoch: u64 = 1_700_000_000_000_000_000;
+    const ep = testEndpoint("10.0.0.2:51820");
+    const psk: crypto.Key = [_]u8{0x5a} ** crypto.KEY_LEN;
+    const any = config.Cidr{ .network = 0, .prefix = 0 };
+
+    // Two configs identical EXCEPT for the peer's name.
+    var named = config.Config.default();
+    named.local_id = 1;
+    named.peer_count = 1;
+    named.peers[0] = .{ .id = 2, .endpoint = ep, .allowed_src = any, .psk = psk };
+    const nm = "bj-office-gw";
+    @memcpy(named.peers[0].name[0..nm.len], nm);
+    named.peers[0].name_len = nm.len;
+
+    var anon = config.Config.default();
+    anon.local_id = 1;
+    anon.peer_count = 1;
+    anon.peers[0] = .{ .id = 2, .endpoint = ep, .allowed_src = any, .psk = psk };
+
+    var reg_named = try PeerRegistry.fromConfig(named, epoch);
+    var reg_anon = try PeerRegistry.fromConfig(anon, epoch);
+
+    // The name is resident on the record and equals the configured label.
+    const p_named = reg_named.findById(2).?;
+    try std.testing.expectEqualStrings("bj-office-gw", p_named.nameSlice());
+    // The nameless peer is found by the SAME id lookup — matching keys on id, not name.
+    const p_anon = reg_anon.findById(2).?;
+    try std.testing.expectEqual(@as(u8, 0), p_anon.name_len);
+
+    // CRITICAL (iron law #5): the directional link keys are byte-identical with and
+    // without a name, proving the name never feeds key derivation. If the name ever
+    // leaked into key material these would differ and this test would fail.
+    try std.testing.expectEqualSlices(u8, &p_anon.tx.link_key, &p_named.tx.link_key);
+    try std.testing.expectEqualSlices(u8, &p_anon.rx.link_key, &p_named.rx.link_key);
 }
 
 test "registry: bootEpoch is non-zero and time-ordered" {
