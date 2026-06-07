@@ -31,6 +31,7 @@ zig build tool:wire-decode   # -> zig-out/tools/wire-decode
 zig build tool:key-derive    # -> zig-out/tools/key-derive
 zig build tool:config-gen    # -> zig-out/tools/config-gen
 zig build tool:crypto-bench  # -> zig-out/tools/crypto-bench
+zig build tool:forward-bench # -> zig-out/tools/forward-bench
 zig build tools-test         # run the tools' unit tests (separate from `zig build test`)
 ```
 
@@ -114,6 +115,23 @@ gate. Build with `-Doptimize=ReleaseFast` for representative numbers.
 ```sh
 zig build tool:crypto-bench -Doptimize=ReleaseFast
 zig-out/tools/crypto-bench --iters 200000
+```
+
+### `forward-bench` (issue #101)
+Micro-benchmark the data-plane **forwarding** hot path around the AEAD using the
+live `reactor`/`policy`/`peer` primitives, with no network I/O. Times two
+pipelines — tx (`ipv4Dst` → `PolicyTree.match` → `findById` → `encodeEgress`) and
+rx relay (`parseKeyId` → `findById` → `decodeIngress` → `ipv4Src` →
+`allowed_src.contains` → `ipv4Dst` → `match`) — and prints each against the raw
+`seal`/`open` floor measured in the same run, so the parse+route+lookup
+"forwarding tax" over crypto is visible directly. Complements `crypto-bench`
+(the AEAD floor, #66) and the netns throughput baseline (#97). Not shipped, not a
+test gate. Build with `-Doptimize=ReleaseFast` for representative numbers.
+
+```sh
+zig build tool:forward-bench -Doptimize=ReleaseFast
+zig-out/tools/forward-bench --iters 200000
+zig-out/tools/forward-bench --size 64 --iters 500000   # small-packet (pps-bound) view
 ```
 
 ### `doctor` (issue #61)
