@@ -37,6 +37,11 @@ pub const backend = switch (builtin.os.tag) {
 pub const TunDevice = backend.TunDevice;
 pub const Poller = backend.Poller;
 
+/// Batched UDP datagram I/O (issue #100): `recvmmsg`/`sendmmsg` on Linux, a
+/// single-syscall `recvfrom`/`sendto` loop on macOS, behind one resident,
+/// allocation-free surface. Platform-selected at comptime inside the module.
+pub const UdpBatch = @import("udp.zig").UdpBatch;
+
 /// Per-packet TUN I/O, resolved to the native backend at comptime. `tunRead`
 /// returns the bare IP packet (or null to stop draining this tick); `tunWrite`
 /// returns whether the kernel accepted the frame.
@@ -62,6 +67,11 @@ fn assertBackend(comptime B: type) void {
 test "os backends satisfy the reactor interface (comptime)" {
     comptime assertBackend(@import("linux.zig"));
     comptime assertBackend(@import("darwin.zig"));
+}
+
+test {
+    // Pull in the batched-UDP module's test blocks (issue #100).
+    _ = @import("udp.zig");
 }
 
 test "native Poller reports a readable fd" {
