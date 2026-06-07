@@ -14,21 +14,35 @@ the hub **relays** between them by policy. Together they form a virtual subnet
 (e.g. `10.0.0.0/24`) on top of whatever physical leased line connects them, and
 can route between LANs behind each node (Site-to-Site).
 
-```text
-   LAN A                         Hub (relay)                        LAN B
-192.168.1.0/24                 10.0.0.1 / id 1                  192.168.2.0/24
-     │                               │                                │
- ┌───┴────┐   encrypted UDP     ┌────┴─────┐    encrypted UDP    ┌────┴────┐
- │ Spoke 2 │◀──────────────────▶│   Hub    │◀──────────────────▶│ Spoke 3 │
- │ 10.0.0.2│   underlay link     │ policy + │   underlay link    │10.0.0.3 │
- └─────────┘                     │  relay   │                    └─────────┘
-                                 └──────────┘
+```mermaid
+flowchart LR
+    subgraph SiteA["Site A · LAN 192.168.1.0/24"]
+        S2["Spoke 2<br/>10.0.0.2"]
+    end
+    subgraph HubBox["Hub · relay"]
+        HUB["Hub<br/>10.0.0.1 / id 1<br/>policy + relay"]
+    end
+    subgraph SiteB["Site B · LAN 192.168.2.0/24"]
+        S3["Spoke 3<br/>10.0.0.3"]
+    end
+    S2 <-->|"encrypted UDP underlay"| HUB
+    HUB <-->|"encrypted UDP underlay"| S3
 ```
 
 ## The data path
 
-Every packet crosses the same five stages (the diagram on the
-[Introduction](../introduction.md) summarizes them):
+Every packet crosses the same five stages:
+
+```mermaid
+flowchart TD
+    TUN["1 · TUN ingress<br/>read raw IPv4"] --> POL{"2 · Policy lookup<br/>longest-prefix CIDR"}
+    POL -->|no match| DROP["DROP · counted"]
+    POL -->|FORWARD| SEAL["3 · Header + seal<br/>20-byte header · ChaCha20-Poly1305 + 16-byte tag"]
+    SEAL --> EGR["4 · Egress dispatch<br/>raw_direct over UDP"]
+    EGR -. encrypted UDP underlay .-> RECV["5 · Receive &amp; verify<br/>key_id · epoch · nonce · anti-replay · inner-src"]
+    RECV -->|local| DEL["Deliver to local TUN"]
+    RECV -->|hub relay| RLY["Relay to another spoke<br/>never back to source"]
+```
 
 1. **TUN ingress.** The kernel routes a LAN/overlay packet to the virtual L3
    device; the reactor reads the raw IPv4 packet non-blocking.
