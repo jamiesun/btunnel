@@ -293,6 +293,16 @@ test "render: warns when configured MTU exceeds the path maximum" {
     try std.testing.expect(std.mem.indexOf(u8, plan, "exceeds the recommended max 1436") != null);
 }
 
+test "render: a bare default config emits no MTU warning on a 1500 path (issue #98)" {
+    var cfg = config.Config.default();
+    cfg.peer_count = 1;
+    cfg.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x5a} ** 32 };
+
+    var buf: [4096]u8 = undefined;
+    const plan = try render(&buf, cfg, "snr0", DEFAULT_PATH_MTU, .iproute2);
+    try std.testing.expect(std.mem.indexOf(u8, plan, "WARNING") == null);
+}
+
 test "render: unset local_tun_ip emits a placeholder, /0 allowed_src emits no route" {
     var cfg = config.Config.default();
     cfg.local_tun_mtu = 1400;
