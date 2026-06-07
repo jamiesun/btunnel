@@ -4,8 +4,38 @@ Subnetra ships as a **single static binary**. There is nothing to install
 system-wide and no shared libraries to manage — pick whichever delivery method
 fits your environment.
 
+## Quick install (interactive)
+
+On **Linux or macOS**, the fastest path is the install script. It detects your
+OS and architecture, resolves the **latest** release, verifies the download
+against the release `SHA256SUMS.txt`, and installs both `subnetra` and
+`subnetrad` — pausing for you to confirm before it writes anything:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh | sh
+```
+
+The script is interactive and **only installs the two binaries** — it never
+touches your network, firewall, or services (Subnetra always leaves the host
+plan to you). For an unattended run, accept the defaults with `--yes`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh | sh -s -- --yes
+```
+
+| Flag | Meaning |
+|---|---|
+| `--dir <path>` | Install location (default `/usr/local/bin`). |
+| `--version <vX.Y.Z>` | Pin a specific release instead of the latest. |
+| `--yes` | Skip every prompt (non-interactive). |
+
+Prefer to install by hand, or on a platform the script does not cover? Use the
+[release tarballs](#release-binaries) below, or browse every asset on the
+**[Releases page](https://github.com/jamiesun/subnetra/releases/latest)**.
+
 | Method | Best for | Notes |
 |---|---|---|
+| [Install script](#quick-install-interactive) | One-line Linux / macOS install | Resolves latest, verifies checksums, interactive |
 | [Container image](#container-image) | Linux hosts, RouterOS / BusyBox containers | Multi-arch `amd64 / arm64 / armv7 / armv5` |
 | [Release tarball](#release-binaries) | Bare Linux hosts, offline installs | `docker load`-able image tarballs also provided |
 | [macOS spoke binary](#macos-spoke-binary) | Apple Silicon / Intel Macs (spoke only) | Runbook-certified, not CI-gated |
@@ -42,18 +72,33 @@ See [Containers](../operations/containers.md) for Compose and Kubernetes details
 
 ## Release binaries
 
-Each release (`vX.Y.Z`) attaches **static binary tarballs** for `amd64`, `arm64`,
-`armv7`, and `armv5`. The Linux binaries are fully static against musl-libc — `ldd`
-reports `not a dynamic executable`.
+Browse and download any release from the
+**[Releases page](https://github.com/jamiesun/subnetra/releases/latest)**. Each
+release (`vX.Y.Z`) attaches **static binary tarballs** for `amd64`, `arm64`,
+`armv7`, and `armv5`. The Linux binaries are fully static against musl-libc —
+`ldd` reports `not a dynamic executable`.
+
+Asset names carry the version, so resolve it once, then download, verify, and
+install:
 
 ```bash
-tar -xzf subnetra-<version>-linux-amd64.tar.gz
+ARCH=amd64   # one of: amd64 | arm64 | armv7 | armv5
+VER=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+        https://github.com/jamiesun/subnetra/releases/latest | sed 's#.*/tag/##')
+
+curl -fsSLO "https://github.com/jamiesun/subnetra/releases/download/$VER/subnetra-$VER-linux-$ARCH.tar.gz"
+curl -fsSLO "https://github.com/jamiesun/subnetra/releases/download/$VER/SHA256SUMS.txt"
+sha256sum --ignore-missing -c SHA256SUMS.txt        # verify before installing
+
+tar -xzf "subnetra-$VER-linux-$ARCH.tar.gz"
+cd "subnetra-$VER-linux-$ARCH"
 sudo install -m 0755 subnetrad subnetra /usr/local/bin/
 subnetrad --version
 ```
 
-> Always verify any downloaded asset against the release's `SHA256SUMS.txt`
-> before installing.
+> The `releases/latest/download/<asset>` path always points at the current
+> release, but asset names embed the version — so resolve `VER` as above, or just
+> use the [install script](#quick-install-interactive).
 
 ### Offline / air-gapped install
 
@@ -75,6 +120,9 @@ Each release also attaches native macOS binaries for running Subnetra as a
 **spoke** — `subnetra-<version>-macos-arm64.tar.gz` (Apple Silicon) and
 `-amd64.tar.gz` (Intel). They are Mach-O binaries that link **only `libSystem`**
 (zero third-party deps).
+
+> The [install script](#quick-install-interactive) works on macOS too and clears
+> the Gatekeeper quarantine attribute for you.
 
 ```bash
 tar -xzf subnetra-<version>-macos-arm64.tar.gz

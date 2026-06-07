@@ -3,8 +3,35 @@
 Subnetra 以 **单个静态二进制** 形式交付。无需系统级安装，也没有共享库需要管理——
 按你的环境选择合适的交付方式即可。
 
+## 快速安装（交互式）
+
+在 **Linux 或 macOS** 上，最快的方式是安装脚本。它会自动识别系统与架构、解析
+**最新** 发布、用发布附带的 `SHA256SUMS.txt` 校验下载产物，并安装 `subnetra` 与
+`subnetrad`——在写入任何文件前会先让你确认：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh | sh
+```
+
+脚本是交互式的，并且 **只安装两个二进制**——绝不改动你的网络、防火墙或服务
+（Subnetra 始终把主机网络规划留给你）。如需无人值守安装，用 `--yes` 接受默认值：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh | sh -s -- --yes
+```
+
+| 选项 | 含义 |
+|---|---|
+| `--dir <路径>` | 安装位置（默认 `/usr/local/bin`）。 |
+| `--version <vX.Y.Z>` | 固定到某个发布，而非最新。 |
+| `--yes` | 跳过所有确认（非交互）。 |
+
+想手动安装，或脚本未覆盖的平台？使用下面的 [发布二进制](#发布二进制)，或在
+**[Releases 页面](https://github.com/jamiesun/subnetra/releases/latest)** 浏览全部产物。
+
 | 方式 | 适用于 | 备注 |
 |---|---|---|
+| [安装脚本](#快速安装交互式) | 一行命令安装到 Linux / macOS | 解析最新版、校验、交互确认 |
 | [容器镜像](#容器镜像) | Linux 主机、RouterOS / BusyBox 容器 | 多架构 `amd64 / arm64 / armv7 / armv5` |
 | [发布二进制](#发布二进制) | 裸 Linux 主机、离线安装 | 同时提供可 `docker load` 的镜像 tar 包 |
 | [macOS Spoke 二进制](#macos-spoke-二进制) | Apple Silicon / Intel Mac（仅 Spoke） | 由 Runbook 验收，未纳入 CI 门禁 |
@@ -39,16 +66,30 @@ docker run -d --name subnetra \
 
 ## 发布二进制
 
-每个发布（`vX.Y.Z`）都会附上 `amd64`、`arm64`、`armv7`、`armv5` 的 **静态二进制 tar
-包**。Linux 二进制基于 musl-libc 全静态链接——`ldd` 显示 `not a dynamic executable`。
+可在 **[Releases 页面](https://github.com/jamiesun/subnetra/releases/latest)** 浏览并
+下载任意发布。每个发布（`vX.Y.Z`）都会附上 `amd64`、`arm64`、`armv7`、`armv5` 的
+**静态二进制 tar 包**。Linux 二进制基于 musl-libc 全静态链接——`ldd` 显示
+`not a dynamic executable`。
+
+产物名带版本号，因此先解析一次版本，再下载、校验、安装：
 
 ```bash
-tar -xzf subnetra-<version>-linux-amd64.tar.gz
+ARCH=amd64   # 取值：amd64 | arm64 | armv7 | armv5
+VER=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+        https://github.com/jamiesun/subnetra/releases/latest | sed 's#.*/tag/##')
+
+curl -fsSLO "https://github.com/jamiesun/subnetra/releases/download/$VER/subnetra-$VER-linux-$ARCH.tar.gz"
+curl -fsSLO "https://github.com/jamiesun/subnetra/releases/download/$VER/SHA256SUMS.txt"
+sha256sum --ignore-missing -c SHA256SUMS.txt        # 安装前先校验
+
+tar -xzf "subnetra-$VER-linux-$ARCH.tar.gz"
+cd "subnetra-$VER-linux-$ARCH"
 sudo install -m 0755 subnetrad subnetra /usr/local/bin/
 subnetrad --version
 ```
 
-> 安装前请务必用发布附带的 `SHA256SUMS.txt` 校验下载产物。
+> `releases/latest/download/<asset>` 路径始终指向当前发布，但产物名内嵌版本号——
+> 因此仍需按上面解析 `VER`，或者直接用 [安装脚本](#快速安装交互式)。
 
 ### 离线 / 隔离网络安装
 
@@ -68,6 +109,8 @@ docker run -d --name subnetra \
 每个发布还附带原生 macOS 二进制，用于以 **Spoke** 身份运行 Subnetra——
 `subnetra-<version>-macos-arm64.tar.gz`（Apple Silicon）与 `-amd64.tar.gz`（Intel）。
 它们是 Mach-O 二进制，**仅链接 `libSystem`**（零第三方依赖）。
+
+> [安装脚本](#快速安装交互式) 同样适用于 macOS，并会自动为你清除 Gatekeeper 隔离属性。
 
 ```bash
 tar -xzf subnetra-<version>-macos-arm64.tar.gz
