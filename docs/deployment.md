@@ -387,6 +387,72 @@ upgraded one). Verify with `subnetra status` exactly as in step 3.
 > stateless, handshake-free transport (iron law #8): there is no in-protocol
 > epoch exchange to repair it, so the fix is operational (keep the clock synced).
 
+### Key rotation runbook
+
+Rotate a link PSK on a schedule, or immediately after a suspected compromise. A
+link key lives only in `config.json` and is read **at startup**; there is no
+online rekey command (the control plane is policy-only). Because authentication
+**fails closed**, a naive rotation — change one end and hope — silently drops that
+link's traffic until both ends agree (the `auth_or_invalid` drop counter climbs,
+§6). The procedure below keeps the disruption to a single link and to the few
+seconds between the two restarts.
+
+**What you are changing.** A PSK is *per link* (§2): rotating the Hub↔Spoke A key
+means writing the **same** new value into the Hub's `peers[id=2].psk` **and**
+Spoke A's `peers[id=1].psk`. No endpoints change — the Hub re-learns each spoke's
+endpoint from its next authenticated datagram (issue #34), so there is nothing to
+re-plumb. **Rotate one link at a time** so any mistake can only affect that one
+spoke.
+
+1. **Generate a fresh per-link key** (offline, fails closed if no secure entropy):
+
+   ```bash
+   zig build tool:keygen && zig-out/tools/keygen   # 64-char hex; or: openssl rand -hex 32
+   ```
+
+2. **Record the current key** for rollback (copy the old `psk` value somewhere
+   safe before you overwrite it).
+
+3. **Stage the new key on both ends — do not restart yet.** Edit the Hub's
+   `peers[id=2].psk` and Spoke A's `peers[id=1].psk` to the new value and validate
+   each offline; a typo caught here costs nothing:
+
+   ```bash
+   sudo subnetrad --check --config /etc/subnetra/config.json   # run on Hub and on Spoke A
+   ```
+
+4. **Cut over back-to-back.** Restart the two ends as close together as possible
+   (script it / open two SSH sessions); the rotated link is down only for the skew
+   between the two restarts:
+
+   ```bash
+   sudo systemctl restart subnetrad     # on Spoke A
+   sudo systemctl restart subnetrad     # on the Hub
+   ```
+
+   Restarting the Hub re-reads **every** peer, so the other spokes' links re-auth
+   on their next packet (stateless, sub-second — their keys did not change). Only
+   the rotated link sees a real gap.
+
+5. **Verify** with `subnetra status` (or `--json`, §6) on the Hub: the rotated
+   peer's `last_seen` advances (`last_seen_age_seconds` small / `online: true`) and
+   `udp: auth_or_invalid` **stops climbing**. Confirm with an overlay ping across
+   the link. A still-climbing `auth_or_invalid` with a stale `last_seen` means the
+   two ends disagree — recheck that the new `psk` is byte-identical on both.
+
+6. **Rollback:** restore the saved old key in **both** configs and restart **both**
+   ends (same back-to-back cutover). Because the change is operator-driven static
+   config, rollback is symmetric with step 4.
+
+> **Red line (iron law #8).** Rotation stays operator-driven via static config and
+> a coordinated restart; subnetra will **never** grow an in-protocol key-exchange
+> or handshake to negotiate keys online. The brief per-link window in step 4 is the
+> accepted cost of the stateless, handshake-free transport. A truly make-before-break
+> (zero-window) rotation would require an optional second per-peer key *slot* — the
+> daemon would accept the outgoing-old and incoming-new key during an overlap window
+> so the two ends rotate independently. That enhancement is tracked as the optional
+> path in issue #107 and is **not** part of today's mechanism.
+
 ## 7. Firewall / NAT requirements
 
 - The **Hub** must accept inbound UDP on its `listen_port` (default `51820`) from

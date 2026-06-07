@@ -336,6 +336,57 @@ sudo systemctl restart subnetrad
 > **重启受影响链路的两端**以在各自一侧强制刷新 epoch。这是无状态、无握手传输（铁律 #8）
 > 一个被接受的、永久的取舍：协议内没有 epoch 交换来修复它，因此修复是运维层面的（保持时钟同步）。
 
+### 密钥轮换 runbook
+
+按计划轮换链路 PSK，或在怀疑泄露后立即轮换。链路密钥只存在于 `config.json` 中，且在**启动时**读取；
+没有在线 rekey 命令（控制面只管 policy）。由于认证**fail-closed**，幼稚的轮换——只改一端、碰运气——
+会静默丢弃该链路的流量，直到两端达成一致（`auth_or_invalid` 丢包计数器攀升，见 §6）。下面的流程把影响
+限制在单条链路、以及两次重启之间的几秒内。
+
+**你在改什么。** PSK 是*按链路*的（§2）：轮换 Hub↔Spoke A 的密钥意味着把**同一个**新值写进 Hub 的
+`peers[id=2].psk` **和** Spoke A 的 `peers[id=1].psk`。端点不变——Hub 会从该 spoke 下一个已认证的数据报
+重新学习其端点（issue #34），所以没有需要重新接线的东西。**一次只轮换一条链路**，这样任何失误都只会影响
+那一个 spoke。
+
+1. **生成一个全新的按链路密钥**（离线，无安全熵源时 fail-closed）：
+
+   ```bash
+   zig build tool:keygen && zig-out/tools/keygen   # 64 位十六进制；或：openssl rand -hex 32
+   ```
+
+2. **记录当前密钥**以便回滚（在覆盖前把旧 `psk` 值复制到安全的地方）。
+
+3. **在两端都暂存新密钥——先不要重启。** 把 Hub 的 `peers[id=2].psk` 和 Spoke A 的 `peers[id=1].psk`
+   改成新值，并各自离线校验；在这里抓到的笔误代价为零：
+
+   ```bash
+   sudo subnetrad --check --config /etc/subnetra/config.json   # 在 Hub 和 Spoke A 上各跑一次
+   ```
+
+4. **背靠背切换。** 尽量同时重启两端（写成脚本／开两个 SSH 会话）；被轮换的链路只在两次重启之间的
+   时间差里中断：
+
+   ```bash
+   sudo systemctl restart subnetrad     # 在 Spoke A 上
+   sudo systemctl restart subnetrad     # 在 Hub 上
+   ```
+
+   重启 Hub 会重新读取**每一个** peer，所以其他 spoke 的链路会在它们的下一个报文上重新认证
+   （无状态、亚秒级——它们的密钥没变）。只有被轮换的链路会出现真正的间隙。
+
+5. **验证**：在 Hub 上用 `subnetra status`（或 `--json`，§6）：被轮换 peer 的 `last_seen` 在推进
+   （`last_seen_age_seconds` 很小 / `online: true`），且 `udp: auth_or_invalid` **停止攀升**。再用一次
+   跨链路的 overlay ping 确认。如果 `auth_or_invalid` 仍在攀升且 `last_seen` 陈旧，说明两端不一致——
+   重新检查新 `psk` 在两端是否逐字节相同。
+
+6. **回滚：** 在**两端**配置里恢复保存的旧密钥并**同时重启两端**（同样的背靠背切换）。由于改动是运维
+   驱动的静态配置，回滚与第 4 步对称。
+
+> **红线（铁律 #8）。** 轮换始终由运维通过静态配置 + 协调重启驱动；subnetra **永远不会**长出协议内的
+> 密钥交换或握手来在线协商密钥。第 4 步里短暂的按链路窗口，是无状态、无握手传输被接受的代价。真正
+> make-before-break（零窗口）的轮换需要一个可选的第二个按 peer 密钥*槽*——守护进程在重叠窗口内同时接受
+> 出站-旧 与 入站-新 密钥，使两端独立轮换。该增强作为 issue #107 的可选路径被跟踪，**不属于**当前机制。
+
 ## 7. 防火墙 / NAT 要求
 
 - **Hub** 必须接受来自互联网、到其 `listen_port`（默认 `51820`）的入站 UDP。
