@@ -231,6 +231,15 @@ underlay packet loss (netem) with full recovery, and endpoint roaming / NAT rema
 (the Hub relearns a spoke that moves to a new underlay address, no handshake or
 restart). It needs `--privileged` + `--device=/dev/net/tun`.
 
+For a reproducible **data-plane throughput / PPS baseline** (issue #97), the sibling
+[`test/integration/bench.sh`](test/integration/bench.sh) stands up the same netns star,
+builds the daemon `-Doptimize=ReleaseFast` (measurement only — the shipped binary stays
+ReleaseSmall), saturates the overlay with the in-tree `udp-blast` generator, and reads
+the achieved pps / Gbps / hub-CPU% from each daemon's own counters. It records a baseline
+([`bench-baseline.env`](test/integration/bench-baseline.env)) and also runs in CI via the
+**Benchmark** workflow. See [`docs/deployment.md` §10](docs/deployment.md). It is the
+single-host companion to the live-overlay field tool [`deploy/bench-overlay.sh`](deploy/bench-overlay.sh).
+
 ## 🚀 Usage
 
 ```bash

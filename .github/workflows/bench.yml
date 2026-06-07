@@ -1,0 +1,56 @@
+name: Benchmark
+
+# Data-plane throughput / PPS baseline (issue #97). NOT a required gate — shared
+# runners vary, so this is informational (the baseline is surfaced, never enforced).
+# Runs on demand, and automatically when a `bench/**` branch is pushed (so a perf
+# change can attach reproduced numbers to its PR, e.g. the recvmmsg/sendmmsg work in
+# issue #100). It does NOT run on pushes to `main`.
+on:
+  workflow_dispatch:
+    inputs:
+      secs:
+        description: "Blast seconds per pattern"
+        required: false
+        default: "5"
+  push:
+    branches: ["bench/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.16.0"
+  ZIG_SHA256_X86_64: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+
+jobs:
+  bench:
+    name: Data-plane benchmark (netns, ReleaseFast)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Load tun module
+        run: sudo modprobe tun
+
+      # Root for netns + /dev/net/tun. The benchmark SKIPs (exit 0) if a
+      # prerequisite is missing and never fails on a slow number — only on a real
+      # setup failure — so this job is a stable, informational signal.
+      - name: Run data-plane benchmark
+        env:
+          SUBNETRA_BENCH_SECS: ${{ github.event.inputs.secs || '5' }}
+        run: sudo --preserve-env=PATH,SUBNETRA_BENCH_SECS env "PATH=$PATH" bash test/integration/bench.sh

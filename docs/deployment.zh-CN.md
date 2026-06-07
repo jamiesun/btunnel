@@ -664,13 +664,13 @@ echo fb | sudo tee /sys/class/net/eth0/queues/rx-0/rps_cpus
 全在那一个 reactor 线程上（`reactor.zig`）。所以 Hub 会比 spoke 先吃满**单个 CPU 核**，也是最先撞到每秒包数
 （PPS）天花板的地方。据此选型：单核主频比核数更重要；当一个 Hub 核吃满时，要**横向**扩展（更多 Hub——§9 第 5 项
 的按区域部署，或 §8 的冗余 Hub 模式），而**不是纵向**加线程（守护进程按铁律是单线程的，不会长出线程池）。在选型前，
-用 §10 / issue #97 的基准工具测出你的真实天花板。
+用 §10 的基准工具（*单机可复现基线*，issue #97）测出你的真实天花板。
 
 ## 10. 对生产部署做基准测试（Benchmarking a live deployment）
 
 第 9 节讲的是*调优*，这一节讲的是*测量*——从已部署的 overlay 上取得真实的 RTT 与
 吞吐/pps 数字，并定位丢包。这里是对真实 mesh 的**现场测量**（真实 NAT/WAN、hub 中继、
-跨操作系统的 spoke）；它刻意不同于 issue #97 所跟踪的、单机可复现的 CI 基线。用
+跨操作系统的 spoke）；单机可复现的 CI 基线（issue #97）见本节末尾的*单机可复现基线*。用
 `iperf3`（**主机**工具——绝不链接进守护进程，铁律 #1）和 `ping`，然后读守护进程自己的计数器。
 
 > **被部署的守护进程保持原样。** `subnetrad` 始终以 `-O ReleaseSmall` 发布（铁律 #6）。
@@ -738,3 +738,34 @@ iperf3 -c 10.66.0.1 -u -b 0 -l 64 -t 30  # 64 字节包：小包 pps
 overlay MTU 为 **1452**（raw_direct）；内层负载不得超过它。经典特征——小包正常、大块传输卡死——
 是 MTU/MSS 问题，不是吞吐问题（第 9 节第 3 项；另见 #98）。在你相信一个偏低的批量数字之前，
 先用 `subnetrad --print-network-plan` 打印安全隧道 MTU 与 MSS-clamp 规则。
+
+### 单机可复现基线（issue #97）
+
+上面的现场测量告诉你*你的* mesh 今天能跑多少，但它无法告诉你某次**代码改动**是否动了数据面。
+为此你需要一个单机、可复现的数字。`test/integration/bench.sh` 会把守护进程以
+`-Doptimize=ReleaseFast` 构建（仅用于测量——发布的二进制始终是 ReleaseSmall），在本地网络
+命名空间里搭起 3 节点的 hub-and-spoke 星型拓扑，用内置的 `udp-blast` 生成器打满 overlay，
+再从每个守护进程**自己**的计数器（`subnetra status`）读出达成的包速率/吞吐：
+
+```bash
+# Linux，root（需要 netns + /dev/net/tun）。在仓库根目录：
+sudo test/integration/bench.sh
+SUBNETRA_BENCH_SECS=10 sudo --preserve-env=SUBNETRA_BENCH_SECS test/integration/bench.sh
+```
+
+它测两种模式，并为每种打印 pps、内层有效吞吐（按 snr0 MTU 的 Gbps）以及 **hub 的单核 CPU%**：
+
+| 模式 | 压的是什么 |
+|---|---|
+| `spoke -> hub` | hub 终结流量——每包一次 AEAD `open` |
+| `spoke -> hub -> spoke`（中继） | hub **中继**——每包 `recvfrom`+`sendto` **加** `open`+`seal`；它会最先吃满一个核，所以这是头条天花板，也是 issue #100 的 `recvmmsg`/`sendmmsg` 批处理的目标 |
+
+记录的基线在 `test/integration/bench-baseline.env`；每次运行都会打印与它的差值。它是**信息性**的
+——共享 CI runner 会有波动，所以回归会被呈现，但绝不强制（没有性能门禁，正如 #100 把基线称为
+"先作信息参考"）。同一基准也通过 **Benchmark** 工作流在 CI 跑（`.github/workflows/bench.yml`，
+`workflow_dispatch` 或推送 `bench/**` 分支），把表格发到 job summary，便于一次性能 PR 附上可复现的数字。
+
+> **这里为什么用内置生成器而不是 `iperf3`？** issue #97 明确允许一个小巧的内置 blaster；一个零依赖、
+> 确定性的 `udp-blast`（经 `zig build tool:udp-blast` 构建，绝不随守护进程发布）让基线无需安装主机
+> 工具即可复现。`iperf3` 仍是上面现场测量里更丰富的**主机**工具。两者都遵守铁律 #1——都绝不会被
+> 链接进守护进程。
