@@ -115,11 +115,11 @@ Devices that cannot reach a container registry can use the per-arch
 (`subnetra-image-<version>-<arch>.tar.gz`):
 
 ```bash
-docker load < subnetra-image-v0.1.0-arm64.tar.gz   # -> ghcr.io/jamiesun/subnetra:v0.1.0
+docker load < subnetra-image-<version>-arm64.tar.gz   # -> ghcr.io/jamiesun/subnetra:<version>
 docker run -d --name subnetra \
     --cap-add=NET_ADMIN --device=/dev/net/tun \
     -v "$PWD/config.json":/etc/subnetra/config.json:ro \
-    ghcr.io/jamiesun/subnetra:v0.1.0
+    ghcr.io/jamiesun/subnetra:<version>
 ```
 
 ## macOS spoke binary

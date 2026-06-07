@@ -84,7 +84,7 @@ guides. A full hub + two-spoke production walkthrough lives in
 you can tell *why* traffic is or isn't flowing:
 
 ```text
-subnetra v0.5.1 [running]
+subnetra v0.6.0 [running]
 mode=raw_direct local_id=1 udp_port=51820 tun=snr0 peers=2
 peers:
   id=2 name=bj-office-gw endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
