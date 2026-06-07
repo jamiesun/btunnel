@@ -253,8 +253,61 @@ subnetra status --json | jq .
 - `peers[].online` 在该 peer 最近一次已认证报文落在 ~90s 之内时为 `true`——足以容忍几次漏掉的保活（§7）
   而不抖动。用它（或 `last_seen_age_seconds`）做逐 peer 的健康/心跳告警。
 - `counters` 承载文本视图里的**每一个**计数器（流量 + 完整的丢包分类），所以抓取不会漏掉任何字段——
-  它也是 Prometheus textfile collector 的预期数据源。
+  它就是下面 Prometheus textfile exporter 的数据源。
 - 在你的监控里固定 `schema_version`；它仅在破坏性变更（删除/重命名键，或改变类型）时递增。
+
+### Prometheus textfile exporter
+
+要对节点健康做告警，[`deploy/subnetra-textfile-exporter.sh`](../deploy/subnetra-textfile-exporter.sh)
+把 `subnetra status --json` 转成 node_exporter **textfile collector** 指标。守护进程内有意**不**内置 HTTP
+服务（多一个监听 socket + 攻击面，违背单二进制理念）：脚本只写一个 `.prom` 文件，由你已有的 `node_exporter`
+抓取。唯一前置依赖是 `jq`。
+
+```bash
+sudo install -m 0755 deploy/subnetra-textfile-exporter.sh /usr/local/bin/
+sudo install -m 0644 deploy/subnetra-textfile-exporter.service /etc/systemd/system/
+sudo install -m 0644 deploy/subnetra-textfile-exporter.timer   /etc/systemd/system/
+# 在 .service 里把 OUTPUT 设为你的 collector 目录，然后：
+sudo systemctl enable --now subnetra-textfile-exporter.timer
+```
+
+它发出（原子写入，绝不会出现写了一半的文件）：
+
+| 指标 | 类型 | 说明 |
+| --- | --- | --- |
+| `subnetra_up` | gauge | 读到状态为 `1`，守护进程 down/未绑定为 `0`——本身即可告警。 |
+| `subnetra_build_info{version,mode,tun,local_id,listen_port}` | gauge | 恒为 `1`；身份信息在标签里。 |
+| `subnetra_peer_online{id,allowed_src}` | gauge | 在新鲜窗口内为 `1`，否则 `0`。 |
+| `subnetra_peer_last_seen_age_seconds{id,allowed_src}` | gauge | 对从未认证过的 peer 省略。 |
+| `subnetra_<counter>_total` | counter | `counters` 里的**每一个**字段（流量 + 丢包），抗漂移。 |
+
+告警规则示例：
+
+```yaml
+groups:
+  - name: subnetra
+    rules:
+      - alert: SubnetraDaemonDown
+        expr: subnetra_up == 0 or absent(subnetra_up)
+        for: 1m
+        annotations: { summary: "subnetra 守护进程 down 或状态不可用：{{ $labels.instance }}" }
+      - alert: SubnetraPeerOffline
+        expr: subnetra_peer_online == 0
+        for: 2m
+        annotations: { summary: "subnetra peer id={{ $labels.id }} 离线：{{ $labels.instance }}" }
+      - alert: SubnetraPeerStale            # 比完全离线更早的预警
+        expr: subnetra_peer_last_seen_age_seconds > 120
+        for: 1m
+        annotations: { summary: "subnetra peer id={{ $labels.id }} 上次出现于 {{ $value }}s 前" }
+      - alert: SubnetraAuthDropsClimbing    # PSK/epoch/wire 不匹配（密钥轮换错位，§6；或 wire break）
+        expr: rate(subnetra_drop_udp_auth_or_invalid_total[5m]) > 0
+        for: 10m
+        annotations: { summary: "subnetra auth_or_invalid 丢包在攀升：{{ $labels.instance }}" }
+      - alert: SubnetraSpoofDrops           # 内层源地址在某 peer 的 allowed_src 之外
+        expr: rate(subnetra_drop_udp_spoof_total[5m]) > 0
+        for: 10m
+        annotations: { summary: "subnetra spoof 丢包：{{ $labels.instance }}" }
+```
 
 ### 升级与回滚 runbook
 

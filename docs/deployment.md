@@ -282,10 +282,65 @@ subnetra status --json | jq .
   ~90 s — long enough to tolerate a few missed keepalives (§7) without flapping.
   Use it (or `last_seen_age_seconds`) for a per-peer health/heartbeat alert.
 - `counters` carries **every** counter from the human view (traffic + the full
-  drop taxonomy), so a scrape never misses a field — it is also the intended
-  source for a Prometheus textfile collector.
+  drop taxonomy), so a scrape never misses a field — it is the source for the
+  Prometheus textfile exporter below.
 - Pin `schema_version` in your monitor; it increments only on a
   breaking change (a removed/renamed key or a changed type).
+
+### Prometheus textfile exporter
+
+To alert on node health, [`deploy/subnetra-textfile-exporter.sh`](../deploy/subnetra-textfile-exporter.sh)
+turns `subnetra status --json` into [node_exporter **textfile collector**](https://github.com/prometheus/node_exporter#textfile-collector)
+metrics. There is deliberately **no HTTP server in the daemon** (an extra listening
+socket + attack surface, against the single-binary ethos): the script writes one
+`.prom` file and your existing `node_exporter` scrapes it. The only prerequisite is
+`jq`.
+
+```bash
+sudo install -m 0755 deploy/subnetra-textfile-exporter.sh /usr/local/bin/
+sudo install -m 0644 deploy/subnetra-textfile-exporter.service /etc/systemd/system/
+sudo install -m 0644 deploy/subnetra-textfile-exporter.timer   /etc/systemd/system/
+# set OUTPUT in the .service to your collector dir, then:
+sudo systemctl enable --now subnetra-textfile-exporter.timer
+```
+
+It emits (atomically; never a half-written file):
+
+| Metric | Type | Notes |
+| --- | --- | --- |
+| `subnetra_up` | gauge | `1` if status was read, `0` if the daemon is down/unbound — alertable on its own. |
+| `subnetra_build_info{version,mode,tun,local_id,listen_port}` | gauge | constant `1`; identity in labels. |
+| `subnetra_peer_online{id,allowed_src}` | gauge | `1` within the freshness window, else `0`. |
+| `subnetra_peer_last_seen_age_seconds{id,allowed_src}` | gauge | omitted for a peer that never authenticated. |
+| `subnetra_<counter>_total` | counter | **every** `counters` field (traffic + drops), drift-proof. |
+
+Sample alert rules:
+
+```yaml
+groups:
+  - name: subnetra
+    rules:
+      - alert: SubnetraDaemonDown
+        expr: subnetra_up == 0 or absent(subnetra_up)
+        for: 1m
+        annotations: { summary: "subnetra daemon down or status unavailable on {{ $labels.instance }}" }
+      - alert: SubnetraPeerOffline
+        expr: subnetra_peer_online == 0
+        for: 2m
+        annotations: { summary: "subnetra peer id={{ $labels.id }} offline on {{ $labels.instance }}" }
+      - alert: SubnetraPeerStale            # earlier warning than fully offline
+        expr: subnetra_peer_last_seen_age_seconds > 120
+        for: 1m
+        annotations: { summary: "subnetra peer id={{ $labels.id }} last_seen {{ $value }}s ago" }
+      - alert: SubnetraAuthDropsClimbing    # PSK/epoch/wire mismatch (key rotation skew, §6; wire break)
+        expr: rate(subnetra_drop_udp_auth_or_invalid_total[5m]) > 0
+        for: 10m
+        annotations: { summary: "subnetra auth_or_invalid drops climbing on {{ $labels.instance }}" }
+      - alert: SubnetraSpoofDrops           # inner source outside a peer's allowed_src
+        expr: rate(subnetra_drop_udp_spoof_total[5m]) > 0
+        for: 10m
+        annotations: { summary: "subnetra spoof drops on {{ $labels.instance }}" }
+```
 
 ### Upgrade & rollback runbook
 

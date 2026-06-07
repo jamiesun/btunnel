@@ -1,0 +1,18 @@
+[Unit]
+Description=Render subnetra status into a Prometheus textfile metric (issue #110)
+Documentation=https://github.com/jamiesun/subnetra/blob/main/docs/deployment.md
+After=subnetrad.service
+Wants=subnetrad.service
+
+[Service]
+Type=oneshot
+# Point OUTPUT at your node_exporter textfile-collector directory.
+Environment=OUTPUT=/var/lib/node_exporter/textfile_collector/subnetra.prom
+# SUBNETRA_BIN / SUBNETRA_SOCK may be set here if the CLI or socket is non-default.
+ExecStart=/usr/local/bin/subnetra-textfile-exporter.sh
+# The script only reads the daemon's control socket and writes one .prom file.
+# Run it as a user that can read the subnetra control socket (often root, or a
+# group granted access to /var/run/subnetra.sock).
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
