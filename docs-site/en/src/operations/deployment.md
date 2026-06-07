@@ -138,21 +138,129 @@ daemon changes.
 
 ## 8. High availability
 
-v1 is **single-hub** by design; failover is made **outside** the daemon (the data
-plane stays single-path, stateless, handshake-free):
+v1 is **single-hub** by design. The data plane is single-path, stateless, and
+handshake-free, and the daemon **never probes peer health or auto-switches paths**
+(an [explicit non-goal](../reference/roadmap.md#explicit-non-goals)). Multi-hub and
+failover are therefore built *around* the daemon with ordinary config + OS tooling,
+driven by the **observe-only** health in `subnetra status --json` (`online`,
+`last_seen_age_seconds`, a flat `auth_or_invalid`). Two patterns are sanctioned.
 
-- **Pattern A — shared hub VIP.** Two hub instances behind one VRRP/`keepalived`
-  VIP or anycast prefix, indistinguishable to spokes (same `local_id`, same
-  per-spoke PSKs, same policy). Mind the **epoch caveat**: a takeover hub must not
-  present a *lower* boot epoch than spokes last accepted — keep both on NTP, and
-  prefer active/standby where the standby is (re)started at takeover.
-- **Pattern B — static multi-hub.** Two fully independent hubs with distinct
-  `local_id` and distinct PSKs; each spoke lists both as peers and an **external**
-  mechanism (route metric, split prefixes, operator script) picks the path.
+### Pattern A — active/standby hub VIP (recommended)
 
-Drive any switch from the **observe-only** health in `subnetra status --json`
-(`online`, `last_seen_age_seconds`, a flat `auth_or_invalid`). The daemon makes no
-failover decision itself.
+Two hub boxes sit behind one VRRP/`keepalived` VIP (or an anycast prefix). They
+share **identical** config — same `local_id`, same per-spoke PSKs, same derived
+policy — so every spoke sees exactly **one** peer (the VIP) and needs **no special
+config**: a normal `role=spoke` pointing at the VIP as its single hub.
+
+```mermaid
+flowchart LR
+    subgraph Spokes
+        S2["Spoke · 10.0.0.2"]
+        S3["Spoke · 10.0.0.3"]
+    end
+    VIP(["Hub VIP · 203.0.113.10:51820"])
+    subgraph HubPair["Hub pair · shared local_id + PSKs"]
+        HA["hub-a · ACTIVE"]
+        HB["hub-b · standby"]
+    end
+    S2 <-->|"encrypted UDP"| VIP
+    S3 <-->|"encrypted UDP"| VIP
+    VIP --- HA
+    VIP -. takeover .- HB
+```
+
+Minimal `keepalived` on each hub box, with a notify hook that **restarts** the
+daemon on takeover:
+
+```conf
+vrrp_instance subnetra {
+    state BACKUP            # BACKUP + nopreempt on both avoids needless flaps
+    interface eth0
+    virtual_router_id 51
+    priority 150            # 150 on hub-a, 100 on hub-b
+    nopreempt
+    advert_int 1
+    virtual_ipaddress { 203.0.113.10/32 }
+    notify_master "/usr/local/sbin/subnetra-takeover.sh"
+}
+```
+
+```bash
+# /usr/local/sbin/subnetra-takeover.sh  — runs when this box wins the VIP.
+#!/bin/sh
+# Restart so the daemon samples a FRESH boot epoch above the old active's (see below).
+systemctl restart subnetrad
+```
+
+Two caveats are load-bearing:
+
+- **Epoch ordering (the #1 gotcha).** Every datagram carries the sender's *boot
+  epoch* (wall-clock ns at start) and receivers are **forward-only**: a session
+  whose epoch is *lower* than the one a spoke already accepted is dropped **before
+  crypto** until wall-clock passes it. A long-idle standby that booted *before* the
+  active presents a *lower* epoch and is silently blackholed. Mitigation: keep
+  **both hubs on NTP** and **restart the daemon at takeover** (the `notify_master`
+  hook) so it stamps a fresh, higher epoch. This is exactly why active/standby beats
+  active/active here.
+- **Endpoint re-learn window.** Endpoint learning is one-way, so the new active
+  starts with **no** learned spoke endpoints: hub→spoke *relay* blackholes until each
+  spoke's next keepalive re-teaches it (spoke→hub works immediately — the spoke
+  initiates). Recovery is bounded by `keepalive_secs` (spoke default `20`); lower it
+  on the spokes for faster failover.
+
+### Pattern B — static dual-hub (independent identities)
+
+Two **fully independent** hubs — distinct `local_id`, distinct PSKs, no shared
+secrets and no epoch coupling — both relaying the same overlay. Every spoke is a
+peer of **both** and keeps a primary; you switch by editing the spoke's policy.
+This also enables **locality**: point regional prefixes at the in-region hub so only
+cross-region destinations traverse a long-haul link (each regional hub must carry
+the spokes you want locally reachable).
+
+Because `role=spoke` validates **exactly one hub peer**, a two-hub spoke runs
+`role=manual` and installs its own longest-prefix policy over the control socket:
+
+```bash
+# Primary path: the whole overlay via hub-1 (id 1); local delivery for self.
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/24 --action forward --target 1
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.5/32 --action forward --target 0
+sudo -E subnetra policy show
+sudo -E subnetra save
+
+# Fail the overlay over to hub-2 (id 2): two /25s out-specify the /24 (longest
+# prefix wins), diverting all overlay traffic without touching the /24 rule.
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/25   --action forward --target 2
+sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.128/25 --action forward --target 2
+```
+
+Keep the two hubs' prefixes **non-overlapping** when load-splitting — the same
+discipline `role=hub` enforces on `allowed_src` — to avoid split-brain (two relays
+claiming one destination).
+
+> **No live `policy replace`.** The control socket is **append-only**
+> (`policy add` / `policy show` / `save` — there is no `replace`, `del`, or
+> `clear`), and longest-prefix only lets a *more specific* rule win. To **move** a
+> prefix you therefore either (a) **restart the spoke daemon** with an updated
+> config/snapshot — it is stateless, so a restart costs only the keepalive re-learn
+> window — or (b) push a more-specific **override** as above (the table grows; a
+> clean revert still needs a restart). Design the split to be **mostly static**; do
+> not treat Pattern B as sub-second failover.
+
+### Choosing a pattern
+
+| | Pattern A — VIP | Pattern B — static dual-hub |
+|---|---|---|
+| Goal | Availability (one logical hub) | Locality + availability (two regions) |
+| Spoke config | Unchanged (`role=spoke`, one peer) | `role=manual`, both hubs, manual policy |
+| Hub identity | **Shared** `local_id` + PSKs | **Distinct** `local_id` + PSKs |
+| Switch trigger | Network (VRRP), seconds | Operator restart / prefix override |
+| Main gotcha | Epoch ordering + re-learn window | No live `replace`; keep splits static |
+| Anycast | Possible, but riskier than VRRP (a mid-flow POP move churns endpoint learning) | n/a |
+
+> **Key-material note (Pattern A).** Sharing `local_id` + PSKs puts identical
+> secrets on two boxes — secure both to the same standard; a compromise of either is
+> a compromise of every spoke link. The daemon itself makes **no** failover
+> decision in either pattern.
 
 ## 9. Traffic shaping & tuning
 
