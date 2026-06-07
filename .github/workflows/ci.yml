@@ -74,9 +74,11 @@ jobs:
           - arch: mipsel
             target: mipsel-linux-musl
             cpu: ""
+            qemu: "qemu-mipsel-static"
           - arch: mips
             target: mips-linux-musl
             cpu: ""
+            qemu: "qemu-mips-static"
     steps:
       - uses: actions/checkout@v5
 
@@ -109,6 +111,23 @@ jobs:
               echo "ERROR: ${path} ${size} bytes exceeds ${size_budget}" >&2; exit 1
             fi
           done
+
+      # Build-only proves it LINKS; this proves the cross binary actually EXECUTES
+      # on the target ISA (musl startup, atomic relocations, JSON parse, peer
+      # registry build, config validation) on both endiannesses. `--version` and
+      # `--check` are offline control-path ops with no TUN/socket/timing, so
+      # qemu-user runs them deterministically — unlike the data-plane e2e, which
+      # we deliberately never emulate (see test/integration/run.sh) because qemu
+      # would skew its throughput/latency measurements.
+      - name: Execute smoke under qemu-user (MIPS)
+        if: matrix.qemu != ''
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user-static
+          ${{ matrix.qemu }} zig-out/bin/subnetra  --version
+          ${{ matrix.qemu }} zig-out/bin/subnetrad --version
+          ${{ matrix.qemu }} zig-out/bin/subnetrad --check --config deploy/hub.json
   integration:
     name: Integration + e2e (static binary, size budget, netns relay)
     runs-on: ubuntu-latest
