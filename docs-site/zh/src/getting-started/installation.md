@@ -25,7 +25,12 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh |
 |---|---|
 | `--dir <路径>` | 安装位置（默认 `/usr/local/bin`）。 |
 | `--version <vX.Y.Z>` | 固定到某个发布，而非最新。 |
+| `--service` | 一并安装（禁用态的）systemd/launchd 服务单元。 |
 | `--yes` | 跳过所有确认（非交互）。 |
+
+要把 Subnetra 作为常驻服务运行，加上 `--service`：它会以**禁用**状态安装加固过的
+`systemd`（Linux）或 `launchd`（macOS）单元——绝不启动、也绝不碰你的网络——然后打印
+完成配置并启用的步骤。完整服务配置见 [部署](../operations/deployment.md)。
 
 想手动安装，或脚本未覆盖的平台？使用下面的 [发布二进制](#发布二进制)，或在
 **[Releases 页面](https://github.com/jamiesun/subnetra/releases/latest)** 浏览全部产物。
