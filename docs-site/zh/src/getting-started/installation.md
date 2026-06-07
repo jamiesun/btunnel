@@ -14,7 +14,8 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh |
 ```
 
 脚本是交互式的，并且 **只安装两个二进制**——绝不改动你的网络、防火墙或服务
-（Subnetra 始终把主机网络规划留给你）。如需无人值守安装，用 `--yes` 接受默认值：
+（Subnetra 始终把主机网络规划留给你）。若目标目录中已安装 Subnetra，脚本会显示当前
+版本并在覆盖前征求确认。如需无人值守安装，用 `--yes` 接受默认值：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh | sh -s -- --yes
