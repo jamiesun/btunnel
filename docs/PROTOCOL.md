@@ -345,6 +345,18 @@ byte underlay path the largest safe inner MTU is `1500 - 64 = 1436`; operators
   and a receiver accept/drop change moves the `receiver_cases` golden; either
   way the conformance sentinel forces a deliberate regeneration
   (`zig build vectors > tests/protocol-vectors.json`) and review.
+- **Wire-compatibility contract.** Two builds interoperate **iff** they derive the
+  same keys and make the same emit/accept/drop decisions for `wire_version = 1`.
+  The `version` byte alone is **not** a sufficient compatibility signal: v0.5.0
+  changed the HKDF key-derivation label (`btunnel-v1-*` → `subnetra-v1-*`, the
+  project rename) **without** bumping `version`, which silently broke interop with
+  `≤ v0.4.x` — every cross-version datagram fails AEAD auth (fail-closed). That was
+  a one-time rebrand exception. Going forward, **any** change to the bytes a
+  conformant endpoint emits, the keys it derives, or the accept/drop decision it
+  makes MUST bump `wire_version` (the conformance-golden sentinel above forces it)
+  **and** MUST be recorded in the deployment wire-compatibility matrix. Operators
+  planning a cross-version upgrade consult that matrix and runbook
+  ([`docs/deployment.md`](deployment.md) §6).
 
 ---
 
