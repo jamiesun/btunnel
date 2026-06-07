@@ -186,7 +186,9 @@ pub fn decodeIngress(rx: *crypto.RxSession, datagram: []const u8, out: []u8) ?us
 
 /// Extract the IPv4 destination address (host byte order) after validating the
 /// header. Returns `null` for anything that is not a well-formed IPv4 packet.
-fn ipv4Dst(pkt: []const u8) ?u32 {
+/// `pub` so out-of-tree benchmarks (tools/forward-bench.zig, issue #101) can
+/// time the live parser; read-only, no data-plane behavior change.
+pub fn ipv4Dst(pkt: []const u8) ?u32 {
     if (pkt.len < 20) return null;
     if ((pkt[0] >> 4) != 4) return null; // version
     const ihl = pkt[0] & 0x0f;
@@ -199,7 +201,8 @@ fn ipv4Dst(pkt: []const u8) ?u32 {
 /// header. Applies the **same** version/IHL/length checks as `ipv4Dst` so that
 /// the inner-source binding check and endpoint learning (issue #34) only ever
 /// run on a well-formed IPv4 packet, regardless of evaluation order.
-fn ipv4Src(pkt: []const u8) ?u32 {
+/// `pub` for the same out-of-tree benchmark use as `ipv4Dst` (issue #101).
+pub fn ipv4Src(pkt: []const u8) ?u32 {
     if (pkt.len < 20) return null;
     if ((pkt[0] >> 4) != 4) return null; // version
     const ihl = pkt[0] & 0x0f;
@@ -207,7 +210,6 @@ fn ipv4Src(pkt: []const u8) ?u32 {
     if (pkt.len < @as(usize, ihl) * 4) return null;
     return std.mem.readInt(u32, pkt[12..][0..4], .big);
 }
-
 
 pub const Reactor = struct {
     tun_fd: sys.fd_t,
