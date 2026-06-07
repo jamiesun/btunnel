@@ -136,6 +136,30 @@ run it behind a dynamic address, solve it operationally on each spoke with a sma
 DDNS watcher that rewrites the endpoint and restarts the (stateless) daemon — no
 daemon changes.
 
+### Hub behind NAT (static port-forward)
+
+A hub does not need a public-IP box — it needs a **stable, inbound-reachable UDP
+endpoint**. A host behind NAT qualifies if the edge router has a **static 1:1
+port-forward (DNAT)** from a fixed public `IP:port` to the hub's internal
+`IP:listen_port`:
+
+- **Spokes dial the _external_ address.** Each spoke's peer `endpoint` is the public
+  `IP:port` of the forward, not the hub's private address.
+- **`listen_port` is the _internal_ target.** Set it to the port the DNAT delivers to
+  (e.g. public `51820` → internal `51820` ⇒ `listen_port = 51820`).
+- **The mapping must be static.** A fixed port-forward, not dynamic PAT that rewrites
+  the source port per flow. If the public IP itself also changes, combine this with the
+  DDNS approach above.
+- **Same-LAN spokes need the internal endpoint (hairpin).** A spoke *inside the same
+  NAT* often cannot reach the hub through the public IP unless the router does NAT
+  hairpin/loopback — give those spokes the hub's internal `IP:listen_port` instead.
+- **CGNAT cannot host a hub.** If the "public" address is itself carrier-grade NAT with
+  no inbound port control, you cannot forward to it; that host can only be a spoke.
+
+This is still an ordinary **single hub** — only its reachability is via DNAT — so it
+stays inside the validated single-tier model. Endpoint learning remains one-way: keep
+the external mapping stable; spokes always initiate.
+
 ## 8. High availability
 
 v1 is **single-hub** by design. The data plane is single-path, stateless, and
