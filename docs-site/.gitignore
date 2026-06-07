@@ -3,3 +3,7 @@ en/book/
 zh/book/
 book/
 /site/
+
+# Python bytecode from check-links.py
+__pycache__/
+*.pyc
