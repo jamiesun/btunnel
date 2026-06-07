@@ -24,6 +24,25 @@ It is not trying to be a drop-in WireGuard replacement; it targets fixed,
 operator-managed deployments where a tiny auditable binary and static topology are
 the priority.
 
+### How is it different from n2n?
+
+Both build an encrypted overlay, but the designs are near-opposites:
+
+- **Star, not P2P.** n2n's signature is supernode-assisted NAT hole-punching so edges
+  talk directly. Subnetra is strict hub-and-spoke and **deliberately has no P2P /
+  hole-punching** — every spoke-to-spoke packet relays through the hub, for one
+  predictable path (a [non-goal](../reference/roadmap.md#explicit-non-goals)).
+- **Layer 3, not Layer 2.** n2n is an Ethernet (TAP) overlay with broadcast, ARP and
+  any protocol. Subnetra routes IPv4 by CIDR only — no broadcast domain.
+- **Handshake-free, one fixed cipher.** n2n has a registration protocol and
+  per-community selectable ciphers. Subnetra has no registration round-trip and one
+  mandatory AEAD (ChaCha20-Poly1305) with a unique key per link.
+- **Static, not discovered.** n2n finds peers dynamically via supernodes. Subnetra
+  uses static numeric endpoints with no in-daemon discovery or DNS.
+
+Pick n2n for plug-and-play P2P and L2 LAN semantics; pick Subnetra for a tiny,
+auditable binary with a deterministic single-path topology.
+
 ### Why no handshake? Isn't that insecure?
 
 No. Every packet is encrypted and authenticated with ChaCha20-Poly1305 under a
@@ -31,7 +50,7 @@ per-link key. Replay is stopped by a 64-bit monotonic nonce and a sliding-window
 filter, and a per-restart **session epoch** is mixed into key derivation so old
 captures can't be replayed across a restart. "Handshake-free" means there is no
 *negotiation* round-trip — not that packets are unauthenticated. See the
-[Security Model](concepts/security-model.md).
+[Security Model](../concepts/security-model.md).
 
 ### Does it hide that it's a tunnel? Is it "stealth"?
 
@@ -39,7 +58,7 @@ Partly. Obfuscation is **stateless and best-effort**: a malformed or
 unauthenticated datagram is silently dropped with **no error reply**, so the
 listener does not advertise itself to blind scanners. Subnetra does **not** claim
 to defeat a sophisticated DPI adversary, and it is honest about that — see
-[Design Principles → Stateless obfuscation](concepts/design-principles.md).
+[Design Principles → Stateless obfuscation](../concepts/design-principles.md).
 
 ### What platforms are supported?
 
@@ -63,7 +82,7 @@ The fixed wire overhead is **64 bytes** (20-byte header + 16-byte tag + 28-byte
 outer IPv4/UDP). The safe tunnel MTU is therefore `path_mtu − 64` — e.g. 1452 on a
 1500-byte underlay. Set `local_tun_mtu` accordingly, and use
 `subnetrad --print-network-plan --path-mtu <n>` to compute and preview the host
-plan. See the [Network Plan](configuration/network-plan.md).
+plan. See the [Network Plan](../configuration/network-plan.md).
 
 ### Does Subnetra configure the host network for me?
 
@@ -83,39 +102,39 @@ and B→A directions use different keys.
 
 Set the LAN prefix in `remote_routes`/`local_routes` and add policy rules that
 forward the destination prefix to the right mesh id. The hub relays between spokes.
-See [Configuration → Roles](configuration/roles.md) and the
-[`policy add`](reference/cli.md#policy-add-arguments) examples.
+See [Configuration → Roles](../configuration/roles.md) and the
+[`policy add`](../reference/cli.md#policy-add-arguments) examples.
 
 ### How do I run it on RouterOS / MikroTik?
 
 Via the RouterOS **container** feature (a static-binary container on the device).
-See [Operations → RouterOS](operations/routeros.md).
+See [Operations → RouterOS](../operations/routeros.md).
 
 ### The hub has a dynamic IP — now what?
 
 Endpoints are numeric on purpose (no in-daemon DNS). Solve it operationally: run a
 small DDNS watcher on the spoke that rewrites the hub `endpoint` and reloads. The
 spoke's NAT keepalive keeps the path open. See
-[Security Model → NAT keepalive](concepts/security-model.md).
+[Security Model → NAT keepalive](../concepts/security-model.md).
 
 ### Is there a built-in failover / multi-path?
 
 No. The data plane is intentionally single-path; failover is an **external**
 decision (VRRP / health-checked DNS / orchestration). This keeps the daemon small
-and predictable. See [Deployment → High Availability](operations/deployment.md#8-high-availability)
-and the [Roadmap](reference/roadmap.md#explicit-non-goals).
+and predictable. See [Deployment → High Availability](../operations/deployment.md#8-high-availability)
+and the [Roadmap](../reference/roadmap.md#explicit-non-goals).
 
 ### When is v2 (`kcp_arq` / `fec_xor`) coming?
 
 Those are **reserved interface points**, design-only, returning
 `error.NotImplemented` until the maintainer approves the design RFC. v1 ships
-`raw_direct` only. See the [Roadmap](reference/roadmap.md).
+`raw_direct` only. See the [Roadmap](../reference/roadmap.md).
 
 ### Why Zig, and why zero dependencies?
 
 To get a tiny, statically-linked, auditable binary with predictable memory and no
 supply chain — the whole data plane is the standard library plus raw syscalls. The
-[Design Principles](concepts/design-principles.md) ("eight iron laws") explain the
+[Design Principles](../concepts/design-principles.md) ("eight iron laws") explain the
 reasoning in full.
 
 ### Where is the authoritative spec?
