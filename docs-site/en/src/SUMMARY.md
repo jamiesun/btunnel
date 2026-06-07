@@ -24,6 +24,7 @@
 - [Production Deployment](operations/deployment.md)
 - [Containers](operations/containers.md)
 - [RouterOS Spoke](operations/routeros.md)
+- [OpenWrt Spoke](operations/openwrt.md)
 - [macOS Spoke](operations/macos-spoke.md)
 - [Observability & Troubleshooting](operations/observability.md)
 - [Upgrade & Release](operations/upgrade.md)

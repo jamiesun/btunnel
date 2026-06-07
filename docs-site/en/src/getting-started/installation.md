@@ -47,6 +47,7 @@ Prefer to install by hand, or on a platform the script does not cover? Use the
 | [Container image](#container-image) | Linux hosts, RouterOS / BusyBox containers | Multi-arch `amd64 / arm64 / armv7 / armv5` |
 | [Release tarball](#release-binaries) | Bare Linux hosts, offline installs | `docker load`-able image tarballs also provided |
 | [macOS spoke binary](#macos-spoke-binary) | Apple Silicon / Intel Macs (spoke only) | Runbook-certified, not CI-gated |
+| [OpenWrt router](../operations/openwrt.md) | MIPS / ARM home & SOHO routers (spoke) | Static musl binary + procd service |
 | [Build from source](#build-from-source) | Development, custom targets | Requires Zig 0.16.0+ |
 
 The daemon needs two things at runtime regardless of method: the **`NET_ADMIN`**
@@ -83,14 +84,19 @@ See [Containers](../operations/containers.md) for Compose and Kubernetes details
 Browse and download any release from the
 **[Releases page](https://github.com/jamiesun/subnetra/releases/latest)**. Each
 release (`vX.Y.Z`) attaches **static binary tarballs** for `amd64`, `arm64`,
-`armv7`, and `armv5`. The Linux binaries are fully static against musl-libc —
-`ldd` reports `not a dynamic executable`.
+`armv7`, `armv5`, `mipsel`, and `mips`. The Linux binaries are fully static
+against musl-libc — `ldd` reports `not a dynamic executable`.
+
+> **MIPS / OpenWrt:** `mipsel` is little-endian (ramips/mt7621/mt7628, most
+> modern OpenWrt devices) and `mips` is big-endian (ath79/Atheros). See the
+> [OpenWrt Spoke](../operations/openwrt.md) guide for picking the right one and
+> the procd service.
 
 Asset names carry the version, so resolve it once, then download, verify, and
 install:
 
 ```bash
-ARCH=amd64   # one of: amd64 | arm64 | armv7 | armv5
+ARCH=amd64   # one of: amd64 | arm64 | armv7 | armv5 | mipsel | mips
 VER=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
         https://github.com/jamiesun/subnetra/releases/latest | sed 's#.*/tag/##')
 
@@ -159,6 +165,8 @@ zig build -Dtarget=x86_64-linux-musl     # amd64
 zig build -Dtarget=aarch64-linux-musl    # arm64
 zig build -Dtarget=arm-linux-musleabihf  # armv7 (hard float)
 zig build -Dtarget=arm-linux-musleabi    # armv5 (soft float)
+zig build -Dtarget=mipsel-linux-musl     # mipsel (LE: ramips/mt7621 — OpenWrt)
+zig build -Dtarget=mips-linux-musl       # mips (BE: ath79/Atheros — OpenWrt)
 
 # Run tests
 zig build test
