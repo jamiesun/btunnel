@@ -386,7 +386,10 @@ launchd plist (macOS spoke) with the right capabilities/permissions, secrets
 handling, host networking, relay policy install, upgrade/rollback, and
 firewall/NAT requirements — see [`docs/deployment.md`](docs/deployment.md).
 Ready-to-edit artifacts live in [`deploy/`](deploy/) (`subnetrad.service`,
-`net.subnetra.subnetrad.plist`, `hub.json`, `spoke-a.json`, `spoke-b.json`).
+`net.subnetra.subnetrad.plist`, `hub.json`, `spoke-a.json`, `spoke-b.json`). For a
+MikroTik Spoke, [`deploy/routeros/`](deploy/routeros/) has scripted
+(`.rsc`) container bring-up/teardown — see
+[`docs/routeros-container.md`](docs/routeros-container.md).
 
 ## 📊 Development status
 

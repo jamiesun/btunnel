@@ -163,6 +163,13 @@ Important semantics:
 
 ## 4. RouterOS veth, address, and route
 
+> **Scripted happy path.** The veth/address/route in this section, the container
+> in §5, and the optional self-SNAT in §6 are automated by
+> [`deploy/routeros/subnetra-spoke-up.rsc`](../deploy/routeros/) (idempotent,
+> parameterized, prints verification; teardown is `subnetra-spoke-down.rsc`). The
+> manual commands below remain as the explanation of what that script does — read
+> them to review the change, then prefer the script for a repeatable bring-up.
+
 Create a dedicated veth for the Subnetra container:
 
 ```routeros
@@ -313,6 +320,11 @@ public-internet paths. For a known 1400-byte VPN/private-line underlay, use
 `1336` to avoid fragmentation.
 
 ## 9. Cleanup
+
+> Scripted: [`deploy/routeros/subnetra-spoke-down.rsc`](../deploy/routeros/)
+> removes exactly the tagged objects the bring-up script created (container,
+> overlay route, optional self-SNAT, and the veth if `removeVeth=true`). The
+> manual commands below are the equivalent.
 
 Stop and remove the container:
 
