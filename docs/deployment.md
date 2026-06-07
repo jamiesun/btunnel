@@ -246,6 +246,47 @@ counter rises whenever an authenticated peer is observed at a new UDP endpoint
 built-in NAT keepalives (§7): `tx` rises on a spoke that emits them, `rx` on the
 hub that receives them. PSKs are never printed.
 
+### Machine-readable status (`--json`)
+
+For monitoring, alerting, and automation, `subnetra status --json` emits the same
+data as a single stable, versioned JSON object (no text scraping). The same
+invariant holds: **PSKs and derived keys are never serialized.**
+
+```bash
+subnetra status --json | jq .
+```
+
+```jsonc
+{
+  "schema_version": 1,                 // bumped only on a breaking schema change
+  "version": "0.5.1",
+  "mode": "raw_direct",
+  "local_id": 1,
+  "listen_port": 51820,
+  "tun": "snr0",
+  "peers": [
+    {
+      "id": 2,
+      "endpoint": "203.0.113.7:51822",
+      "allowed_src": "10.66.0.2/32",
+      "last_seen_wall_ns": 1700000095000000000,
+      "last_seen_age_seconds": 5,      // null if the peer has never authenticated
+      "online": true                   // last_seen within the freshness window (~90s)
+    }
+  ],
+  "counters": { "tun_rx_packets": 3, "udp_tx_packets": 0, /* …every data-plane counter… */ }
+}
+```
+
+- `peers[].online` is `true` when the peer's last authenticated datagram is within
+  ~90 s — long enough to tolerate a few missed keepalives (§7) without flapping.
+  Use it (or `last_seen_age_seconds`) for a per-peer health/heartbeat alert.
+- `counters` carries **every** counter from the human view (traffic + the full
+  drop taxonomy), so a scrape never misses a field — it is also the intended
+  source for a Prometheus textfile collector.
+- Pin `schema_version` in your monitor; it increments only on a
+  breaking change (a removed/renamed key or a changed type).
+
 ### Upgrade & rollback runbook
 
 Subnetra is a single static binary with no persistent on-disk data-plane state,

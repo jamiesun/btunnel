@@ -373,6 +373,12 @@ endpoint (roaming/NAT remap, issue #34). The `keepalive rx`/`tx` line counts the
 built-in spoke→hub NAT keepalive (issue #96): `tx` on the emitting spoke, `rx` on
 the receiving hub. PSKs and derived keys are never printed.
 
+For monitoring and automation, `subnetra status --json` emits the same data as a
+stable, versioned JSON object — including a derived per-peer `last_seen_age_seconds`
+and `online` flag — so health can be scraped without parsing free-form text (and
+still never serializes secrets). See [`docs/deployment.md`](docs/deployment.md) §6
+for the schema.
+
 ### Production deployment (systemd)
 
 For a complete hub + two-spoke production walkthrough — systemd unit (Linux) or
