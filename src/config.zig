@@ -8,9 +8,16 @@
 
 const std = @import("std");
 const sys = @import("sys.zig");
+const netplan = @import("netplan.zig");
 
 pub const MTU_MIN: u16 = 68;
 pub const MTU_MAX: u16 = 1500;
+
+/// Default inner (TUN) MTU. Derived from the live wire constants so it stays the
+/// largest inner packet that fits without fragmentation on the dominant 1500-byte
+/// IPv4 underlay (issue #98) — never a second hard-coded literal that could drift.
+/// Operators on jumbo / known-larger paths raise `local_tun_mtu` explicitly.
+pub const DEFAULT_TUN_MTU: u16 = netplan.maxTunMtu(netplan.DEFAULT_PATH_MTU);
 
 /// Maximum number of mesh peers a single node can be configured with. Fixed so
 /// the registry stays zero-allocation (issue #5).
@@ -190,7 +197,7 @@ pub const Config = struct {
     /// handshake or in-band negotiation (AGENT.md iron law #8).
     negotiation_version: u8 = 1,
     /// Tunnel MTU.
-    local_tun_mtu: u16 = 1452,
+    local_tun_mtu: u16 = DEFAULT_TUN_MTU,
     /// Local UDP listen port.
     listen_port: u16 = 51820,
     /// Virtual subnet (default 10.0.0.0/24).
@@ -323,7 +330,7 @@ pub const Config = struct {
     const Wire = struct {
         negotiation_version: u8 = 1,
         psk: []const u8 = "",
-        local_tun_mtu: u16 = 1452,
+        local_tun_mtu: u16 = DEFAULT_TUN_MTU,
         listen_port: u16 = 51820,
         virtual_subnet: []const u8 = "10.0.0.0/24",
         local_tun_ip: []const u8 = "",
@@ -434,6 +441,13 @@ test "validate: MTU out of range is rejected" {
 
     cfg.local_tun_mtu = 1452;
     try cfg.validate(&.{});
+}
+
+test "default local_tun_mtu is the safe inner MTU for a 1500 underlay (issue #98)" {
+    // Derived from the wire constants, never a second literal, so it cannot drift.
+    try std.testing.expectEqual(@as(u16, 1436), DEFAULT_TUN_MTU);
+    try std.testing.expectEqual(netplan.maxTunMtu(1500), DEFAULT_TUN_MTU);
+    try std.testing.expectEqual(DEFAULT_TUN_MTU, Config.default().local_tun_mtu);
 }
 
 test "validate: a peer or local id beyond the u16 key_id range is rejected (issue #34)" {
