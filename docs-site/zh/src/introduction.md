@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/subnetra.png" alt="Subnetra —— 私有三层组网：各 Spoke 把加密流量打到 Hub，由 Hub 按策略路由在彼此之间中继" width="100%">
+</p>
+
 # 简介
 
 **把你的服务器、站点和设备连接成一张私有的加密网络——只需一个随处可跑的小巧二进制文件，从云主机到 MikroTik 路由器都能部署。**

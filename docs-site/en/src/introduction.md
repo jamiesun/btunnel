@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="images/subnetra.png" alt="Subnetra — a private Layer-3 mesh: spokes tunnel encrypted traffic to a hub that relays between them with policy routing" width="100%">
+</p>
+
 # Introduction
 
 **Connect your servers, sites, and devices into one private, encrypted network — shipped as a single tiny binary that runs anywhere, from a cloud VM to a MikroTik router.**
