@@ -2,7 +2,7 @@
 
 本页浓缩了完整的 Hub + 双 Spoke 生产演练。详尽版本——含流量整形、网卡调优与基准测试——
 见仓库中的
-[`docs/deployment.md`](https://github.com/jamiesun/subnetra/blob/main/docs/deployment.md)。
+[`docs/deployment.zh-CN.md`](https://github.com/jamiesun/subnetra/blob/main/docs/deployment.zh-CN.md)。
 可直接编辑的产物位于
 [`deploy/`](https://github.com/jamiesun/subnetra/tree/main/deploy)
 （`subnetrad.service`、`net.subnetra.subnetrad.plist`、`hub.json`、`spoke-a.json`、
@@ -241,4 +241,4 @@ sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.128/25 --action forward
 ——不改守护进程或协议。把出站限到链路 *稳定* 吞吐的约 60–80%，平滑突发，并（可选）调优
 套接字缓冲与 IRQ/CPU 亲和。内核在明文 `snr0` 设备上看到真实的内层五元组。完整配方与活叠加
 基准见
-[`docs/deployment.md` §9–§10](https://github.com/jamiesun/subnetra/blob/main/docs/deployment.md)。
+[`docs/deployment.zh-CN.md` §9–§10](https://github.com/jamiesun/subnetra/blob/main/docs/deployment.zh-CN.md)。
