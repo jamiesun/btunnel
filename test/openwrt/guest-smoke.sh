@@ -57,32 +57,51 @@ else
 fi
 /etc/init.d/subnetrad stop >/dev/null 2>&1
 
-# 4. ensure /dev/net/tun (offline insmod first; opkg only as a fallback so the
-#    test does not hard-depend on the network mirror being reachable).
-[ -e /dev/net/tun ] || insmod tun 2>/dev/null
-if [ ! -e /dev/net/tun ]; then
-	say "kmod-tun not built in; fetching via opkg"
-	opkg update >/dev/null 2>&1 && opkg install kmod-tun >/dev/null 2>&1
+# 4. ensure a WORKING /dev/net/tun. The daemon's open() needs the tun DRIVER
+#    actually loaded — a bare device node without the module yields OpenFailed.
+#    (This is exactly what bit us under fast KVM: opkg's postinst had not insmod'd
+#    the module yet, but a stray mknod made the node "exist".) So gate on
+#    /sys/module/tun, load the module explicitly (offline first, then via opkg),
+#    and only mknod the node once the driver is present so it is actually backed.
+load_tun() {
+	[ -d /sys/module/tun ] && return 0
+	insmod tun 2>/dev/null;   [ -d /sys/module/tun ] && return 0
+	modprobe tun 2>/dev/null; [ -d /sys/module/tun ] && return 0
+	ko=$(find /lib/modules -name 'tun.ko*' 2>/dev/null | head -1)
+	[ -n "$ko" ] && insmod "$ko" 2>/dev/null
+	[ -d /sys/module/tun ]
+}
+if ! load_tun; then
+	say "tun driver absent; installing kmod-tun via opkg"
+	opkg update           >/tmp/opkg.log 2>&1 || say "opkg update reported errors"
+	opkg install kmod-tun >>/tmp/opkg.log 2>&1 || say "opkg install kmod-tun reported errors"
+	load_tun || true
 fi
-mkdir -p /dev/net
-[ -e /dev/net/tun ] || mknod /dev/net/tun c 10 200 2>/dev/null
-[ -e /dev/net/tun ]
-check $? "/dev/net/tun available"
+if [ -d /sys/module/tun ]; then
+	[ -e /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200 2>/dev/null; }
+fi
+if [ -d /sys/module/tun ] && [ -e /dev/net/tun ]; then tun_ok=0; else tun_ok=1; fi
+check $tun_ok "/dev/net/tun backed by the loaded tun driver"
+if [ "$tun_ok" -ne 0 ]; then
+	say "tun diagnostics (opkg tail + modules on disk):"
+	tail -15 /tmp/opkg.log 2>/dev/null
+	find /lib/modules -name 'tun*' 2>/dev/null
+fi
 
-# 5. POSITIVE PATH: a valid config starts and procd supervises a live daemon.
+# 5. POSITIVE PATH: a valid config starts and procd supervises a live daemon that
+#    opens its own snr0 TUN. Poll for BOTH conditions to absorb fast-KVM vs
+#    slow-TCG timing and any procd respawn backoff (it never touches addr/routes).
 cp /tmp/spoke.json /etc/subnetra/config.json
 /etc/init.d/subnetrad restart >/dev/null 2>&1
-sleep 4
-if /etc/init.d/subnetrad running 2>/dev/null; then
-	say "PASS good config: procd supervises a running subnetrad"
-else
-	say "FAIL good config: subnetrad not running under procd"
-	fails=$((fails + 1))
-fi
-
-# 6. the daemon created its own snr0 tun device (it never touches addresses/routes).
-ip link show snr0 >/dev/null 2>&1
-check $? "daemon created the snr0 tun device"
+running=1; have_snr0=1; i=0
+while [ $i -lt 15 ]; do
+	if /etc/init.d/subnetrad running 2>/dev/null; then running=0; else running=1; fi
+	if ip link show snr0 >/dev/null 2>&1; then have_snr0=0; else have_snr0=1; fi
+	[ $running -eq 0 ] && [ $have_snr0 -eq 0 ] && break
+	sleep 1; i=$((i + 1))
+done
+check $running   "good config: procd supervises a running subnetrad"
+check $have_snr0 "daemon created the snr0 tun device"
 
 say "recent subnetra log lines:"
 logread 2>/dev/null | grep -i subnetra | tail -6
