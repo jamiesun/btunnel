@@ -1,0 +1,60 @@
+name: OpenWrt procd smoke
+
+# OPT-IN, not on the PR hot path: this boots a real OpenWrt in qemu (slow), so it
+# runs on manual dispatch and nightly only. It is the only job that exercises
+# deploy/openwrt/subnetrad.init under genuine procd + BusyBox + opkg.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *" # nightly 04:00 UTC
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openwrt-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: "0.16.0"
+  ZIG_SHA256_X86_64: "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+
+jobs:
+  procd-smoke:
+    name: OpenWrt x86-64 procd smoke (qemu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Zig ${{ env.ZIG_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -fsSL "$url" -o /tmp/zig.tar.xz
+          echo "${ZIG_SHA256_X86_64}  /tmp/zig.tar.xz" | sha256sum -c -
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+
+      - name: Install qemu + expect
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-x86 qemu-utils expect
+
+      - name: Enable KVM if the runner exposes it
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm || true
+            echo "KVM available:"; ls -l /dev/kvm
+          else
+            echo "No /dev/kvm; the test will fall back to TCG (slower)."
+          fi
+
+      - name: Build x86-64 daemon
+        run: zig build -Dtarget=x86_64-linux-musl -Doptimize=ReleaseSmall
+
+      - name: OpenWrt procd smoke
+        run: bash test/openwrt/run.sh
