@@ -131,8 +131,27 @@ if [ "$ASSUME_YES" != 1 ] && [ "$HAVE_TTY" = 1 ]; then
   if [ -n "$_d" ]; then INSTALL_DIR="$_d"; fi
 fi
 
-confirm "Download Subnetra ${VERSION} and install to ${INSTALL_DIR}?" \
-  || { info "Aborted — nothing was changed."; exit 0; }
+# ---------- detect a prior install at the target so the prompt is explicit ----------
+prior=''; prior_known=''
+if [ -x "$INSTALL_DIR/subnetra" ]; then
+  prior_known=yes
+  prior=$("$INSTALL_DIR/subnetra" --version 2>&1 | sed -n 's/.*\(v[0-9][0-9.]*\).*/\1/p' | head -n1)
+fi
+
+if [ -z "$prior_known" ]; then
+  _q="Download Subnetra ${VERSION} and install to ${INSTALL_DIR}?"
+elif [ "$prior" = "$VERSION" ]; then
+  info "Subnetra ${VERSION} is already installed in ${INSTALL_DIR}."
+  _q="Reinstall (overwrite) Subnetra ${VERSION}?"
+elif [ -n "$prior" ]; then
+  info "Subnetra ${prior} is already installed in ${INSTALL_DIR}."
+  _q="Replace Subnetra ${prior} with ${VERSION}?"
+else
+  info "An existing Subnetra install was found in ${INSTALL_DIR}."
+  _q="Overwrite it with Subnetra ${VERSION}?"
+fi
+
+confirm "$_q" || { info "Aborted — nothing was changed."; exit 0; }
 
 # ---------- download ----------
 TMP=$(mktemp -d)

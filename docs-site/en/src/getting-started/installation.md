@@ -17,7 +17,9 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh |
 
 The script is interactive and **only installs the two binaries** — it never
 touches your network, firewall, or services (Subnetra always leaves the host
-plan to you). For an unattended run, accept the defaults with `--yes`:
+plan to you). If Subnetra is already present in the target directory, it shows
+the installed version and asks before overwriting. For an unattended run, accept
+the defaults with `--yes`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh | sh -s -- --yes
