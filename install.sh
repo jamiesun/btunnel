@@ -14,6 +14,7 @@
 set -eu
 
 REPO="jamiesun/subnetra"
+DOC_DEPLOY="https://jamiesun.github.io/subnetra/en/operations/deployment.html"
 INSTALL_DIR="${SUBNETRA_INSTALL_DIR:-/usr/local/bin}"
 VERSION="${SUBNETRA_VERSION:-}"
 ASSUME_YES="${ASSUME_YES:-0}"
@@ -246,7 +247,7 @@ fi
 
 svc_installed=''; svc_unit_path=''
 if [ "$want_svc" = 1 ] && [ -z "$svc_kind" ]; then
-  warn "no supported service manager found here — skipping the unit (see the deployment guide)."
+  warn "no supported service manager found here — skipping the unit (see ${DOC_DEPLOY})."
 elif [ "$want_svc" = 1 ]; then
   case "$svc_kind" in
     systemd) unit_name=subnetrad.service;            unit_dir="${UNIT_DIR_OVERRIDE:-/etc/systemd/system}" ;;
@@ -309,12 +310,16 @@ if [ "$svc_installed" = 1 ]; then
       say "  - sudo launchctl enable system/net.subnetra.subnetrad"
       ;;
   esac
+  say ""
+  say "  Full service runbook: ${DOC_DEPLOY}"
 elif [ -n "$svc_kind" ]; then
   say ""
   say "Want it managed as a ${svc_kind} service? Re-run with ${B}--service${R} (it installs the"
-  say "unit disabled and never starts it), or follow the deployment guide."
+  say "unit disabled and never starts it). Full service setup:"
+  say "  ${DOC_DEPLOY}"
 fi
 
 say ""
 say "  Quick Start   https://jamiesun.github.io/subnetra/en/getting-started/quickstart.html"
+say "  Deployment    ${DOC_DEPLOY}"
 say "  All docs      https://jamiesun.github.io/subnetra/"
