@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically run the subnetra Prometheus textfile exporter (issue #110)
+Documentation=https://github.com/jamiesun/subnetra/blob/main/docs/deployment.md
+
+[Timer]
+# First run shortly after boot, then every 15s while active. Match this to your
+# Prometheus scrape interval (a textfile that is older than the scrape just serves
+# slightly stale gauges; the exporter is cheap, so 15s is a safe default).
+OnBootSec=30s
+OnUnitActiveSec=15s
+AccuracySec=1s
+Unit=subnetra-textfile-exporter.service
+
+[Install]
+WantedBy=timers.target
