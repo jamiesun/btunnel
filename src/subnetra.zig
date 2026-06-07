@@ -51,7 +51,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     \\subnetra — Subnetra control client
                     \\
                     \\Usage:
-                    \\  subnetra status                     Show daemon status (health, peers, counters).
+                    \\  subnetra status [--json]            Show daemon status (health, peers, counters).
+                    \\                                      --json emits a stable, versioned schema for monitoring.
                     \\  subnetra policy show                Print the active policy tree.
                     \\  subnetra policy add --src X --dst Y --action forward --target Z
                     \\  subnetra save                       Snapshot the active policy to disk.
@@ -101,8 +102,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .policy_add => {
             bt.uds.send(path, line) catch |err| failRequest(err, path);
         },
-        .policy_show, .save, .status => {
-            var out: [4096]u8 = undefined;
+        .policy_show, .save, .status, .status_json => {
+            var out: [bt.uds.MAX_REPLY]u8 = undefined;
             const reply = bt.uds.request(path, line, &out, REQUEST_TIMEOUT_MS) catch |err| failRequest(err, path);
             writeStdout(reply);
         },

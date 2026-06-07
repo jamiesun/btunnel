@@ -48,6 +48,18 @@ const MAX_RULE_LINE = 112;
 /// and `save` are always complete and the `save` ack count is always accurate.
 pub const MAX_REPLY = MAX_POLICY_ENTRIES * MAX_RULE_LINE;
 
+/// Stable schema version for `subnetra status --json` (issue #105). Bump on any
+/// breaking change to the JSON shape (a removed/renamed key or a changed type) so
+/// a monitor can pin the contract it parses.
+pub const STATUS_SCHEMA_VERSION: u32 = 1;
+
+/// Default freshness window for the per-peer `online` flag in the JSON status
+/// (issue #105): a peer is `online` iff its last authenticated datagram is no
+/// older than this. Sized to tolerate a few missed spoke->hub keepalives (default
+/// 20s, issue #96) without flapping. Passed into `formatStatusJson` so a caller
+/// may override it.
+pub const STATUS_ONLINE_FRESHNESS_SECS: u64 = 90;
+
 /// Header bytes of `sockaddr_un` preceding `path` (i.e. `@sizeOf(sa_family_t)`).
 /// Used both as the bind addrlen for Linux abstract autobind and as the
 /// threshold that distinguishes an addressable (bound) client from an anonymous
@@ -88,6 +100,8 @@ pub const Command = union(enum) {
     policy_show,
     save,
     status,
+    /// `subnetra status --json` — machine-readable status (issue #105).
+    status_json,
 };
 
 fn nextValue(it: *std.mem.TokenIterator(u8, .scalar)) ParseError![]const u8 {
@@ -101,7 +115,16 @@ pub fn parseCommand(line: []const u8) ParseError!Command {
     const verb = it.next() orelse return ParseError.UnknownCommand;
 
     if (std.mem.eql(u8, verb, "save")) return .save;
-    if (std.mem.eql(u8, verb, "status")) return .status;
+    if (std.mem.eql(u8, verb, "status")) {
+        // `status` is human text; `status --json` is the machine-readable form
+        // (issue #105). Reject any other trailing token rather than silently
+        // ignoring a typo'd flag.
+        if (it.next()) |opt| {
+            if (std.mem.eql(u8, opt, "--json")) return .status_json;
+            return ParseError.UnknownCommand;
+        }
+        return .status;
+    }
 
     if (!std.mem.eql(u8, verb, "policy")) return ParseError.UnknownCommand;
 
@@ -376,8 +399,89 @@ pub fn formatStatus(
     return out[0..len];
 }
 
-/// Control-plane listener. Owns the AF_UNIX datagram socket and the live policy
-/// tree storage.
+/// Wall-clock nanoseconds (REALTIME) used to derive the JSON status
+/// `last_seen_age_seconds` (issue #105). Mirrors the data plane's `wallNs`:
+/// observability only, never drives protocol logic; 0 on a non-Linux host (unit
+/// tests) or a clock failure.
+fn wallNowNs() u64 {
+    if (builtin.os.tag != .linux) return 0;
+    var ts: sys.timespec = undefined;
+    if (sys.errno(sys.clock_gettime(sys.CLOCK.REALTIME, &ts)) != .SUCCESS) return 0;
+    if (ts.sec < 0) return 0;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
+
+/// Render a machine-readable JSON status report into `out` (issue #105): the same
+/// daemon meta, per-peer registry, and counters as `formatStatus`, plus a derived
+/// per-peer `last_seen_age_seconds` and `online` flag (this folds in the #6
+/// last-seen/heartbeat presentation ask). Pure formatting — no I/O and no clock
+/// read — so it is unit-testable: the caller passes `now_wall_ns` and the
+/// `freshness_secs` online threshold. Sensitive material (PSKs, derived keys) is
+/// NEVER serialized. The counters object is emitted by reflecting over
+/// `stats.Counters`, so it can never silently drift from the live field set.
+pub fn formatStatusJson(
+    out: []u8,
+    meta: DaemonMeta,
+    registry: *const peer.PeerRegistry,
+    counters: *const stats.Counters,
+    now_wall_ns: u64,
+    freshness_secs: u64,
+) []const u8 {
+    var len: usize = 0;
+    const W = struct {
+        fn p(buf: []u8, off: *usize, comptime fmt: []const u8, args: anytype) void {
+            const s = std.fmt.bufPrint(buf[off.*..], fmt, args) catch return;
+            off.* += s.len;
+        }
+    };
+
+    W.p(out, &len, "{{\"schema_version\":{d},\"version\":\"{s}\",\"mode\":\"{s}\",\"local_id\":{d},\"listen_port\":{d},\"tun\":\"{s}\",\"peers\":[", .{
+        STATUS_SCHEMA_VERSION, meta.version, meta.mode, meta.local_id, meta.listen_port, meta.tun_name,
+    });
+
+    var i: usize = 0;
+    while (i < registry.len) : (i += 1) {
+        const pr = &registry.peers[i];
+        const a: u32 = std.mem.bigToNative(u32, pr.endpoint.addr);
+        const port: u16 = std.mem.bigToNative(u16, pr.endpoint.port);
+        const src: u32 = pr.allowed_src.network;
+
+        // last_seen_wall_ns == 0 means the peer has never been authenticated, so
+        // age is undefined (emitted as JSON null) and the peer is offline. A clock
+        // that ran backwards (now < last_seen) clamps the age to 0 rather than
+        // wrapping the unsigned subtraction.
+        const seen = pr.last_seen_wall_ns != 0;
+        const delta_ns: u64 = if (seen and now_wall_ns > pr.last_seen_wall_ns)
+            now_wall_ns - pr.last_seen_wall_ns
+        else
+            0;
+        const age_secs: u64 = delta_ns / std.time.ns_per_s;
+        const online = seen and age_secs <= freshness_secs;
+
+        if (i != 0) W.p(out, &len, ",", .{});
+        W.p(out, &len, "{{\"id\":{d},\"endpoint\":\"{d}.{d}.{d}.{d}:{d}\",\"allowed_src\":\"{d}.{d}.{d}.{d}/{d}\",\"last_seen_wall_ns\":{d},\"last_seen_age_seconds\":", .{
+            pr.id,
+            (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
+            (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
+            pr.last_seen_wall_ns,
+        });
+        if (seen) {
+            W.p(out, &len, "{d}", .{age_secs});
+        } else {
+            W.p(out, &len, "null", .{});
+        }
+        W.p(out, &len, ",\"online\":{s}}}", .{if (online) "true" else "false"});
+    }
+
+    W.p(out, &len, "],\"counters\":{{", .{});
+    inline for (std.meta.fields(stats.Counters), 0..) |f, idx| {
+        if (idx != 0) W.p(out, &len, ",", .{});
+        W.p(out, &len, "\"{s}\":{d}", .{ f.name, @field(counters.*, f.name) });
+    }
+    W.p(out, &len, "}}}}", .{});
+
+    return out[0..len];
+}
 ///
 /// LIFETIME: `Control` must be pinned at a stable address for the daemon's
 /// lifetime. `trees[i].entries` alias into `self.bufs[i]`, and the data plane's
@@ -594,6 +698,14 @@ pub const Control = struct {
                     "status unavailable\n";
                 self.reply(src, slen, msg);
             },
+            .status_json => {
+                if (!addressable) return;
+                const msg = if (self.status_meta != null and self.status_registry != null and self.status_counters != null)
+                    formatStatusJson(&self.txbuf, self.status_meta.?, self.status_registry.?, self.status_counters.?, wallNowNs(), STATUS_ONLINE_FRESHNESS_SECS)
+                else
+                    "{\"error\":\"status unavailable\"}\n";
+                self.reply(src, slen, msg);
+            },
         }
     }
 
@@ -638,6 +750,8 @@ test "parseCommand: show / save / status / errors" {
     try std.testing.expect(try parseCommand("policy show") == .policy_show);
     try std.testing.expect(try parseCommand("save") == .save);
     try std.testing.expect(try parseCommand("status") == .status);
+    try std.testing.expect(try parseCommand("status --json") == .status_json);
+    try std.testing.expectError(ParseError.UnknownCommand, parseCommand("status --bogus"));
     try std.testing.expectError(ParseError.UnknownCommand, parseCommand("bogus"));
     try std.testing.expectError(ParseError.MissingArgument, parseCommand("policy add --src 10.0.0.0/24"));
 }
@@ -672,6 +786,86 @@ test "formatStatus: renders meta, peers, and counters; never prints secrets" {
     try std.testing.expect(std.mem.indexOf(u8, s, "spoof=2") != null);
     // The PSK byte 0xAB must never appear in the rendered status.
     try std.testing.expect(std.mem.indexOf(u8, s, &[_]u8{0xAB}) == null);
+}
+
+test "formatStatusJson: valid versioned schema, derived age/online, no secrets (issue #105)" {
+    var reg = peer.PeerRegistry.init(1);
+    const psk: @import("crypto.zig").Key = [_]u8{0xAB} ** 32;
+    const ep = try @import("config.zig").parseEndpoint("203.0.113.7:51820");
+    const ep2 = try @import("config.zig").parseEndpoint("198.51.100.9:51820");
+    // Peer 2 was last seen 5s before `now` (online); peer 3 was never seen.
+    const now: u64 = 1_700_000_100_000_000_000;
+    const boot: u64 = 1_700_000_000_000_000_000;
+    const p2 = try reg.add(psk, 2, ep, try @import("config.zig").parseCidr("10.0.0.2/32"), boot);
+    p2.last_seen_wall_ns = 1_700_000_095_000_000_000;
+    _ = try reg.add(psk, 3, ep2, try @import("config.zig").parseCidr("10.0.0.3/32"), boot);
+
+    var c = stats.Counters{};
+    c.tun_rx_packets = 5;
+    c.keepalive_tx = 7;
+    c.drop_udp_spoof = 2;
+
+    const meta = DaemonMeta{
+        .version = "9.9.9",
+        .mode = "raw_direct",
+        .listen_port = 51820,
+        .tun_name = "snr0",
+        .local_id = 1,
+    };
+
+    var buf: [8192]u8 = undefined;
+    const s = formatStatusJson(&buf, meta, &reg, &c, now, 90);
+
+    // No secret bytes may leak into the machine-readable form either.
+    try std.testing.expect(std.mem.indexOf(u8, s, &[_]u8{0xAB}) == null);
+
+    // Must be valid JSON and carry the documented, versioned schema.
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, s, .{});
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try std.testing.expectEqual(@as(i64, STATUS_SCHEMA_VERSION), root.get("schema_version").?.integer);
+    try std.testing.expectEqualStrings("9.9.9", root.get("version").?.string);
+    try std.testing.expectEqualStrings("raw_direct", root.get("mode").?.string);
+    try std.testing.expectEqual(@as(i64, 1), root.get("local_id").?.integer);
+    try std.testing.expectEqual(@as(i64, 51820), root.get("listen_port").?.integer);
+    try std.testing.expectEqualStrings("snr0", root.get("tun").?.string);
+
+    const peers = root.get("peers").?.array;
+    try std.testing.expectEqual(@as(usize, 2), peers.items.len);
+
+    // Look peers up by id rather than assuming registry slot order.
+    var p_seen: ?std.json.ObjectMap = null;
+    var p_never: ?std.json.ObjectMap = null;
+    for (peers.items) |pv| {
+        const o = pv.object;
+        switch (o.get("id").?.integer) {
+            2 => p_seen = o,
+            3 => p_never = o,
+            else => try std.testing.expect(false),
+        }
+    }
+
+    const p0 = p_seen.?;
+    try std.testing.expectEqualStrings("203.0.113.7:51820", p0.get("endpoint").?.string);
+    try std.testing.expectEqualStrings("10.0.0.2/32", p0.get("allowed_src").?.string);
+    try std.testing.expectEqual(@as(i64, 5), p0.get("last_seen_age_seconds").?.integer);
+    try std.testing.expect(p0.get("online").?.bool);
+
+    // Never-seen peer: age is null and the peer is offline.
+    const p1 = p_never.?;
+    switch (p1.get("last_seen_age_seconds").?) {
+        .null => {},
+        else => try std.testing.expect(false),
+    }
+    try std.testing.expect(!p1.get("online").?.bool);
+    try std.testing.expectEqual(@as(i64, 0), p1.get("last_seen_wall_ns").?.integer);
+
+    // Counters are reflected wholesale, so every field is present and stable.
+    const ctr = root.get("counters").?.object;
+    try std.testing.expectEqual(@as(i64, 5), ctr.get("tun_rx_packets").?.integer);
+    try std.testing.expectEqual(@as(i64, 7), ctr.get("keepalive_tx").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), ctr.get("drop_udp_spoof").?.integer);
+    try std.testing.expect(ctr.get("drop_udp_auth_or_invalid") != null);
 }
 
 /// Send one command datagram to a bound control socket at `path`.
@@ -839,7 +1033,7 @@ test "control: status replies 'unavailable' until bound, then a full report" {
     // Before bindStatus: status is gracefully unavailable (no null deref).
     _ = sys.sendto(cfd, "status\n", 7, 0, @ptrCast(&sa), alen);
     ctl.handle();
-    var out: [1024]u8 = undefined;
+    var out: [2048]u8 = undefined;
     var rrc = sys.recvfrom(cfd, &out, out.len, 0, null, null);
     try std.testing.expect(sys.errno(rrc) == .SUCCESS);
     try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(rrc)], "status unavailable") != null);
@@ -855,6 +1049,17 @@ test "control: status replies 'unavailable' until bound, then a full report" {
     try std.testing.expect(sys.errno(rrc) == .SUCCESS);
     try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(rrc)], "subnetra v1.2.3 [running]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out[0..@intCast(rrc)], "traffic:") != null);
+
+    // `status --json` is served over the same socket path (issue #105): the
+    // handler dispatches to the JSON renderer and the reply is valid JSON.
+    _ = sys.sendto(cfd, "status --json\n", 14, 0, @ptrCast(&sa), alen);
+    ctl.handle();
+    rrc = sys.recvfrom(cfd, &out, out.len, 0, null, null);
+    try std.testing.expect(sys.errno(rrc) == .SUCCESS);
+    const jbody = out[0..@intCast(rrc)];
+    try std.testing.expect(std.mem.indexOf(u8, jbody, "\"schema_version\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jbody, "\"version\":\"1.2.3\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, jbody, "\"counters\":{") != null);
 }
 
 test "control: save persists a replayable snapshot and acks" {
