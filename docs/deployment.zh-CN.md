@@ -556,6 +556,63 @@ sudo iptables -t mangle -A POSTROUTING -o eth0 -j DSCP --set-dscp 0
 - 同运营商好、跨运营商坏 → 是**路径**问题，不是协议——把 Hub 挪近（第 5 项），别往代码里改。
 - 晚上坏、白天好 → 是拥塞时段，不是代码突然回归。
 
+### 主机与网卡调优（socket 缓冲、CPU 与 IRQ 亲和）
+
+上面的整形讲的是**出方向**；这一节讲的是**入方向缓冲与 CPU**，目的是让一个繁忙的节点——尤其是 **Hub**
+——不要在单线程 reactor 来得及排空之前就丢包。和路由、`tc` 一样，这些全是**主机侧、由运维施加**的：守护进程
+只打印它的方案、从不修改主机状态（§3，“print, don't apply”），也从不自动 `sysctl`。
+
+**Socket 接收缓冲——*静默*丢包。** 在突发下，过小的 UDP**接收**缓冲会让内核在 reactor 读取之前就丢掉数据报。
+这种丢包**在 `subnetra status`（§6）里看不到**：它是内核 socket 缓冲溢出，不是守护进程的丢弃，所以丢包计数器
+一个都不动。要去内核侧找：
+
+```bash
+ss -u -m                       # 每个 socket 的 rmem/wmem 用量与上限
+nstat -az | grep -i 'Udp.*Errors'   # RcvbufErrors / InErrors = 内核 UDP 丢包
+netstat -su | grep -i 'receive buffer errors'
+```
+
+同时抬高上限**和**默认值。subnetra 使用内核**默认**缓冲（它不会 `setsockopt` 自己的大小——与路由相同的
+“不偷偷覆盖主机”原则），所以真正决定它 socket 大小的是 `*_default`，而 `*_max` 是上限：
+
+```bash
+sudo tee /etc/sysctl.d/30-subnetra.conf >/dev/null <<'EOF'
+net.core.rmem_max     = 8388608
+net.core.wmem_max     = 8388608
+net.core.rmem_default = 4194304
+net.core.wmem_default = 2097152
+EOF
+sudo sysctl --system
+```
+
+从几 MB 起步，确认在你真实的突发下 `RcvbufErrors` 计数器停止增长即可；过度加大只会增加时延。
+
+**把 reactor 钉在一个安静的核上。** 数据面按铁律 #3 是单线程的。让它远离正在跑网卡 softirq / 其他负载的核，
+以免它在排空途中被抢占：
+
+```ini
+# /etc/systemd/system/subnetrad.service.d/cpu.conf  ->  [Service]
+CPUAffinity=2
+```
+
+（或运行时 `taskset -cp 2 "$(pidof subnetrad)"`。）
+
+**把网卡中断从那个核上挪开。** 启用网卡的多队列/RSS，并把它的 IRQ 与 RPS/XPS softirq 工作分散到*其他*核上，
+使接收处理不与 reactor 抢它被钉住的那个核：
+
+```bash
+# RPS：让若干个核共担某个 rx 队列的 softirq（掩码排除 reactor 所在核）。
+echo fb | sudo tee /sys/class/net/eth0/queues/rx-0/rps_cpus
+# IRQ 亲和：把每个网卡 rx 队列的 IRQ 钉到 reactor 之外的核
+# （参见你驱动的 set_irq_affinity 工具；如果 irqbalance 跟你对着干就关掉它）。
+```
+
+**单核 Hub 注意事项（按此规格选型）。** Hub 做**中继**：每转发一个包都要做一次入向解密**和**一次出向重新加密，
+全在那一个 reactor 线程上（`reactor.zig`）。所以 Hub 会比 spoke 先吃满**单个 CPU 核**，也是最先撞到每秒包数
+（PPS）天花板的地方。据此选型：单核主频比核数更重要；当一个 Hub 核吃满时，要**横向**扩展（更多 Hub——§9 第 5 项
+的按区域部署，或 §8 的冗余 Hub 模式），而**不是纵向**加线程（守护进程按铁律是单线程的，不会长出线程池）。在选型前，
+用 §10 / issue #97 的基准工具测出你的真实天花板。
+
 ## 10. 对生产部署做基准测试（Benchmarking a live deployment）
 
 第 9 节讲的是*调优*，这一节讲的是*测量*——从已部署的 overlay 上取得真实的 RTT 与

@@ -666,6 +666,76 @@ by default.
   Hub closer (item 5), not into the code.
 - Bad at night, fine by day → a congestion window, not a regression.
 
+### Host & NIC tuning (socket buffers, CPU & IRQ affinity)
+
+The shaping above is about **egress**; this is about **ingress buffering and CPU**
+so a busy node — the **Hub** especially — doesn't drop packets before the
+single-threaded reactor can drain them. Like routing and `tc`, all of it is
+**host-side and operator-applied**: the daemon prints its plan but never mutates
+host state (§3, "print, don't apply"), and it never auto-`sysctl`s.
+
+**Socket receive buffers — the *silent* drop.** Under burst, an undersized UDP
+**receive** buffer makes the kernel drop datagrams *before* the reactor reads them.
+This loss is **invisible to `subnetra status`** (§6): it is a kernel socket-buffer
+overflow, not a daemon drop, so none of the drop counters move. Find it at the
+kernel instead:
+
+```bash
+ss -u -m                       # per-socket rmem/wmem usage and limits
+nstat -az | grep -i 'Udp.*Errors'   # RcvbufErrors / InErrors = kernel UDP drops
+netstat -su | grep -i 'receive buffer errors'
+```
+
+Raise the ceiling **and** the default. subnetra uses the kernel **default** buffer
+(it does not `setsockopt` its own size — same "don't silently override the host"
+stance as routing), so `*_default` is what actually sizes its socket and `*_max`
+is the ceiling:
+
+```bash
+sudo tee /etc/sysctl.d/30-subnetra.conf >/dev/null <<'EOF'
+net.core.rmem_max     = 8388608
+net.core.wmem_max     = 8388608
+net.core.rmem_default = 4194304
+net.core.wmem_default = 2097152
+EOF
+sudo sysctl --system
+```
+
+Start at a few MB and confirm the `RcvbufErrors` counter stops advancing under your
+real burst; oversizing just adds latency.
+
+**Pin the reactor to a quiet core.** The data plane is single-threaded by law (iron
+law #3). Keep it off the cores doing NIC softirq / other load so it is not preempted
+mid-drain:
+
+```ini
+# /etc/systemd/system/subnetrad.service.d/cpu.conf  ->  [Service]
+CPUAffinity=2
+```
+
+(or `taskset -cp 2 "$(pidof subnetrad)"` at runtime.)
+
+**Spread NIC interrupts away from that core.** Enable the NIC's multi-queue/RSS and
+distribute its IRQs and RPS/XPS softirq work across the *other* cores, so receive
+processing doesn't compete with the reactor on its pinned core:
+
+```bash
+# RPS: let several cores share softirq for an rx queue (mask excludes the reactor core).
+echo fb | sudo tee /sys/class/net/eth0/queues/rx-0/rps_cpus
+# IRQ affinity: pin each NIC rx-queue IRQ to a core other than the reactor's
+# (see your driver's set_irq_affinity helper; disable irqbalance if it fights you).
+```
+
+**The single-core Hub caveat (size for this).** A Hub **relays**: for every relayed
+packet it does an ingress decrypt **and** an egress re-encrypt, all on the one
+reactor thread (`reactor.zig`). So a Hub saturates a **single CPU core** before a
+spoke does and is the first place to hit a packets-per-second ceiling. Size for it:
+a fast single-core clock matters more than core count, and when one Hub core
+saturates you scale **out** (more Hubs — per-region placement in §9 item 5, or the
+redundant-Hub patterns in §8), **not up** with threads (the daemon is single-threaded
+by law and will not grow a thread pool). Measure your actual ceiling with the
+benchmark harness in §10 / issue #97 before sizing.
+
 ## 10. Benchmarking a live deployment
 
 Section 9 is about *tuning*; this is about *measuring* — getting real RTT and
