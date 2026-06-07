@@ -400,3 +400,86 @@ by default.
 - Same-ISP fine, cross-ISP bad → it's the **path**, not the protocol — move the
   Hub closer (item 5), not into the code.
 - Bad at night, fine by day → a congestion window, not a regression.
+
+## 9. Benchmarking a live deployment
+
+Section 8 is about *tuning*; this is about *measuring* — getting real RTT and
+throughput/pps numbers from the deployed overlay and attributing any loss. This is
+**field measurement** over the actual mesh (real NAT/WAN, the hub relay, cross-OS
+spokes); it is deliberately not the single-host, reproducible CI baseline tracked in
+issue #97. Use `iperf3` (a **host** tool — never linked into the daemon, iron law #1)
+and `ping`, then read the daemon's own counters.
+
+> **The shipped daemon stays as-is.** `subnetrad` always ships `-O ReleaseSmall`
+> (iron law #6). You measure the deployed binary; you do **not** rebuild it
+> `ReleaseFast` for an end-to-end test. (The `ReleaseFast` build is only for the
+> offline crypto/forward microbenchmarks — `tools/crypto-bench`, and `forward-bench`
+> per #101.)
+
+### Quick start
+
+`deploy/bench-overlay.sh` drives the whole matrix and is read-only:
+
+```bash
+# On the target (e.g. the hub) — serve, bound to the overlay IP so only
+# tunnel traffic reaches it:
+deploy/bench-overlay.sh serve 10.66.0.1
+
+# On the peer (a spoke) — ping + the iperf3 client matrix against the target:
+deploy/bench-overlay.sh 10.66.0.1 -u -t 30
+#   -u  also runs UDP throughput + 64-byte small-packet pps
+#   -d <direct-ip>  adds a direct (underlay) run to compute the tunnel-overhead %
+```
+
+### Or run the pieces by hand
+
+```bash
+# RTT / jitter / loss
+ping -c 50 10.66.0.1
+
+# Bulk throughput (start the server first: iperf3 -s -B 10.66.0.1 on the hub)
+iperf3 -c 10.66.0.1 -t 30            # single TCP stream
+iperf3 -c 10.66.0.1 -t 30 -P 4       # parallel — push toward the single-core hub limit
+iperf3 -c 10.66.0.1 -t 30 -R         # reverse (hub -> spoke direction)
+
+# Packet rate + loss
+iperf3 -c 10.66.0.1 -u -b 0 -t 30        # UDP unbounded: jitter + loss%
+iperf3 -c 10.66.0.1 -u -b 0 -l 64 -t 30  # 64-byte packets: small-packet pps
+```
+
+**Tunnel overhead.** Run the same single-stream test once over the overlay IP and
+once over the peer's direct (underlay/public) IP; the throughput ratio is the tunnel
+tax (outer IP/UDP + AEAD + the single-threaded reactor). `bench-overlay.sh -d
+<direct-ip>` computes it for you.
+
+### Attribute loss with the daemon's counters
+
+`iperf3` tells you *that* you lost packets; `subnetra status` (Section 6) tells you
+*where*. Snapshot it before and after a run and read the deltas (`bench-overlay.sh`
+does this automatically on Linux):
+
+| Counter (in `drops:`) | What a nonzero delta means |
+|---|---|
+| `udp spoof` | inner source IP outside the peer's `allowed_src` — a misconfigured prefix |
+| `udp no_route` / `tun no_route` | no policy entry for the destination — missing/incomplete relay policy (Section 5) |
+| `udp unknown_peer` | the datagram's `key_id` matches no configured peer |
+| `udp auth_or_invalid` | failed AEAD / replay / malformed — key mismatch or tampering |
+| `*_send_err` | the kernel refused the send — local routing/MTU/buffer problem on this node |
+| `relay packets` (in `traffic:`) | hub forwarding is happening (expected on the hub) |
+
+A clean run shows the traffic counters climbing and the `drop_*` counters flat. If
+`iperf3` reports loss but every `drop_*` is flat **on both ends**, the loss is in the
+**underlay** (Section 8), not in subnetra.
+
+> **macOS spokes:** `subnetra status` returns `Unsupported` by design (the control
+> client is Linux-only). Use `deploy/mac-spoke-status.sh` for the spoke's own health,
+> and query the **hub** (`ssh <hub> 'sudo subnetra status'`) for the per-peer
+> relay/drop/last_seen counters.
+
+### Read the result against the MTU
+
+Overlay MTU is **1452** (raw_direct); the inner payload must not exceed it. The
+classic signature — small packets fine, large transfers stall — is an MTU/MSS
+problem, not a throughput one (Section 8 item 3; see also #98). Print the safe tunnel
+MTU and the MSS-clamp rule with `subnetrad --print-network-plan` before you trust a
+low bulk number.

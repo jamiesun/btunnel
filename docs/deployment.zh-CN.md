@@ -344,3 +344,76 @@ sudo iptables -t mangle -A POSTROUTING -o eth0 -j DSCP --set-dscp 0
 - 大包丢、小包通 → MTU（第 3 项）。
 - 同运营商好、跨运营商坏 → 是**路径**问题，不是协议——把 Hub 挪近（第 5 项），别往代码里改。
 - 晚上坏、白天好 → 是拥塞时段，不是代码突然回归。
+
+## 9. 对生产部署做基准测试（Benchmarking a live deployment）
+
+第 8 节讲的是*调优*，这一节讲的是*测量*——从已部署的 overlay 上取得真实的 RTT 与
+吞吐/pps 数字，并定位丢包。这里是对真实 mesh 的**现场测量**（真实 NAT/WAN、hub 中继、
+跨操作系统的 spoke）；它刻意不同于 issue #97 所跟踪的、单机可复现的 CI 基线。用
+`iperf3`（**主机**工具——绝不链接进守护进程，铁律 #1）和 `ping`，然后读守护进程自己的计数器。
+
+> **被部署的守护进程保持原样。** `subnetrad` 始终以 `-O ReleaseSmall` 发布（铁律 #6）。
+> 你测量的是已部署的二进制，**不要**为了端到端测试把它重编为 `ReleaseFast`。
+> （`ReleaseFast` 构建只用于离线的密码学/转发微基准——`tools/crypto-bench`，以及 #101 的
+> `forward-bench`。）
+
+### 快速开始
+
+`deploy/bench-overlay.sh` 驱动整套矩阵，且是只读的：
+
+```bash
+# 在目标端（例如 hub）——绑定到 overlay IP 起服务端，使只有隧道流量能到达它：
+deploy/bench-overlay.sh serve 10.66.0.1
+
+# 在对端（一个 spoke）——对目标跑 ping + iperf3 客户端矩阵：
+deploy/bench-overlay.sh 10.66.0.1 -u -t 30
+#   -u  额外跑 UDP 吞吐 + 64 字节小包 pps
+#   -d <direct-ip>  额外跑一次直连（underlay）以计算隧道开销 %
+```
+
+### 或者手动逐项运行
+
+```bash
+# RTT / 抖动 / 丢包
+ping -c 50 10.66.0.1
+
+# 批量吞吐（先在 hub 上起服务端：iperf3 -s -B 10.66.0.1）
+iperf3 -c 10.66.0.1 -t 30            # 单条 TCP 流
+iperf3 -c 10.66.0.1 -t 30 -P 4       # 并行——把 hub 的单核上限压出来
+iperf3 -c 10.66.0.1 -t 30 -R         # 反向（hub -> spoke 方向）
+
+# 包速率 + 丢包
+iperf3 -c 10.66.0.1 -u -b 0 -t 30        # UDP 无上限：抖动 + 丢包%
+iperf3 -c 10.66.0.1 -u -b 0 -l 64 -t 30  # 64 字节包：小包 pps
+```
+
+**隧道开销。** 对 overlay IP 和对端的直连（underlay/公网）IP 各跑一次同样的单流测试；
+吞吐之比就是隧道税（外层 IP/UDP + AEAD + 单线程 reactor）。`bench-overlay.sh -d <direct-ip>`
+会替你算出来。
+
+### 用守护进程的计数器定位丢包
+
+`iperf3` 告诉你*丢了*包；`subnetra status`（第 6 节）告诉你丢在*哪里*。在一次运行前后各
+快照一次，读增量（`bench-overlay.sh` 在 Linux 上会自动做）：
+
+| 计数器（位于 `drops:`） | 增量非零意味着 |
+|---|---|
+| `udp spoof` | 内层源 IP 不在该 peer 的 `allowed_src` 内——前缀配错了 |
+| `udp no_route` / `tun no_route` | 目的地没有策略条目——中继策略缺失/不全（第 5 节） |
+| `udp unknown_peer` | 数据报的 `key_id` 匹配不到任何已配置 peer |
+| `udp auth_or_invalid` | AEAD/重放/格式校验失败——密钥不匹配或被篡改 |
+| `*_send_err` | 内核拒绝了发送——本节点的本地路由/MTU/缓冲问题 |
+| `relay packets`（位于 `traffic:`） | 正在发生 hub 转发（在 hub 上属预期） |
+
+一次干净的运行：traffic 计数器在涨，而 `drop_*` 计数器保持不动。如果 `iperf3` 报告丢包，
+但**两端**的每个 `drop_*` 都不动，那丢包在 **underlay**（第 8 节），不在 subnetra。
+
+> **macOS spoke：** `subnetra status` 按设计返回 `Unsupported`（控制客户端仅 Linux）。
+> spoke 自身健康用 `deploy/mac-spoke-status.sh`；逐 peer 的 relay/drop/last_seen 计数器到
+> **hub** 上查（`ssh <hub> 'sudo subnetra status'`）。
+
+### 结合 MTU 解读结果
+
+overlay MTU 为 **1452**（raw_direct）；内层负载不得超过它。经典特征——小包正常、大块传输卡死——
+是 MTU/MSS 问题，不是吞吐问题（第 8 节第 3 项；另见 #98）。在你相信一个偏低的批量数字之前，
+先用 `subnetrad --print-network-plan` 打印安全隧道 MTU 与 MSS-clamp 规则。
