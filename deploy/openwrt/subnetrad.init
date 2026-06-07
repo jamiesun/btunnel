@@ -1,0 +1,62 @@
+#!/bin/sh /etc/rc.common
+# Subnetra — pure-Zig L3 UDP tunnel — OpenWrt procd service.
+#
+# OpenWrt uses procd, not systemd, so this is the init equivalent of
+# deploy/subnetrad.service. Install it as /etc/init.d/subnetrad:
+#
+#   opkg update && opkg install kmod-tun
+#   # Copy the static musl binaries for your router's arch (mipsel / mips / arm /
+#   # aarch64 — see `opkg print-architecture`):
+#   #   subnetrad -> /usr/sbin/subnetrad      subnetra -> /usr/bin/subnetra
+#   cp subnetrad.init /etc/init.d/subnetrad && chmod 0755 /etc/init.d/subnetrad
+#   # Put this node's config (with its PSKs) at /etc/subnetra/config.json,
+#   # root-owned and mode 0600:
+#   mkdir -p /etc/subnetra && chmod 0600 /etc/subnetra/config.json
+#   /etc/init.d/subnetrad enable
+#   /etc/init.d/subnetrad start
+#
+# Subnetra only PRINTS the host network plan (`subnetra --print-network-plan`); it
+# never edits addresses or routes itself. Apply the snr0 addressing/routes AFTER
+# the service is up (see the "OpenWrt Spoke" guide). The data plane is stateless,
+# so procd respawn / a restart is cheap.
+
+USE_PROCD=1
+# Start late (after the network and, ideally, time sync); stop early.
+START=95
+STOP=10
+
+PROG=/usr/sbin/subnetrad
+CONF=/etc/subnetra/config.json
+SOCK=/var/run/subnetra.sock
+
+start_service() {
+	# Fail fast on a bad config instead of respawn-looping the data plane — the
+	# same gate the systemd unit uses (ExecStartPre). `--check` is an offline
+	# parse + sanity check (it does want a sane clock; OpenWrt should run
+	# sysntpd, and START=95 keeps this after the network is up).
+	if ! "$PROG" --check --config "$CONF"; then
+		echo "subnetrad: config $CONF failed --check; not starting" >&2
+		return 1
+	fi
+
+	procd_open_instance
+	procd_set_param command "$PROG" --config "$CONF"
+	# respawn <threshold> <timeout> <retry>: reset the counter if it ran longer
+	# than 1h; wait 5s between restarts; 0 = retry forever (it is a tunnel).
+	procd_set_param respawn 3600 5 0
+	procd_set_param env SUBNETRA_SOCK="$SOCK"
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+service_triggers() {
+	# The daemon is stateless; bounce it when the network config reloads so it
+	# re-binds cleanly after an underlay change.
+	procd_add_reload_trigger network
+}
+
+reload_service() {
+	stop
+	start
+}

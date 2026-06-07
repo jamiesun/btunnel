@@ -41,6 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh |
 | [容器镜像](#容器镜像) | Linux 主机、RouterOS / BusyBox 容器 | 多架构 `amd64 / arm64 / armv7 / armv5` |
 | [发布二进制](#发布二进制) | 裸 Linux 主机、离线安装 | 同时提供可 `docker load` 的镜像 tar 包 |
 | [macOS Spoke 二进制](#macos-spoke-二进制) | Apple Silicon / Intel Mac（仅 Spoke） | 由 Runbook 验收，未纳入 CI 门禁 |
+| [OpenWrt 路由器](../operations/openwrt.md) | MIPS / ARM 家用与 SOHO 路由器（Spoke） | 静态 musl 二进制 + procd 服务 |
 | [从源码构建](#从源码构建) | 开发、自定义目标 | 需要 Zig 0.16.0+ |
 
 无论采用哪种方式，守护进程在运行时都需要两样东西：**`NET_ADMIN`** 能力（用于创建
@@ -73,14 +74,18 @@ docker run -d --name subnetra \
 ## 发布二进制
 
 可在 **[Releases 页面](https://github.com/jamiesun/subnetra/releases/latest)** 浏览并
-下载任意发布。每个发布（`vX.Y.Z`）都会附上 `amd64`、`arm64`、`armv7`、`armv5` 的
-**静态二进制 tar 包**。Linux 二进制基于 musl-libc 全静态链接——`ldd` 显示
+下载任意发布。每个发布（`vX.Y.Z`）都会附上 `amd64`、`arm64`、`armv7`、`armv5`、`mipsel`、
+`mips` 的 **静态二进制 tar 包**。Linux 二进制基于 musl-libc 全静态链接——`ldd` 显示
 `not a dynamic executable`。
+
+> **MIPS / OpenWrt：** `mipsel` 为小端（ramips/mt7621/mt7628，多数现代 OpenWrt 设备），
+> `mips` 为大端（ath79/Atheros）。如何选对架构以及 procd 服务，见
+> [OpenWrt Spoke](../operations/openwrt.md) 指南。
 
 产物名带版本号，因此先解析一次版本，再下载、校验、安装：
 
 ```bash
-ARCH=amd64   # 取值：amd64 | arm64 | armv7 | armv5
+ARCH=amd64   # 取值：amd64 | arm64 | armv7 | armv5 | mipsel | mips
 VER=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
         https://github.com/jamiesun/subnetra/releases/latest | sed 's#.*/tag/##')
 
@@ -145,6 +150,8 @@ zig build -Dtarget=x86_64-linux-musl     # amd64
 zig build -Dtarget=aarch64-linux-musl    # arm64
 zig build -Dtarget=arm-linux-musleabihf  # armv7（硬浮点）
 zig build -Dtarget=arm-linux-musleabi    # armv5（软浮点）
+zig build -Dtarget=mipsel-linux-musl     # mipsel（小端：ramips/mt7621 — OpenWrt）
+zig build -Dtarget=mips-linux-musl       # mips（大端：ath79/Atheros — OpenWrt）
 
 # 运行测试
 zig build test

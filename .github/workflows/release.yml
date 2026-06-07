@@ -86,6 +86,12 @@ jobs:
           - arch: armv5
             target: arm-linux-musleabi
             cpu: "arm926ej_s"
+          - arch: mipsel
+            target: mipsel-linux-musl
+            cpu: ""
+          - arch: mips
+            target: mips-linux-musl
+            cpu: ""
     steps:
       - uses: actions/checkout@v5
 

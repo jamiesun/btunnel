@@ -24,6 +24,7 @@
 - [生产部署](operations/deployment.md)
 - [容器](operations/containers.md)
 - [RouterOS Spoke](operations/routeros.md)
+- [OpenWrt Spoke](operations/openwrt.md)
 - [macOS Spoke](operations/macos-spoke.md)
 - [可观测性与排障](operations/observability.md)
 - [升级与发布](operations/upgrade.md)
