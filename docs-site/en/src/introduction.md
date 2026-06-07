@@ -1,63 +1,99 @@
 # Introduction
 
-**Subnetra** is a pure-[Zig](https://ziglang.org/), zero-dependency **Layer-3 UDP
-tunnel** that ships as a single, fully static binary under **512 KB**.
-
-It builds a virtual subnet on top of a physical leased line using a
-**hub-and-spoke topology**, forwarding raw IP packets through a private,
-fully-encrypted UDP tunnel. It does **not depend on any third-party network
-framework** — the TUN device, encryption, anti-replay, and policy engine are all
-in-house.
-
-Subnetra targets **general Linux environments**, including extremely constrained
-containers (BusyBox / RouterOS Container), and runs natively on **macOS as a
-spoke** (`utun` + `poll(2)`): zero dependencies, zero dynamic allocation in the
-data plane, and strong stealth.
+**Connect your servers, sites, and devices into one private, encrypted network — shipped as a single tiny binary that runs anywhere, from a cloud VM to a MikroTik router.**
 
 > This documentation site is bilingual. Use the **中文 / EN** toggle in the top
 > bar to switch languages, or read the [简体中文文档](https://jamiesun.github.io/subnetra/zh/).
 
-## Why Subnetra?
+## What is Subnetra?
 
-| If you need… | Subnetra gives you… |
-|---|---|
-| To run a tunnel inside a RouterOS / BusyBox container | One static musl binary, ≤ 512 KB, no shared libraries |
-| Predictable latency on a leased line | A single-threaded, allocation-free data plane with zero GC/jitter |
-| Stealth against active probing | ChaCha20-Poly1305 full encryption, no magic bytes, silent drop on failure |
-| Site-to-site routing between branches | A CIDR longest-prefix policy engine, hot-swapped via RCU with no restart |
-| Reproducible, auditable behavior | A normative [wire protocol spec](reference/wire-protocol.md) with known-answer test vectors |
+Subnetra stitches machines in different places — offices, a data center, roaming
+laptops, home labs, containers, routers — into a **single flat private subnet**.
 
-## Features at a glance
+It uses a **hub-and-spoke** design: a reachable **hub** relays traffic between
+**spokes**, so any node can reach any other by a stable overlay IP **even when most
+of them sit behind NAT**. Every packet travels **fully encrypted** over an ordinary
+UDP tunnel, and the whole thing is **one self-contained binary** — nothing else to
+install, no kernel modules, no daemon zoo.
 
-- **Zero-dependency single binary** — fully static linking against musl-libc;
-  `ldd` reports `not a dynamic executable`; size ≤ 512 KB.
-- **Layered zero dynamic allocation** — the data plane (reactor / crypto) is
-  strictly allocation-free, with buffers locked into resident memory at startup.
-- **Single-threaded event-driven reactor** — Linux `epoll` edge-triggered
-  (`EPOLLET`) or macOS `poll(2)`, selected at comptime; lock-free, with no
-  concurrency contention.
-- **Stateless obfuscation** — ChaCha20-Poly1305 full encryption; ciphertext has
-  no fixed magic number; authentication failures are silently dropped — physically
-  invisible to probing.
-- **Transport security** — private per-peer pre-shared keys (one secret per hub
-  link, never mesh-wide) + per-link directional keys + per-restart session epoch +
-  64-bit monotonic nonce (never reused) + per-session sliding-window anti-replay.
-- **Lock-free RCU hot updates** — the policy tree is replaced wholesale via an
-  atomic pointer swap; hot updates are zero-copy and jitter-free.
-- **Multi-subnet policy engine** — CIDR longest-prefix matching, with
-  Site-to-Site routing support.
+## What you can do with it
 
-## The data path in five steps
+- 🏢 **Link branch offices to a data center** — route whole subnets site-to-site over one private overlay.
+- 💻 **Give roaming laptops a stable private IP** that follows them across Wi-Fi, LTE, and home networks.
+- 🧪 **Reach home-lab / IoT / container services** as if they were on the same LAN.
+- 🛰 **Publish a LAN from behind NAT** — e.g. a MikroTik router exposing `192.168.88.0/24` to the mesh.
+- 📦 **Run where heavy VPN stacks won't fit** — constrained containers, BusyBox, small ARM boxes, edge routers.
 
-1. **TUN ingress** — read raw IPv4 packets from the virtual L3 device.
-2. **Encrypt & seal** — ChaCha20-Poly1305 over a 20-byte private header; silent
-   drop on failure.
-3. **Star relay** — the hub relays by policy to each spoke, and never back to the
-   source.
-4. **Policy routing** — longest-prefix CIDR match, hot-swapped via RCU without a
-   restart.
-5. **Spoke egress** — verify epoch, nonce, anti-replay and inner source, then
-   deliver.
+## Highlights
+
+- **Runs anywhere, installs as one file** — a single static binary (**under 512 KB** on
+  Linux) with **zero external dependencies**. Drops onto cloud VMs, containers, BusyBox,
+  Raspberry Pi, and **MikroTik RouterOS**. Builds for `amd64` / `arm64` / `armv7` / `armv5`,
+  plus a native **macOS** spoke.
+- **Encrypted by default, invisible on the wire** — every packet is ChaCha20-Poly1305
+  encrypted with **per-link keys** and **replay protection**. There are no magic bytes, and
+  unauthenticated packets are **dropped silently** — to a port scanner the tunnel looks like
+  nothing is listening.
+- **A flat private subnet with policy routing** — give every node an overlay IP, route whole
+  subnets site-to-site, and let the hub relay **spoke-to-spoke** so nodes behind NAT still
+  reach each other.
+- **Just works behind NAT** — spokes keep their own NAT pinhole open with a **built-in
+  keepalive**, and the hub **automatically relearns** a spoke that roams to a new address —
+  no external pinger, no manual reconnect.
+- **Change routes live** — inject or update forwarding rules at runtime with **zero
+  downtime**: no restart, no dropped packets.
+- **Built to be operated** — human-readable **and** JSON status, per-reason drop counters
+  that tell you *why* traffic isn't flowing, per-peer health/`online` flags, and a
+  **Prometheus** exporter for alerting.
+- **Simple, declarative config** — describe a node as a `hub` or a `spoke` and the
+  forwarding table is derived for you. Name your peers so `status` reads `bj-office-gw`,
+  not `id=2`.
+
+## Quick start
+
+The fastest path is the container image (the hub is typically a public cloud host):
+
+```bash
+# 1. Create a config — one hub, one or more spokes.
+cp config.example.json config.json
+#    Set a UNIQUE 64-hex key on every peer link:  openssl rand -hex 32
+
+# 2. Run it (the tunnel needs the TUN device + NET_ADMIN).
+docker run -d --name subnetra \
+    --cap-add=NET_ADMIN --device=/dev/net/tun \
+    -v "$PWD/config.json":/etc/subnetra/config.json:ro \
+    ghcr.io/jamiesun/subnetra:latest
+
+# 3. Check it.
+docker exec subnetra subnetra status
+```
+
+Prefer a bare binary? Grab the static build for your architecture from the
+[latest release](https://github.com/jamiesun/subnetra/releases/latest), then follow the
+**[Installation](getting-started/installation.md)** and **[Quick Start](getting-started/quickstart.md)**
+guides. A full hub + two-spoke production walkthrough lives in
+**[Production Deployment](operations/deployment.md)**.
+
+## Operate & observe
+
+`subnetra status` turns the silent, by-design packet drops into countable signals so
+you can tell *why* traffic is or isn't flowing:
+
+```text
+subnetra v0.5.1 [running]
+mode=raw_direct local_id=1 udp_port=51820 tun=snr0 peers=2
+peers:
+  id=2 name=bj-office-gw endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
+  id=3 name=alice-laptop endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
+traffic: tun_rx / udp_tx / udp_rx / tun_tx / relay / keepalive …
+drops:   unknown_peer / auth_or_invalid / spoof / no_route …
+```
+
+`subnetra status --json` emits the same data as a stable, versioned JSON object — with a
+per-peer `last_seen_age_seconds` and `online` flag — and a drop-in **Prometheus** exporter
+turns it into scrapeable metrics. See
+**[Observability & Troubleshooting](operations/observability.md)** for the full status
+schema, the drop taxonomy, and alerting examples.
 
 ## How to read these docs
 
@@ -67,7 +103,9 @@ data plane, and strong stealth.
   and the **[Security Model](concepts/security-model.md)**.
 - Setting up a config? See the **[Configuration Reference](configuration/reference.md)**
   and **[Roles](configuration/roles.md)**.
-- Going to production? Follow **[Production Deployment](operations/deployment.md)**.
+- Going to production? Follow **[Production Deployment](operations/deployment.md)**,
+  **[Containers](operations/containers.md)**, **[RouterOS Spoke](operations/routeros.md)**,
+  or the **[macOS Spoke](operations/macos-spoke.md)** runbook.
 - Building another implementation? The **[Wire Protocol](reference/wire-protocol.md)**
   is the normative contract.
 
