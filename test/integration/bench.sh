@@ -141,9 +141,13 @@ write_config "$TMP/b" 3 \
   "[ {\"id\":1,\"endpoint\":\"10.100.2.1:51820\",\"allowed_src\":\"10.0.0.0/24\",\"psk\":\"$PSK_B\"} ]"
 
 HUB_SOCK="$TMP/hub.sock"; A_SOCK="$TMP/a.sock"; B_SOCK="$TMP/b.sock"
-start_daemon() { # start_daemon <ns> <dir> <sock> <pin-array-name>
+start_daemon() { # start_daemon <ns> <dir> <sock> [pin-prefix...]
   local ns="$1" dir="$2" sock="$3"; shift 3
-  ip netns exec "$ns" "$@" env SUBNETRA_SOCK="$sock" "$dir/subnetrad" >"$dir/daemon.log" 2>&1 &
+  # The daemon reads config.json from its CWD, so cd into the node dir first
+  # (mirrors run.sh). Any pin prefix ("$@", e.g. `taskset -c 0`) wraps the exec
+  # chain so the daemon inherits the CPU affinity; ip netns exec / taskset / bash
+  # all exec in place, so $! is the subnetrad PID.
+  ip netns exec "$ns" "$@" bash -c "cd '$dir' && exec env SUBNETRA_SOCK='$sock' ./subnetrad" >"$dir/daemon.log" 2>&1 &
   PIDS+=("$!")
 }
 start_daemon bt_bench_hub "$TMP/hub" "$HUB_SOCK" "${PIN_HUB[@]}";  HUB_PID="${PIDS[-1]}"
