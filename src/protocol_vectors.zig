@@ -217,7 +217,8 @@ pub fn compute(v: Vector) !Output {
 const Mutation = enum {
     none,
     bad_version, // byte 0 := 2
-    bad_flags, // byte 1 := 1
+    bad_flags, // byte 1 := 0b10 (an unknown reserved flag bit)
+    keepalive_flag, // byte 1 := FLAG_KEEPALIVE (bit 0)
     zero_epoch, // epoch field := 0
     truncate_header, // cut to HEADER_LEN-1 bytes
     flip_tag, // flip the last byte (AEAD auth failure)
@@ -268,7 +269,7 @@ pub const RX_CASES = [_]RxCase{
         .to_id = 3,
         .steps = &.{
             .{ .note = "wrong version is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .bad_version },
-            .{ .note = "non-zero flags is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .bad_flags },
+            .{ .note = "an unknown reserved flag bit is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .bad_flags },
             .{ .note = "zero epoch is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .zero_epoch },
             .{ .note = "datagram shorter than the header is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .truncate_header },
             .{ .note = "tampered tag fails authentication and is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = IPV4_A, .mutation = .flip_tag },
@@ -298,6 +299,20 @@ pub const RX_CASES = [_]RxCase{
             .{ .note = "datagram at the preloaded epoch authenticates and is accepted", .epoch = MIN_EPOCH + 10_000, .seq = 1, .plaintext_hex = IPV4_A },
         },
     },
+    .{
+        .name = "keepalive-flag-accepted",
+        .psk_hex = "abad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1deaabad1dea",
+        .from_id = 8,
+        .to_id = 9,
+        .steps = &.{
+            // issue #96: a keepalive sets flag bit 0 and carries an EMPTY body.
+            // It authenticates and decodes to a zero-length plaintext (the hub
+            // uses it only to refresh the endpoint, then drops it before routing).
+            .{ .note = "keepalive flag (bit 0) with an empty body is accepted and recovers an empty plaintext", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = "", .mutation = .keepalive_flag },
+            // The keepalive still rides the replay window like any datagram.
+            .{ .note = "a byte-identical keepalive replay is dropped", .epoch = MIN_EPOCH, .seq = 1, .plaintext_hex = "", .mutation = .keepalive_flag },
+        },
+    },
 };
 
 /// Build a (possibly mutated) datagram for a receiver step. Returns the slice.
@@ -308,7 +323,8 @@ fn buildRxDatagram(link_key: crypto.Key, key_id: u16, step: RxStep, out: []u8) !
     switch (step.mutation) {
         .none => {},
         .bad_version => out[0] = 2,
-        .bad_flags => out[1] = 1,
+        .bad_flags => out[1] = 0b0000_0010,
+        .keepalive_flag => out[1] = reactor.FLAG_KEEPALIVE,
         .zero_epoch => @memset(out[4..12], 0),
         .truncate_header => n = reactor.HEADER_LEN - 1,
         .flip_tag => out[n - 1] ^= 0xff,

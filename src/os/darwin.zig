@@ -182,13 +182,21 @@ pub const Poller = struct {
         self.n += 1;
     }
 
-    /// Block until at least one fd is ready, write the ready fds into `out`, and
-    /// return the count (bounded by `out.len`). Retries internally on EINTR.
-    pub fn wait(self: *Poller, out: []sys.fd_t) !usize {
+    /// Block until at least one fd is ready (or `timeout_ms` elapses), write the
+    /// ready fds into `out`, and return the count (bounded by `out.len`). A
+    /// negative `timeout_ms` blocks forever; `0` polls without blocking; otherwise
+    /// it caps the wait so the reactor can fire a due keepalive (issue #96). On a
+    /// finite deadline EINTR returns 0 (a spurious wake; the caller recomputes the
+    /// deadline and its clock-gated keepalive self-corrects); an infinite wait
+    /// retries on EINTR as before. poll(2) already takes a millisecond timeout.
+    pub fn wait(self: *Poller, out: []sys.fd_t, timeout_ms: i32) !usize {
         while (true) {
-            const rc = system.poll(&self.fds, @intCast(self.n), -1);
+            const rc = system.poll(&self.fds, @intCast(self.n), timeout_ms);
             const e = sys.errno(rc);
-            if (e == .INTR) continue;
+            if (e == .INTR) {
+                if (timeout_ms < 0) continue;
+                return 0;
+            }
             if (e != .SUCCESS) return error.PollFailed;
             var count: usize = 0;
             var i: usize = 0;

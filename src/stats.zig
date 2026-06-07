@@ -34,6 +34,14 @@ pub const Counters = struct {
     /// Times a peer's UDP endpoint was relearned from an authenticated datagram
     /// arriving from a new source endpoint (issue #34 roaming).
     udp_endpoint_learned: u64 = 0,
+    /// Authenticated spoke→hub keepalives received (issue #96). Counted on the hub
+    /// after a flagged keepalive authenticates; it refreshes the learned endpoint
+    /// and is dropped before routing (never reaches the TUN), so it shows up here
+    /// and NOT in `tun_tx_packets`.
+    keepalive_rx: u64 = 0,
+    /// Keepalives a spoke emitted to its hub (issue #96). Counted on the spoke
+    /// after a successful send; 0 on a hub/manual node.
+    keepalive_tx: u64 = 0,
 
     // --- TUN egress drops ---
     drop_tun_not_ipv4: u64 = 0,

@@ -11,8 +11,10 @@
 //!     Linux is a verbatim read/write; Darwin strips / prepends the 4-byte utun
 //!     address-family header so the reactor only ever sees a bare IP packet.
 //!   - `Poller`: `init() !Poller`, `add(fd, Trigger) !void`,
-//!     `wait(out: []fd_t) !usize` (block until ≥1 ready, write the ready fds,
-//!     retry on EINTR), `deinit()`. Pumps drain each ready fd to `EAGAIN`.
+//!     `wait(out: []fd_t, timeout_ms: i32) !usize` (block up to `timeout_ms`,
+//!     negative = forever, until ≥1 ready, write the ready fds; retry on EINTR
+//!     only when blocking forever), `deinit()`. Pumps drain each ready fd to
+//!     `EAGAIN`. The finite timeout drives the spoke keepalive (issue #96).
 //!
 //! Linux carries the real epoll + `/dev/net/tun` implementation; Darwin carries
 //! a `poll(2)` readiness loop + `utun` TUN device. Both present the identical
@@ -83,7 +85,7 @@ test "native Poller reports a readable fd" {
     _ = sys.write(fds[1], "x", 1);
 
     var ready: [4]sys.fd_t = undefined;
-    const n = try poller.wait(&ready);
+    const n = try poller.wait(&ready, -1);
     try std.testing.expectEqual(@as(usize, 1), n);
     try std.testing.expectEqual(fds[0], ready[0]);
 }

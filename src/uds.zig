@@ -361,6 +361,7 @@ pub fn formatStatus(
     W.p(out, &len, "  tun_tx packets={d} bytes={d}\n", .{ c.tun_tx_packets, c.tun_tx_bytes });
     W.p(out, &len, "  relay  packets={d} bytes={d}\n", .{ c.relay_packets, c.relay_bytes });
     W.p(out, &len, "  endpoint_learned={d}\n", .{c.udp_endpoint_learned});
+    W.p(out, &len, "  keepalive rx={d} tx={d}\n", .{ c.keepalive_rx, c.keepalive_tx });
     W.p(out, &len, "drops:\n", .{});
     W.p(out, &len, "  tun: not_ipv4={d} no_route={d} drop_rule={d} local_loop={d} unknown_target={d} oversized={d} egress_err={d} send_err={d}\n", .{
         c.drop_tun_not_ipv4,      c.drop_tun_no_route,  c.drop_tun_drop_rule, c.drop_tun_local_loop,

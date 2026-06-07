@@ -32,6 +32,21 @@ pub const Psk = [32]u8;
 /// and data plane are identical across roles — only the bootstrap policy differs.
 pub const Role = enum { manual, hub, spoke };
 
+/// Default built-in keepalive interval (seconds) for `role=spoke` when the config
+/// omits `keepalive_secs` (issue #96). Chosen well under the common ~30s UDP NAT
+/// mapping timeout so the pinhole never lapses, while staying light (one ~36-byte
+/// datagram per interval). Hub/manual roles default to 0 (disabled).
+pub const DEFAULT_SPOKE_KEEPALIVE_SECS: u32 = 20;
+
+/// The keepalive default for a role when the config omits `keepalive_secs`:
+/// non-zero only for a spoke, which is the side that sits behind NAT.
+fn defaultKeepaliveSecs(role: Role) u32 {
+    return switch (role) {
+        .spoke => DEFAULT_SPOKE_KEEPALIVE_SECS,
+        .manual, .hub => 0,
+    };
+}
+
 pub const SanityError = error{
     MtuOutOfRange,
     SubnetOverlap,
@@ -209,6 +224,13 @@ pub const Config = struct {
     remote_routes: [MAX_ROUTES]Cidr = undefined,
     remote_route_count: usize = 0,
 
+    /// Built-in spoke→hub NAT keepalive interval in seconds (issue #96). `0`
+    /// disables it (the hub/manual default). A NATed `role=spoke` defaults to
+    /// `DEFAULT_SPOKE_KEEPALIVE_SECS` so its UDP pinhole and the hub's learned
+    /// endpoint stay fresh with no external pinger; set explicitly to override or
+    /// to disable. Resolved in `fromJson` from the (optional) wire field.
+    keepalive_secs: u32 = 0,
+
     /// Compile-time hardcoded fallback config (used when config.json is
     /// missing). Note: it has zero peers, which `validate()` deliberately
     /// rejects — the default config is intentionally NON-RUNNABLE until real
@@ -310,6 +332,10 @@ pub const Config = struct {
         role: []const u8 = "manual",
         local_routes: []const []const u8 = &.{},
         remote_routes: []const []const u8 = &.{},
+        /// Optional (issue #96): omitted (`null`) means "use the role default"
+        /// (`defaultKeepaliveSecs`); present means an explicit override, including
+        /// `0` to disable keepalive on a spoke.
+        keepalive_secs: ?u32 = null,
     };
 
     /// On-wire schema for a single mesh peer. `psk` is this link's private
@@ -376,6 +402,11 @@ pub const Config = struct {
             .spoke
         else
             return error.InvalidRole;
+
+        // Keepalive interval (issue #96): an explicit value wins; otherwise fall
+        // back to the role default (spoke → DEFAULT_SPOKE_KEEPALIVE_SECS, else 0),
+        // so a plain `role=spoke` config gets NAT keepalive with no extra knob.
+        cfg.keepalive_secs = w.keepalive_secs orelse defaultKeepaliveSecs(cfg.role);
 
         if (w.local_routes.len > MAX_ROUTES) return error.TooManyRoutes;
         for (w.local_routes, 0..) |r, i| {
@@ -609,6 +640,26 @@ test "fromJson: parses role and route arrays (issue #21)" {
 
     // A malformed route CIDR is rejected.
     try std.testing.expectError(error.InvalidCidr, Config.fromJson(a, "{ \"local_routes\": [\"10.0.0.0\"] }"));
+}
+
+test "fromJson: keepalive_secs defaults per role and honors an explicit override (issue #96)" {
+    const a = std.testing.allocator;
+
+    // A spoke with no keepalive_secs gets the built-in NAT keepalive default.
+    const spoke = try Config.fromJson(a, "{ \"role\": \"spoke\", \"local_id\": 2 }");
+    try std.testing.expectEqual(DEFAULT_SPOKE_KEEPALIVE_SECS, spoke.keepalive_secs);
+
+    // Hub and manual roles default to disabled (0).
+    const hub = try Config.fromJson(a, "{ \"role\": \"hub\", \"local_id\": 1 }");
+    try std.testing.expectEqual(@as(u32, 0), hub.keepalive_secs);
+    const manual = try Config.fromJson(a, "{ \"local_id\": 1 }");
+    try std.testing.expectEqual(@as(u32, 0), manual.keepalive_secs);
+
+    // An explicit value always wins, including 0 to disable it on a spoke.
+    const spoke_override = try Config.fromJson(a, "{ \"role\": \"spoke\", \"local_id\": 2, \"keepalive_secs\": 7 }");
+    try std.testing.expectEqual(@as(u32, 7), spoke_override.keepalive_secs);
+    const spoke_off = try Config.fromJson(a, "{ \"role\": \"spoke\", \"local_id\": 2, \"keepalive_secs\": 0 }");
+    try std.testing.expectEqual(@as(u32, 0), spoke_off.keepalive_secs);
 }
 
 test "parseEndpoint: address and port land in network byte order" {

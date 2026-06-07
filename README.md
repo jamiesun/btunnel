@@ -283,8 +283,13 @@ else through the relay needs only:
 ```
 
 This derives `10.0.0.2/32 → LOCAL` and `10.0.0.0/24 → hub(id 1)` automatically —
-no `subnetra` calls. The matching **hub** just lists its spokes; each peer's
-`allowed_src` becomes a forward rule to that peer:
+no `subnetra` calls. A `spoke` also turns on the **built-in NAT keepalive** by
+default (`keepalive_secs = 20`, issue #96): it sends one tiny authenticated
+datagram to its hub every interval so an idle spoke's NAT pinhole stays open and
+the hub keeps a fresh route back — no external pinger. Set `keepalive_secs`
+explicitly to tune it, or `0` to disable (hub/manual default to `0`). The matching
+**hub** just lists its spokes; each peer's `allowed_src` becomes a forward rule to
+that peer:
 
 ```json
 {
@@ -352,6 +357,7 @@ traffic:
   tun_tx packets=... bytes=...
   relay  packets=... bytes=...
   endpoint_learned=..
+  keepalive rx=.. tx=..
 drops:
   tun: not_ipv4=.. no_route=.. drop_rule=.. local_loop=.. unknown_target=.. oversized=.. egress_err=.. send_err=..
   udp: unknown_peer=.. auth_or_invalid=.. not_ipv4=.. spoof=.. no_route=.. drop_rule=.. unknown_target=.. no_reflect=.. oversized=.. send_err=..
@@ -363,7 +369,9 @@ traffic is unsolicited); `auth_or_invalid` means the PSK/epoch or wire format
 does not match; `spoof` means a peer sent an inner source outside its
 `allowed_src`; `no_route` means no policy rule matches the destination. A rising
 `endpoint_learned` is benign — it counts authenticated peers seen at a new UDP
-endpoint (roaming/NAT remap, issue #34). PSKs and derived keys are never printed.
+endpoint (roaming/NAT remap, issue #34). The `keepalive rx`/`tx` line counts the
+built-in spoke→hub NAT keepalive (issue #96): `tx` on the emitting spoke, `rx` on
+the receiving hub. PSKs and derived keys are never printed.
 
 ### Production deployment (systemd)
 

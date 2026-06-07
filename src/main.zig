@@ -315,6 +315,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var reactor = bt.reactor.Reactor.init(tun.fd, udp_fd, &control, &active, &registry);
     reactor.counters = &counters;
 
+    // Arm the built-in spoke→hub keepalive (issue #96). Only a spoke with a
+    // non-zero interval keepalives, and only at its single hub peer (peers[0],
+    // the same hub `deriveInitialPolicy` routes the overlay default to), holding
+    // the NAT pinhole open with no external pinger. Hub/manual nodes leave
+    // keepalive_ns == 0, so the reactor adds zero timer overhead.
+    if (cfg.role == .spoke and cfg.keepalive_secs > 0 and cfg.peer_count > 0) {
+        reactor.keepalive_ns = @as(u64, cfg.keepalive_secs) * std.time.ns_per_s;
+        reactor.keepalive_peer_id = cfg.peers[0].id;
+    }
+
     // Privileged setup is complete: the TUN device and all sockets are open and
     // will not be reopened. The reactor only does read/write/recv/send/epoll on
     // these held fds plus pure-userspace policy swaps, so it needs no further
