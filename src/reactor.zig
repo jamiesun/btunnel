@@ -10,9 +10,12 @@
 //!
 //! Iron laws honoured here:
 //! - Zero data-plane allocation: every packet buffer is resident in `Reactor`
-//!   (rx, tx, and a third `relay` buffer for hub forwarding).
+//!   (rx, tx, and the `UdpBatch` recv/send buffer set used for batched hub
+//!   forwarding — issue #100).
 //! - Single-threaded, lock-free, epoll edge-triggered (EPOLLET); fds are forced
-//!   non-blocking and each readable fd is drained until EAGAIN.
+//!   non-blocking and each readable fd is drained until EAGAIN. UDP ingress is
+//!   drained a batch at a time (one `recvmmsg`) and egress is coalesced (one
+//!   `sendmmsg`); macOS keeps single recvfrom/sendto behind the same surface.
 //! - Crypto auth failure / replay / malformed input are dropped silently.
 //!
 //! Security model (issue #5):
@@ -99,6 +102,9 @@ pub const BUF_LEN: usize = 2048;
 comptime {
     std.debug.assert(BUF_LEN >= MAX_WIRE);
     std.debug.assert(HEADER_LEN == 20);
+    // The batch's per-datagram buffer must match the reactor's wire buffer size
+    // so a decoded packet always fits when re-sealed into an egress slot.
+    std.debug.assert(os.UdpBatch.BUF == BUF_LEN);
 }
 
 pub const EgressError = error{NotImplemented};
@@ -264,10 +270,13 @@ pub const Reactor = struct {
     keepalive_due_ns: u64 = 0,
     rx: [BUF_LEN]u8 = undefined,
     tx: [BUF_LEN]u8 = undefined,
-    /// Third resident buffer for hub relay: an inbound datagram decoded into
-    /// `tx` is re-sealed into `relay` before forwarding to another peer, so the
-    /// two operations never alias.
-    relay: [BUF_LEN]u8 = undefined,
+    /// Batched UDP datagram I/O (issue #100). Inbound datagrams are drained in
+    /// groups with one `recvmmsg`, and relays/forwards are coalesced with one
+    /// `sendmmsg` (macOS loops single recvfrom/sendto behind the same surface).
+    /// Resident and fixed at startup, so the data plane stays allocation-free. An
+    /// inbound datagram is decoded into `tx`, then re-sealed into one of the
+    /// batch's own output buffers before forwarding, so the two never alias.
+    udp: os.UdpBatch = .{},
 
     pub fn init(
         tun_fd: sys.fd_t,
@@ -370,7 +379,7 @@ pub const Reactor = struct {
     /// Loops until EAGAIN.
     pub fn pumpTunToUdp(self: *Reactor) void {
         while (true) {
-            const pkt = os.tunRead(self.tun_fd, &self.rx) orelse return;
+            const pkt = os.tunRead(self.tun_fd, &self.rx) orelse break;
             self.cInc("tun_rx_packets");
             self.cAdd("tun_rx_bytes", @intCast(pkt.len));
 
@@ -403,138 +412,179 @@ pub const Reactor = struct {
                 continue; // v2 modes not yet shipped -> drop
             };
 
-            const wire_len = encodeEgress(&dst_peer.tx, self.localKeyId(), pkt, &self.tx);
-            if (self.sendTo(dst_peer.endpoint, self.tx[0..wire_len])) {
-                self.cInc("udp_tx_packets");
-                self.cAdd("udp_tx_bytes", wire_len);
-            } else {
-                self.cInc("drop_tun_send_err");
-            }
+            // Seal into the next coalesced egress slot; the flush below pushes the
+            // whole drain with one sendmmsg (issue #100). Counters are attributed
+            // per slot at flush time (so a short send is still counted honestly).
+            self.stageEgress(dst_peer, pkt, TAG_TUN_FWD);
         }
+        self.flushEgress();
     }
 
     /// Drain the UDP fd: filter by source endpoint, authenticate + anti-replay
     /// with the source peer's key, enforce inner-source binding, then route by
     /// the policy `target` — deliver to the local TUN, or relay to another peer
     /// (hub behaviour). Loops until EAGAIN.
+    /// Drain the UDP fd in batches: one `recvmmsg` pulls up to `UdpBatch.N`
+    /// datagrams (issue #100), then each is authenticated + anti-replayed +
+    /// routed individually by `processIngress` exactly as before — batching is
+    /// purely I/O amortization, never a semantics change (iron law #8). Relays /
+    /// forwards produced during the drain are coalesced and flushed with one
+    /// `sendmmsg`. Loops until the socket is drained (recvmmsg would block).
     pub fn pumpUdpIngress(self: *Reactor) void {
         while (true) {
-            var src: sys.sockaddr.in = undefined;
-            var slen: sys.socklen_t = @sizeOf(sys.sockaddr.in);
-            const rc = sys.recvfrom(self.udp_fd, &self.rx, self.rx.len, 0, @ptrCast(&src), &slen);
-            const e = sys.errno(rc);
-            if (e == .AGAIN) return;
-            if (e == .INTR) continue;
-            if (e != .SUCCESS) return;
-            const dgram = self.rx[0..@intCast(rc)];
-            self.cInc("udp_rx_packets");
-            self.cAdd("udp_rx_bytes", @intCast(rc));
-
-            // Identity selector (issue #34): the candidate peer is chosen by the
-            // header `key_id` (the sender's mesh id), NOT by source endpoint — a
-            // NATed/roaming spoke may legitimately arrive from an unexpected
-            // endpoint. This selection is only a HINT until the datagram
-            // authenticates below; a wrong/forged key_id fails authentication.
-            const key_id = parseKeyId(dgram) orelse {
-                self.cInc("drop_udp_auth_or_invalid"); // too short to hold a header
-                continue;
-            };
-            const src_peer = self.registry.findById(key_id) orelse {
-                self.cInc("drop_udp_unknown_peer"); // key_id matches no configured peer
-                continue;
-            };
-
-            const plen = decodeIngress(&src_peer.rx, dgram, &self.tx) orelse {
-                self.cInc("drop_udp_auth_or_invalid");
-                continue;
-            };
-
-            // Keepalive (issue #96): the datagram has authenticated AND passed the
-            // anti-replay window inside `decodeIngress`, so it is genuinely
-            // `src_peer` and not a replay. A keepalive carries NO inner packet, so
-            // it refreshes the learned endpoint + `last_seen` (the whole point —
-            // keeping a NATed spoke reachable) and is then dropped before any
-            // inner-IPv4 parsing or routing. The flag byte is unauthenticated, but
-            // an attacker can only set it on a datagram that already authenticates
-            // and is not a replay, which grants no endpoint-move or delivery power
-            // they did not already have (see issue #34's residual). An
-            // UNauthenticated keepalive never reaches here — `decodeIngress`
-            // dropped it above, so it changes nothing.
-            if (dgram[1] & FLAG_KEEPALIVE != 0) {
-                self.maybeLearnEndpoint(src_peer, src);
-                self.cInc("keepalive_rx");
-                continue;
+            const got = self.udp.recv(self.udp_fd);
+            if (got == 0) break; // EAGAIN / drained -> done this tick
+            var i: usize = 0;
+            while (i < got) : (i += 1) {
+                const dgram = self.udp.datagram(i);
+                self.cInc("udp_rx_packets");
+                self.cAdd("udp_rx_bytes", @intCast(dgram.len));
+                self.processIngress(dgram, self.udp.source(i));
             }
-            const pkt = self.tx[0..plen];
+        }
+        self.flushEgress();
+    }
 
-            // Inner-source binding: the decoded source IP must belong to the
-            // source peer's allowed prefix (anti-spoofing).
-            const isrc = ipv4Src(pkt) orelse {
-                self.cInc("drop_udp_not_ipv4");
-                continue;
-            };
-            if (!src_peer.allowed_src.contains(isrc)) {
-                self.cInc("drop_udp_spoof");
-                continue;
-            }
+    /// Authenticate, anti-replay, inner-source-bind, and route ONE inbound
+    /// datagram (`dgram`, received from `src`): deliver to the local TUN, refresh
+    /// a keepalive, or stage a relay to another peer. Factored out of the batch
+    /// drain in `pumpUdpIngress` so the per-packet security path is identical
+    /// whether a batch holds one datagram or `UdpBatch.N` of them.
+    fn processIngress(self: *Reactor, dgram: []u8, src: sys.sockaddr.in) void {
+        // Identity selector (issue #34): the candidate peer is chosen by the
+        // header `key_id` (the sender's mesh id), NOT by source endpoint — a
+        // NATed/roaming spoke may legitimately arrive from an unexpected
+        // endpoint. This selection is only a HINT until the datagram
+        // authenticates below; a wrong/forged key_id fails authentication.
+        const key_id = parseKeyId(dgram) orelse {
+            self.cInc("drop_udp_auth_or_invalid"); // too short to hold a header
+            return;
+        };
+        const src_peer = self.registry.findById(key_id) orelse {
+            self.cInc("drop_udp_unknown_peer"); // key_id matches no configured peer
+            return;
+        };
 
-            // Endpoint roaming (issue #34): the datagram has now authenticated
-            // AND passed the inner-source check, so it is genuinely `src_peer`.
-            // Learn its current UDP endpoint so replies (and hub relays) follow a
-            // roamed/NATed spoke without operator intervention. Strictly gated on
-            // full decode success + the spoof check above, so a replayed, forged,
-            // or inner-source-spoofed packet can never move the endpoint.
+        const plen = decodeIngress(&src_peer.rx, dgram, &self.tx) orelse {
+            self.cInc("drop_udp_auth_or_invalid");
+            return;
+        };
+
+        // Keepalive (issue #96): the datagram has authenticated AND passed the
+        // anti-replay window inside `decodeIngress`, so it is genuinely
+        // `src_peer` and not a replay. A keepalive carries NO inner packet, so it
+        // refreshes the learned endpoint + `last_seen` and is then dropped before
+        // any inner-IPv4 parsing or routing.
+        if (dgram[1] & FLAG_KEEPALIVE != 0) {
             self.maybeLearnEndpoint(src_peer, src);
+            self.cInc("keepalive_rx");
+            return;
+        }
+        const pkt = self.tx[0..plen];
 
-            const dst = ipv4Dst(pkt) orelse {
-                self.cInc("drop_udp_not_ipv4");
-                continue;
-            };
-            const entry = self.active.load().match(dst) orelse {
-                self.cInc("drop_udp_no_route");
-                continue; // no route -> drop
-            };
-            if (entry.action == .drop) {
-                self.cInc("drop_udp_drop_rule");
-                continue;
-            }
+        // Inner-source binding: the decoded source IP must belong to the source
+        // peer's allowed prefix (anti-spoofing).
+        const isrc = ipv4Src(pkt) orelse {
+            self.cInc("drop_udp_not_ipv4");
+            return;
+        };
+        if (!src_peer.allowed_src.contains(isrc)) {
+            self.cInc("drop_udp_spoof");
+            return;
+        }
 
-            if (entry.target == peer.LOCAL_TARGET) {
-                if (self.writeTun(pkt)) {
-                    self.cInc("tun_tx_packets");
-                    self.cAdd("tun_tx_bytes", @intCast(plen));
-                } else {
-                    self.cInc("drop_udp_send_err");
-                }
-                continue;
-            }
+        // Endpoint roaming (issue #34): authenticated AND inner-source-checked, so
+        // it is genuinely `src_peer`. Learn its current endpoint so replies / hub
+        // relays follow a roamed/NATed spoke. Gated on full decode + the spoof
+        // check, so a replayed/forged/spoofed packet can never move the endpoint.
+        self.maybeLearnEndpoint(src_peer, src);
 
-            // Relay to another peer (hub forwarding).
-            const dst_peer = self.registry.findById(entry.target) orelse {
-                self.cInc("drop_udp_unknown_target");
-                continue; // unknown target
-            };
-            if (dst_peer.id == src_peer.id) {
-                self.cInc("drop_udp_no_reflect");
-                continue; // no-reflect guard
-            }
-            if (pkt.len > MAX_PLAINTEXT) {
-                self.cInc("drop_udp_oversized");
-                continue;
-            }
-            const wire_len = encodeEgress(&dst_peer.tx, self.localKeyId(), pkt, &self.relay);
-            if (self.sendTo(dst_peer.endpoint, self.relay[0..wire_len])) {
-                self.cInc("relay_packets");
-                self.cAdd("relay_bytes", wire_len);
+        const dst = ipv4Dst(pkt) orelse {
+            self.cInc("drop_udp_not_ipv4");
+            return;
+        };
+        const entry = self.active.load().match(dst) orelse {
+            self.cInc("drop_udp_no_route");
+            return; // no route -> drop
+        };
+        if (entry.action == .drop) {
+            self.cInc("drop_udp_drop_rule");
+            return;
+        }
+
+        if (entry.target == peer.LOCAL_TARGET) {
+            if (self.writeTun(pkt)) {
+                self.cInc("tun_tx_packets");
+                self.cAdd("tun_tx_bytes", @intCast(plen));
             } else {
                 self.cInc("drop_udp_send_err");
+            }
+            return;
+        }
+
+        // Relay to another peer (hub forwarding) — the double-syscall path #100
+        // targets. Sealed into a coalesced egress slot; flushed with one sendmmsg.
+        const dst_peer = self.registry.findById(entry.target) orelse {
+            self.cInc("drop_udp_unknown_target");
+            return; // unknown target
+        };
+        if (dst_peer.id == src_peer.id) {
+            self.cInc("drop_udp_no_reflect");
+            return; // no-reflect guard
+        }
+        if (pkt.len > MAX_PLAINTEXT) {
+            self.cInc("drop_udp_oversized");
+            return;
+        }
+        self.stageEgress(dst_peer, pkt, TAG_RELAY);
+    }
+
+    /// Egress slot category for honest counter attribution at flush time:
+    /// a locally-originated forward (`TAG_TUN_FWD`) bumps `udp_tx_*`, a relayed
+    /// hub forward (`TAG_RELAY`) bumps `relay_*`; a short send bumps the matching
+    /// `drop_*_send_err`.
+    const TAG_TUN_FWD: u8 = 0;
+    const TAG_RELAY: u8 = 1;
+
+    /// Seal `pkt` for `dst_peer` straight into the next coalesced egress slot
+    /// (issue #100). Flushes first if the batch is full, so a long drain still
+    /// bounds the staged set at `UdpBatch.N`. The actual transmission and counter
+    /// attribution happen in `flushEgress`.
+    fn stageEgress(self: *Reactor, dst_peer: *peer.Peer, pkt: []const u8, tag: u8) void {
+        if (self.udp.isFull()) self.flushEgress();
+        const wire_len = encodeEgress(&dst_peer.tx, self.localKeyId(), pkt, self.udp.nextOutBuf());
+        self.udp.commitOut(wire_len, dst_peer.endpoint, tag);
+    }
+
+    /// Transmit all staged datagrams with one `sendmmsg` (macOS: a `sendto` loop)
+    /// and attribute per-slot counters. `flush` returns how many leading
+    /// datagrams the kernel accepted; the rest (if any) are counted as send
+    /// errors, matching the old per-packet `sendTo` accounting.
+    fn flushEgress(self: *Reactor) void {
+        const n = self.udp.pending();
+        if (n == 0) return;
+        const sent = self.udp.flush(self.udp_fd);
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const ok = i < sent;
+            if (self.udp.tagAt(i) == TAG_RELAY) {
+                if (ok) {
+                    self.cInc("relay_packets");
+                    self.cAdd("relay_bytes", self.udp.lenAt(i));
+                } else self.cInc("drop_udp_send_err");
+            } else {
+                if (ok) {
+                    self.cInc("udp_tx_packets");
+                    self.cAdd("udp_tx_bytes", self.udp.lenAt(i));
+                } else self.cInc("drop_tun_send_err");
             }
         }
     }
 
     /// Send `buf` to `endpoint`. Returns true if the datagram was handed to the
     /// kernel without error, false otherwise (so the caller can count send
-    /// errors honestly rather than assuming success).
+    /// errors honestly rather than assuming success). Used for the single-shot
+    /// keepalive (issue #96); bulk data egress is coalesced via `flushEgress`.
     fn sendTo(self: *Reactor, endpoint: sys.sockaddr.in, buf: []const u8) bool {
         var ep = endpoint;
         while (true) {
