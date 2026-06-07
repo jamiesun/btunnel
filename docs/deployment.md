@@ -246,15 +246,87 @@ counter rises whenever an authenticated peer is observed at a new UDP endpoint
 built-in NAT keepalives (§7): `tx` rises on a spoke that emits them, `rx` on the
 hub that receives them. PSKs are never printed.
 
-**Upgrade / rollback:** install the new binary and restart; the on-wire format is
-versioned and the data path is stateless across restarts (a fresh session epoch
-is derived each lifetime). To roll back, reinstall the previous binary and
-restart. Re-apply the saved policy snapshot if needed.
+### Upgrade & rollback runbook
+
+Subnetra is a single static binary with no persistent on-disk data-plane state,
+so the mechanical step is "swap the binary and restart." The real risk is **wire
+compatibility**: an upgrade that crosses a wire-breaking boundary leaves the
+upgraded nodes unable to authenticate the not-yet-upgraded ones, and because the
+transport is **fail-closed** (a datagram that fails AEAD auth is silently
+dropped), a half-upgraded mesh **silently partitions** — there is no error, only
+a climbing `auth_or_invalid` drop counter.
+
+**Wire-compatibility matrix**
+
+| Boundary | Wire compatible? | Notes |
+|---|---|---|
+| `v0.5.0` ↔ `v0.5.1` | ✅ Yes | Identical key schedule (`subnetra-v1-*`) and 20-byte header; `wire_version = 1`. Upgrade nodes in any order. |
+| `v0.5.1` ↔ current `main` (post-#96 keepalive) | ✅ Yes | `KEEPALIVE` (`flags` bit 0) is additive and did **not** bump `wire_version`; an older node simply drops keepalives, and the data path is unchanged. |
+| `≤ v0.4.x` ↔ `≥ v0.5.0` | ❌ **No — hard break** | v0.5.0 renamed the HKDF crypto label `btunnel-v1-*` → `subnetra-v1-*` (the project rename, #82). Derived link/session keys differ, so **every** cross-version datagram fails AEAD auth. The `version` byte is still `1` on both sides, so the header check cannot see it — the only symptom is the `auth_or_invalid` drop counter climbing. |
+
+> **Rule of thumb:** within `v0.5.x` (and forward onto current `main`) upgrades
+> are rolling and order-independent. **Any jump across the `v0.4.x → v0.5.0` line
+> is a coordinated, all-at-once-per-mesh cutover.** When in doubt, treat a version
+> jump as breaking and cut the whole mesh over together.
+
+**1. Pre-flight — before touching any running node.** Validate the *new* binary
+against each node's *real* config; this catches a config the new version would
+reject before you restart anything:
 
 ```bash
+/path/to/new/subnetrad --check --config /etc/subnetra/config.json
+# subnetra vX.Y.Z (mtu=…, mode=raw_direct, local_id=…, peers=…) [config ok]
+```
+
+**2a. Compatible upgrade (within `v0.5.x` → `main`).** Roll one node at a time;
+no coordination needed. Keep the outgoing binary so you can roll back (step 4):
+
+```bash
+sudo cp -a /usr/local/bin/subnetrad /usr/local/bin/subnetrad.prev
 sudo install -m 0755 zig-out/bin/subnetrad /usr/local/bin/subnetrad
 sudo systemctl restart subnetrad
 ```
+
+After each node, confirm on **a peer** that the link recovered (*Verify* below)
+before moving to the next.
+
+**2b. Breaking upgrade (across `v0.4.x → v0.5.0`).** A rolling upgrade here **will**
+partition the mesh, so cut over together:
+
+- Stage and `--check` the new binary on every node (step 1).
+- In a maintenance window, restart **all** nodes onto the new binary as close
+  together as possible. The mesh is down for that window — expected and bounded.
+- Hub-first vs spokes-first does not matter: nothing interoperates across the
+  boundary, so minimise the window rather than ordering it.
+
+**3. Verify — tie every step to an observable signal, never "looks fine."** On the
+restarted node and at least one of its peers:
+
+```bash
+sudo -E subnetra status
+```
+
+- Each peer's `last_seen` is **advancing** (recent, not frozen) → the link is
+  authenticating and carrying traffic.
+- The `udp … auth_or_invalid` drop counter is **flat** (not climbing) → no
+  key/wire mismatch. A climbing `auth_or_invalid` right after an upgrade is the
+  unmistakable signature of a **wire mismatch** — you crossed a breaking boundary
+  while a node was still on the old binary.
+- Traffic counters (`tun_tx` / `udp_tx`) advance under real load.
+
+**4. Rollback.** Keep the previous binary on disk (the `subnetrad.prev` copy from
+step 2a). To roll back:
+
+```bash
+sudo install -m 0755 /usr/local/bin/subnetrad.prev /usr/local/bin/subnetrad
+sudo systemctl restart subnetrad
+```
+
+Re-apply the saved policy snapshot if the rollback target predates a policy you
+added (`subnetra policy add …`, §5). Roll back the **same scope** you upgraded:
+a single node for a compatible upgrade, the **whole mesh** for a breaking one (a
+lone rolled-back node across a wire break is just as partitioned as a lone
+upgraded one). Verify with `subnetra status` exactly as in step 3.
 
 > **Time synchronization (required).** The fresh-epoch-per-restart property above
 > relies on a sane wall clock: the session key is derived from a boot epoch
