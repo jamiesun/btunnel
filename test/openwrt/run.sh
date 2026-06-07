@@ -78,6 +78,27 @@ cp "$HERE/guest-smoke.sh"               "$SHARE/guest-smoke.sh"
 # a config that PARSES but fails the --check sanity gate (missing/invalid PSK).
 printf '{ "role": "spoke" }\n'          > "$SHARE/bad.json"
 
+# kernel-matched tun module: the x86-64 generic image has no built-in tun, and
+# the qemu guest cannot reach the opkg mirror (SLIRP egress is unreliable on CI
+# runners). So fetch the kmod-tun .ipk HERE — where the runner has real network —
+# and serve the extracted tun.ko for an offline insmod in the guest. The vermagic
+# matches the booted image because both come from the same pinned release+target.
+log "fetching kernel-matched kmod-tun for offline insmod"
+kdir="$(curl -fsSL "${BASE_URL}/kmods/" | grep -oE 'href="[0-9][^"]*/"' | head -1 | sed 's/href="//; s|/"$||; s/"//')"
+[ -n "$kdir" ] || die "could not locate the kmods dir under ${BASE_URL}/kmods/"
+ipk="$(curl -fsSL "${BASE_URL}/kmods/${kdir}/" | grep -oE 'href="kmod-tun[^"]*\.ipk"' | head -1 | sed 's/href="//; s/"//')"
+[ -n "$ipk" ] || die "could not locate kmod-tun .ipk under ${BASE_URL}/kmods/${kdir}/"
+curl -fsSL "${BASE_URL}/kmods/${kdir}/${ipk}" -o "$WORK/kmod-tun.ipk"
+# OpenWrt .ipk is a gzipped tar of {debian-binary, control.tar.gz, data.tar.gz}.
+( cd "$WORK" && tar xzf kmod-tun.ipk ./data.tar.gz && mkdir -p kmod && tar xzf data.tar.gz -C kmod )
+ko="$(find "$WORK/kmod" -name 'tun.ko*' | head -1)"
+[ -n "$ko" ] || die "tun.ko not found inside ${ipk}"
+case "$ko" in
+	*.gz) gunzip -f "$ko" || { gz_rc=$?; [ "$gz_rc" -eq 2 ] || die "gunzip tun.ko rc=$gz_rc"; }; ko="${ko%.gz}" ;;
+esac
+cp "$ko" "$SHARE/tun.ko"
+log "staged $(basename "$ko") (vermagic $(grep -ao 'vermagic=[0-9][^ ]*' "$SHARE/tun.ko" | head -1 | cut -d= -f2))"
+
 # --- 4. serve the share dir; qemu user-net reaches it at 10.0.2.2 ------------
 log "serving artifacts on :${HTTP_PORT}"
 ( cd "$SHARE" && exec python3 -m http.server "$HTTP_PORT" --bind 0.0.0.0 >/dev/null 2>&1 ) &

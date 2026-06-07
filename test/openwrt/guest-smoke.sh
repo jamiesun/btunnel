@@ -57,35 +57,27 @@ else
 fi
 /etc/init.d/subnetrad stop >/dev/null 2>&1
 
-# 4. ensure a WORKING /dev/net/tun. The daemon's open() needs the tun DRIVER
-#    actually loaded — a bare device node without the module yields OpenFailed.
-#    (This is exactly what bit us under fast KVM: opkg's postinst had not insmod'd
-#    the module yet, but a stray mknod made the node "exist".) So gate on
-#    /sys/module/tun, load the module explicitly (offline first, then via opkg),
-#    and only mknod the node once the driver is present so it is actually backed.
+# 4. ensure a WORKING /dev/net/tun. The x86-64 image has no built-in tun and the
+#    qemu guest cannot reach the opkg mirror, so the host staged the kernel-matched
+#    tun.ko alongside the other artifacts; we insmod it offline. Gate on the DRIVER
+#    actually being loaded (/sys/module/tun) — a bare device node without the
+#    module yields OpenFailed, which is the real precondition the daemon needs.
 load_tun() {
 	[ -d /sys/module/tun ] && return 0
-	insmod tun 2>/dev/null;   [ -d /sys/module/tun ] && return 0
-	modprobe tun 2>/dev/null; [ -d /sys/module/tun ] && return 0
-	ko=$(find /lib/modules -name 'tun.ko*' 2>/dev/null | head -1)
-	[ -n "$ko" ] && insmod "$ko" 2>/dev/null
+	insmod tun 2>/dev/null; [ -d /sys/module/tun ] && return 0
+	if uclient-fetch -q -O /tmp/tun.ko "${BASE}/tun.ko" 2>/dev/null; then
+		insmod /tmp/tun.ko 2>/tmp/insmod.log
+	fi
 	[ -d /sys/module/tun ]
 }
-if ! load_tun; then
-	say "tun driver absent; installing kmod-tun via opkg"
-	opkg update           >/tmp/opkg.log 2>&1 || say "opkg update reported errors"
-	opkg install kmod-tun >>/tmp/opkg.log 2>&1 || say "opkg install kmod-tun reported errors"
-	load_tun || true
-fi
+load_tun || true
 if [ -d /sys/module/tun ]; then
 	[ -e /dev/net/tun ] || { mkdir -p /dev/net; mknod /dev/net/tun c 10 200 2>/dev/null; }
 fi
 if [ -d /sys/module/tun ] && [ -e /dev/net/tun ]; then tun_ok=0; else tun_ok=1; fi
 check $tun_ok "/dev/net/tun backed by the loaded tun driver"
 if [ "$tun_ok" -ne 0 ]; then
-	say "tun diagnostics (opkg tail + modules on disk):"
-	tail -15 /tmp/opkg.log 2>/dev/null
-	find /lib/modules -name 'tun*' 2>/dev/null
+	say "tun load diagnostics:"; cat /tmp/insmod.log 2>/dev/null; uname -r
 fi
 
 # 5. POSITIVE PATH: a valid config starts and procd supervises a live daemon that
