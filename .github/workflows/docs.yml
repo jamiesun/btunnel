@@ -65,6 +65,9 @@ jobs:
           mdbook build docs-site/en
           mdbook build docs-site/zh
 
+      - name: Check intra-site links and anchors
+        run: python3 docs-site/check-links.py
+
       - name: Assemble Pages site
         run: |
           set -euo pipefail
