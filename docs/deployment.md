@@ -789,16 +789,17 @@ a fast single-core clock matters more than core count, and when one Hub core
 saturates you scale **out** (more Hubs — per-region placement in §9 item 5, or the
 redundant-Hub patterns in §8), **not up** with threads (the daemon is single-threaded
 by law and will not grow a thread pool). Measure your actual ceiling with the
-benchmark harness in §10 / issue #97 before sizing.
+benchmark harness in §10 (*Reproducible single-host baseline*, issue #97) before sizing.
 
 ## 10. Benchmarking a live deployment
 
 Section 9 is about *tuning*; this is about *measuring* — getting real RTT and
 throughput/pps numbers from the deployed overlay and attributing any loss. This is
 **field measurement** over the actual mesh (real NAT/WAN, the hub relay, cross-OS
-spokes); it is deliberately not the single-host, reproducible CI baseline tracked in
-issue #97. Use `iperf3` (a **host** tool — never linked into the daemon, iron law #1)
-and `ping`, then read the daemon's own counters.
+spokes); for the single-host, reproducible CI baseline (issue #97) see *Reproducible
+single-host baseline* at the end of this section. Use `iperf3` (a **host** tool —
+never linked into the daemon, iron law #1) and `ping`, then read the daemon's own
+counters.
 
 > **The shipped daemon stays as-is.** `subnetrad` always ships `-O ReleaseSmall`
 > (iron law #6). You measure the deployed binary; you do **not** rebuild it
@@ -873,3 +874,41 @@ classic signature — small packets fine, large transfers stall — is an MTU/MS
 problem, not a throughput one (Section 9 item 3; see also #98). Print the safe tunnel
 MTU and the MSS-clamp rule with `subnetrad --print-network-plan` before you trust a
 low bulk number.
+
+### Reproducible single-host baseline (issue #97)
+
+The field measurement above tells you what *your* mesh does today; it cannot tell you
+whether a **code change** moved the data plane. For that you need a single-host,
+reproducible number. `test/integration/bench.sh` builds the daemon
+`-Doptimize=ReleaseFast` (measurement only — the shipped binary stays ReleaseSmall),
+stands up the 3-node hub-and-spoke star entirely in local network namespaces,
+saturates the overlay with the in-tree `udp-blast` generator, and reads the achieved
+packet-rate / throughput from each daemon's **own** counters (`subnetra status`):
+
+```bash
+# Linux, root (needs netns + /dev/net/tun). From the repo root:
+sudo test/integration/bench.sh
+SUBNETRA_BENCH_SECS=10 sudo --preserve-env=SUBNETRA_BENCH_SECS test/integration/bench.sh
+```
+
+It measures two patterns and prints pps, inner goodput (Gbps at the snr0 MTU), and the
+**hub's single-core CPU%** for each:
+
+| Pattern | What it stresses |
+|---|---|
+| `spoke -> hub` | the hub terminating traffic — one AEAD `open` per packet |
+| `spoke -> hub -> spoke` (relay) | the hub **relaying** — `recvfrom`+`sendto` **and** `open`+`seal` per packet; it saturates a core first, so this is the headline ceiling and the target of the `recvmmsg`/`sendmmsg` batching in issue #100 |
+
+The recorded baseline lives at `test/integration/bench-baseline.env`; each run prints
+the delta against it. It is **informational** — shared CI runners vary, so a regression
+is surfaced, never enforced (there is no perf gate, the same way #100 calls the baseline
+"informational first"). The same benchmark runs in CI via the **Benchmark** workflow
+(`.github/workflows/bench.yml`, `workflow_dispatch` or a `bench/**` branch push), which
+publishes the table to the job summary so a perf PR can attach reproduced numbers.
+
+> **Why an in-tree generator, not `iperf3` here?** Issue #97 explicitly allows a tiny
+> in-tree blaster; a dependency-free, deterministic `udp-blast` (built via
+> `zig build tool:udp-blast`, never shipped) makes the baseline reproducible without
+> installing a host tool. `iperf3` remains the richer **host** tool for the
+> live-overlay field measurement above. Both honor iron law #1 — neither is ever
+> linked into the daemon.

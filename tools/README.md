@@ -32,6 +32,7 @@ zig build tool:key-derive    # -> zig-out/tools/key-derive
 zig build tool:config-gen    # -> zig-out/tools/config-gen
 zig build tool:crypto-bench  # -> zig-out/tools/crypto-bench
 zig build tool:forward-bench # -> zig-out/tools/forward-bench
+zig build tool:udp-blast     # -> zig-out/tools/udp-blast
 zig build tools-test         # run the tools' unit tests (separate from `zig build test`)
 ```
 
@@ -132,6 +133,25 @@ test gate. Build with `-Doptimize=ReleaseFast` for representative numbers.
 zig build tool:forward-bench -Doptimize=ReleaseFast
 zig-out/tools/forward-bench --iters 200000
 zig-out/tools/forward-bench --size 64 --iters 500000   # small-packet (pps-bound) view
+```
+
+### `udp-blast` (issue #97)
+Saturating UDP load generator — the traffic source for the netns data-plane
+benchmark (`test/integration/bench.sh`). Run inside a spoke's network namespace it
+injects fixed-size datagrams into the overlay (`snr0`) as fast as the kernel accepts
+them, so the daemon's real tun-read → seal → udp-send path (and, for the relay
+variant, the hub's udp-recv → udp-send path) is exercised end to end; the achieved
+pps/throughput is then read from each daemon's own `subnetra status` counters. It
+reuses the daemon's endpoint parser, opens **its own** plain UDP client socket (never
+the tunnel socket), and reports the offered load. Issue #97 explicitly allows a tiny
+in-tree blaster; this keeps the CI baseline reproducible without an `iperf3` host
+dependency. Not shipped; build `-Doptimize=ReleaseFast` for representative load.
+
+```sh
+zig build tool:udp-blast -Doptimize=ReleaseFast
+# inside a spoke netns, blast the overlay for 5s (1400B inner = snr0 MTU):
+zig-out/tools/udp-blast --dst 10.0.0.3:9 --secs 5
+zig-out/tools/udp-blast --dst 10.0.0.1:9 --size 64 --secs 5   # small-packet (pps) view
 ```
 
 ### `doctor` (issue #61)
