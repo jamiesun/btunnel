@@ -38,6 +38,18 @@ pub const Peer = struct {
     /// Wall-clock ns of the last authenticated datagram from this peer (issue
     /// #34). Observability only (`subnetra status`); never drives protocol logic.
     last_seen_wall_ns: u64 = 0,
+    /// Optional human-readable label for this peer (observability only). Resident
+    /// in a fixed-capacity buffer (no heap); `name_len == 0` means unset. METADATA
+    /// ONLY: the data plane never reads it and it is never an identity/auth/routing
+    /// input — key derivation, the wire `key_id`, and peer matching all stay keyed
+    /// on the numeric `id` (iron law #5).
+    name: [config.MAX_PEER_NAME_LEN]u8 = undefined,
+    name_len: usize = 0,
+
+    /// The peer's configured name as a slice (empty when unset).
+    pub fn nameSlice(self: *const Peer) []const u8 {
+        return self.name[0..self.name_len];
+    }
 };
 
 pub const RegistryError = error{
@@ -169,7 +181,11 @@ pub const PeerRegistry = struct {
         var i: usize = 0;
         while (i < cfg.peer_count) : (i += 1) {
             const spec = cfg.peers[i];
-            _ = try reg.add(spec.psk, spec.id, spec.endpoint, spec.allowed_src, boot_epoch);
+            const p = try reg.add(spec.psk, spec.id, spec.endpoint, spec.allowed_src, boot_epoch);
+            // Carry the optional human-readable label (observability only); it is
+            // never read by the data plane or used for matching/key derivation.
+            p.name_len = spec.name_len;
+            @memcpy(p.name[0..spec.name_len], spec.name[0..spec.name_len]);
         }
         return reg;
     }
@@ -264,4 +280,38 @@ test "registry: bootEpoch is non-zero and time-ordered" {
     const e = try bootEpoch();
     try std.testing.expect(e >= MIN_BOOT_EPOCH_NS);
     try std.testing.expect(e != 0);
+}
+
+test "registry: fromConfig carries the peer name as resident metadata only" {
+    const psk2 = [_]u8{0x5a} ** 32;
+    const psk3 = [_]u8{0x6b} ** 32;
+    const epoch: u64 = 1_700_000_000_000_000_000;
+
+    var cfg = config.Config.default();
+    cfg.local_id = 1;
+    cfg.peer_count = 2;
+    // Peer 2 is named; peer 3 is anonymous.
+    cfg.peers[0] = .{ .id = 2, .endpoint = testEndpoint("10.0.0.2:51820"), .allowed_src = .{ .network = 0, .prefix = 0 }, .psk = psk2 };
+    cfg.peers[0].name_len = try config.parsePeerName(&cfg.peers[0].name, "alice-laptop");
+    cfg.peers[1] = .{ .id = 3, .endpoint = testEndpoint("10.0.0.3:51820"), .allowed_src = .{ .network = 0, .prefix = 0 }, .psk = psk3 };
+
+    var reg = try PeerRegistry.fromConfig(cfg, epoch);
+
+    // The name is resident on the registry record (no heap), and omission stays
+    // anonymous.
+    const p2 = reg.findById(2).?;
+    const p3 = reg.findById(3).?;
+    try std.testing.expectEqualStrings("alice-laptop", p2.nameSlice());
+    try std.testing.expectEqual(@as(usize, 0), p3.name_len);
+
+    // METADATA ONLY: the name never participates in matching or key derivation.
+    // Renaming a peer in place must not change which record an id/addr resolves to
+    // nor the derived link keys (those are keyed on the numeric id + PSK).
+    const tx_before = p2.tx.link_key;
+    const rx_before = p2.rx.link_key;
+    p2.name_len = try config.parsePeerName(&p2.name, "renamed-gw");
+    try std.testing.expectEqual(p2, reg.findById(2).?);
+    try std.testing.expectEqual(p2, reg.findByAddr(p2.endpoint.addr, p2.endpoint.port).?);
+    try std.testing.expectEqualSlices(u8, &tx_before, &p2.tx.link_key);
+    try std.testing.expectEqualSlices(u8, &rx_before, &p2.rx.link_key);
 }

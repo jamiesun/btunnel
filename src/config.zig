@@ -23,6 +23,13 @@ pub const DEFAULT_TUN_MTU: u16 = netplan.maxTunMtu(netplan.DEFAULT_PATH_MTU);
 /// the registry stays zero-allocation (issue #5).
 pub const MAX_PEERS: usize = 16;
 
+/// Maximum length of an optional, human-readable peer name (e.g. `bj-office-gw`).
+/// Bounded so the name lives in a fixed-capacity buffer with no heap allocation;
+/// over-long values are rejected at parse. METADATA ONLY: the name is never an
+/// identity/auth/routing input (it never feeds key derivation, the wire `key_id`,
+/// peer matching, or policy), it only labels a peer in `subnetra status`.
+pub const MAX_PEER_NAME_LEN: usize = 32;
+
 /// Maximum number of local/remote route CIDRs a simplified (`role`) config can
 /// declare. Fixed so the config stays zero-allocation; the derived policy never
 /// exceeds MAX_PEERS + MAX_ROUTES*2 entries, well under MAX_POLICY_ENTRIES.
@@ -139,7 +146,30 @@ pub const PeerSpec = struct {
     /// keys. Both ends of a link must configure the SAME value for that link;
     /// distinct links must use DISTINCT keys (enforced by `validate`).
     psk: Psk = [_]u8{0} ** 32,
+    /// Optional human-readable label for this peer (observability only). Stored
+    /// in a fixed-capacity buffer; `name_len == 0` means unset. METADATA ONLY:
+    /// never read by the data plane and never an identity/auth/routing input.
+    name: [MAX_PEER_NAME_LEN]u8 = undefined,
+    name_len: usize = 0,
+
+    /// The configured peer name as a slice (empty when unset).
+    pub fn nameSlice(self: *const PeerSpec) []const u8 {
+        return self.name[0..self.name_len];
+    }
 };
+
+/// Validate and copy an optional peer name into `dst`, returning its length.
+/// Rejects over-long names and any non-printable byte: the value is echoed to a
+/// terminal in `subnetra status`, so it must not carry escape/control sequences.
+pub fn parsePeerName(dst: *[MAX_PEER_NAME_LEN]u8, text: []const u8) error{ PeerNameTooLong, PeerNameInvalidChar }!usize {
+    if (text.len > MAX_PEER_NAME_LEN) return error.PeerNameTooLong;
+    for (text) |ch| {
+        // Printable ASCII only (0x20 space .. 0x7E '~'); reject control chars.
+        if (ch < 0x20 or ch > 0x7e) return error.PeerNameInvalidChar;
+    }
+    @memcpy(dst[0..text.len], text);
+    return text.len;
+}
 
 /// Parse "A.B.C.D/P" into a Cidr (network in host byte order).
 pub fn parseCidr(text: []const u8) CidrError!Cidr {
@@ -352,6 +382,9 @@ pub const Config = struct {
         endpoint: []const u8 = "",
         allowed_src: []const u8 = "0.0.0.0/0",
         psk: []const u8 = "",
+        /// Optional human-readable label (issue: peer name). Omitted (`""`) keeps
+        /// the peer anonymous; over-long or non-printable values are rejected.
+        name: []const u8 = "",
     };
 
     /// Parse a config.json document. Returns a fully-owned `Config` (no slices
@@ -396,6 +429,9 @@ pub const Config = struct {
                 .allowed_src = parseCidr(wp.allowed_src) catch return error.InvalidCidr,
                 .psk = pk,
             };
+            // Optional, bounded, printable-ASCII peer label (observability only).
+            cfg.peers[i].name_len = parsePeerName(&cfg.peers[i].name, wp.name) catch
+                return error.InvalidPeerName;
         }
         cfg.peer_count = w.peers.len;
 
@@ -728,6 +764,56 @@ test "fromJson: peers array is parsed into the registry spec" {
     // A malformed endpoint aborts parsing.
     const bad = "{ \"peers\": [ { \"id\": 2, \"endpoint\": \"nope\", \"psk\": \"" ++ psk2 ++ "\" } ] }";
     try std.testing.expectError(error.InvalidEndpoint, Config.fromJson(a, bad));
+}
+
+test "fromJson: optional peer name parses, omission stays anonymous, bad values rejected" {
+    const a = std.testing.allocator;
+    const psk2 = "0123456789abcdef" ** 4;
+    const psk3 = "fedcba9876543210" ** 4;
+
+    // Peer 2 has a name; peer 3 omits it and must stay anonymous (name_len == 0).
+    const doc =
+        "{ \"local_id\": 1, \"peers\": [" ++
+        "{ \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"" ++ psk2 ++ "\", \"name\": \"bj-office-gw\" }," ++
+        "{ \"id\": 3, \"endpoint\": \"10.0.0.3:51820\", \"psk\": \"" ++ psk3 ++ "\" }" ++
+        "] }";
+    const cfg = try Config.fromJson(a, doc);
+    try cfg.validate(&.{});
+    try std.testing.expectEqualStrings("bj-office-gw", cfg.peers[0].nameSlice());
+    try std.testing.expectEqual(@as(usize, 0), cfg.peers[1].name_len);
+    try std.testing.expectEqualStrings("", cfg.peers[1].nameSlice());
+
+    // A name longer than MAX_PEER_NAME_LEN is rejected at parse.
+    const long_name = "x" ** (MAX_PEER_NAME_LEN + 1);
+    const too_long =
+        "{ \"local_id\": 1, \"peers\": [ { \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"" ++
+        psk2 ++ "\", \"name\": \"" ++ long_name ++ "\" } ] }";
+    try std.testing.expectError(error.InvalidPeerName, Config.fromJson(a, too_long));
+
+    // A name carrying a control char (here a JSON `\t` escape decoding to a tab)
+    // is rejected: the value is echoed to a terminal in `subnetra status`.
+    const ctrl =
+        "{ \"local_id\": 1, \"peers\": [ { \"id\": 2, \"endpoint\": \"10.0.0.2:51820\", \"psk\": \"" ++
+        psk2 ++ "\", \"name\": \"bad\\tname\" } ] }";
+    try std.testing.expectError(error.InvalidPeerName, Config.fromJson(a, ctrl));
+}
+
+test "parsePeerName: bounds length and restricts to printable ASCII" {
+    var buf: [MAX_PEER_NAME_LEN]u8 = undefined;
+
+    const n = try parsePeerName(&buf, "colo-hub 7");
+    try std.testing.expectEqual(@as(usize, 10), n);
+    try std.testing.expectEqualStrings("colo-hub 7", buf[0..n]);
+
+    // The exact maximum length is accepted; one byte over is rejected.
+    const max_name = "y" ** MAX_PEER_NAME_LEN;
+    _ = try parsePeerName(&buf, max_name);
+    try std.testing.expectError(error.PeerNameTooLong, parsePeerName(&buf, "z" ** (MAX_PEER_NAME_LEN + 1)));
+
+    // Control chars (NUL, newline) and high bytes are rejected.
+    try std.testing.expectError(error.PeerNameInvalidChar, parsePeerName(&buf, "a\x00b"));
+    try std.testing.expectError(error.PeerNameInvalidChar, parsePeerName(&buf, "a\nb"));
+    try std.testing.expectError(error.PeerNameInvalidChar, parsePeerName(&buf, "caf\xe9"));
 }
 
 test "per-peer PSKs derive different link keys (issue #13 AC)" {
