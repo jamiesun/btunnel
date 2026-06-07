@@ -368,8 +368,11 @@ pub fn formatStatus(
         const a: u32 = std.mem.bigToNative(u32, pr.endpoint.addr);
         const port: u16 = std.mem.bigToNative(u16, pr.endpoint.port);
         const src: u32 = pr.allowed_src.network;
-        W.p(out, &len, "  id={d} endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d} last_seen_wall_ns={d}\n", .{
-            pr.id,
+        const nm = pr.nameSlice();
+        W.p(out, &len, "  id={d}", .{pr.id});
+        // Optional human-readable label (observability only); absent → id only.
+        if (nm.len != 0) W.p(out, &len, " name={s}", .{nm});
+        W.p(out, &len, " endpoint={d}.{d}.{d}.{d}:{d} allowed_src={d}.{d}.{d}.{d}/{d} last_seen_wall_ns={d}\n", .{
             (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
             (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
             pr.last_seen_wall_ns,
@@ -433,6 +436,23 @@ pub fn formatStatusJson(
             const s = std.fmt.bufPrint(buf[off.*..], fmt, args) catch return;
             off.* += s.len;
         }
+        /// Append `s` as a JSON string body, escaping `"` and `\`. The peer name
+        /// is validated to printable ASCII at parse, so no control-char escapes
+        /// are needed; this only guards the two structural JSON metacharacters.
+        fn jstr(buf: []u8, off: *usize, s: []const u8) void {
+            for (s) |ch| {
+                if (ch == '"' or ch == '\\') {
+                    if (off.* + 2 > buf.len) return;
+                    buf[off.*] = '\\';
+                    buf[off.* + 1] = ch;
+                    off.* += 2;
+                } else {
+                    if (off.* + 1 > buf.len) return;
+                    buf[off.*] = ch;
+                    off.* += 1;
+                }
+            }
+        }
     };
 
     W.p(out, &len, "{{\"schema_version\":{d},\"version\":\"{s}\",\"mode\":\"{s}\",\"local_id\":{d},\"listen_port\":{d},\"tun\":\"{s}\",\"peers\":[", .{
@@ -459,8 +479,11 @@ pub fn formatStatusJson(
         const online = seen and age_secs <= freshness_secs;
 
         if (i != 0) W.p(out, &len, ",", .{});
-        W.p(out, &len, "{{\"id\":{d},\"endpoint\":\"{d}.{d}.{d}.{d}:{d}\",\"allowed_src\":\"{d}.{d}.{d}.{d}/{d}\",\"last_seen_wall_ns\":{d},\"last_seen_age_seconds\":", .{
-            pr.id,
+        W.p(out, &len, "{{\"id\":{d},\"name\":\"", .{pr.id});
+        // Optional human-readable label (observability only); empty string when
+        // unset. JSON-escaped so a name can never break the document shape.
+        W.jstr(out, &len, pr.nameSlice());
+        W.p(out, &len, "\",\"endpoint\":\"{d}.{d}.{d}.{d}:{d}\",\"allowed_src\":\"{d}.{d}.{d}.{d}/{d}\",\"last_seen_wall_ns\":{d},\"last_seen_age_seconds\":", .{
             (a >> 24) & 0xff,   (a >> 16) & 0xff,   (a >> 8) & 0xff,   a & 0xff,   port,
             (src >> 24) & 0xff, (src >> 16) & 0xff, (src >> 8) & 0xff, src & 0xff, pr.allowed_src.prefix,
             pr.last_seen_wall_ns,
@@ -761,6 +784,11 @@ test "formatStatus: renders meta, peers, and counters; never prints secrets" {
     const psk: @import("crypto.zig").Key = [_]u8{0xAB} ** 32;
     const ep = try @import("config.zig").parseEndpoint("203.0.113.7:51820");
     _ = try reg.add(psk, 2, ep, try @import("config.zig").parseCidr("10.0.0.2/32"), 1_700_000_000_000_000_000);
+    // A second, NAMED peer: the human line gains `name=<...>` (observability only).
+    const psk2: @import("crypto.zig").Key = [_]u8{0xCD} ** 32;
+    const ep2 = try @import("config.zig").parseEndpoint("203.0.113.9:51820");
+    const np = try reg.add(psk2, 5, ep2, try @import("config.zig").parseCidr("10.0.0.5/32"), 1_700_000_000_000_000_000);
+    np.name_len = try @import("config.zig").parsePeerName(&np.name, "core-hub");
 
     var c = stats.Counters{};
     c.tun_rx_packets = 5;
@@ -781,6 +809,8 @@ test "formatStatus: renders meta, peers, and counters; never prints secrets" {
     try std.testing.expect(std.mem.indexOf(u8, s, "subnetra v9.9.9 [running]") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "local_id=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "id=2 endpoint=203.0.113.7:51820 allowed_src=10.0.0.2/32") != null);
+    // The named peer surfaces its label; the anonymous peer above stays id-only.
+    try std.testing.expect(std.mem.indexOf(u8, s, "id=5 name=core-hub endpoint=203.0.113.9:51820") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "tun_rx packets=5") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "udp_tx packets=0 bytes=1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "spoof=2") != null);
@@ -798,6 +828,9 @@ test "formatStatusJson: valid versioned schema, derived age/online, no secrets (
     const boot: u64 = 1_700_000_000_000_000_000;
     const p2 = try reg.add(psk, 2, ep, try @import("config.zig").parseCidr("10.0.0.2/32"), boot);
     p2.last_seen_wall_ns = 1_700_000_095_000_000_000;
+    // Peer 2 carries a name (with a JSON metacharacter to exercise escaping);
+    // peer 3 is anonymous and must serialize an empty name.
+    p2.name_len = try @import("config.zig").parsePeerName(&p2.name, "gw \"alpha\"");
     _ = try reg.add(psk, 3, ep2, try @import("config.zig").parseCidr("10.0.0.3/32"), boot);
 
     var c = stats.Counters{};
@@ -848,11 +881,15 @@ test "formatStatusJson: valid versioned schema, derived age/online, no secrets (
     const p0 = p_seen.?;
     try std.testing.expectEqualStrings("203.0.113.7:51820", p0.get("endpoint").?.string);
     try std.testing.expectEqualStrings("10.0.0.2/32", p0.get("allowed_src").?.string);
+    // The name round-trips through JSON (escaping preserved) for the named peer.
+    try std.testing.expectEqualStrings("gw \"alpha\"", p0.get("name").?.string);
     try std.testing.expectEqual(@as(i64, 5), p0.get("last_seen_age_seconds").?.integer);
     try std.testing.expect(p0.get("online").?.bool);
 
     // Never-seen peer: age is null and the peer is offline.
     const p1 = p_never.?;
+    // An anonymous peer serializes an empty name (stable schema).
+    try std.testing.expectEqualStrings("", p1.get("name").?.string);
     switch (p1.get("last_seen_age_seconds").?) {
         .null => {},
         else => try std.testing.expect(false),

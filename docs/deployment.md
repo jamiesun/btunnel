@@ -268,6 +268,7 @@ subnetra status --json | jq .
     {
       "id": 2,
       "endpoint": "203.0.113.7:51822",
+      "name": "bj-office-gw",               // optional operator label ("" when unset)
       "allowed_src": "10.66.0.2/32",
       "last_seen_wall_ns": 1700000095000000000,
       "last_seen_age_seconds": 5,      // null if the peer has never authenticated
@@ -278,7 +279,12 @@ subnetra status --json | jq .
 }
 ```
 
-- `peers[].online` is `true` when the peer's last authenticated datagram is within
+- `peers[].name` is an **optional** human-readable label (e.g. `bj-office-gw`,
+  `colo-hub`) set per peer in `config.json` (`peers[].name`). It is **metadata
+  only** — never an identity/auth/routing input (key derivation, the wire
+  `key_id`, and peer matching stay keyed on the numeric `id`) — and is bounded to
+  printable ASCII so it is safe to echo in `subnetra status`. Omitted → empty
+  string in JSON and id-only in the human view (unchanged from before).
   ~90 s — long enough to tolerate a few missed keepalives (§7) without flapping.
   Use it (or `last_seen_age_seconds`) for a per-peer health/heartbeat alert.
 - `counters` carries **every** counter from the human view (traffic + the full
