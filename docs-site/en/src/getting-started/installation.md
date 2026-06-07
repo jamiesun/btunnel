@@ -27,7 +27,13 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/subnetra/main/install.sh |
 |---|---|
 | `--dir <path>` | Install location (default `/usr/local/bin`). |
 | `--version <vX.Y.Z>` | Pin a specific release instead of the latest. |
+| `--service` | Also install the (disabled) systemd/launchd service unit. |
 | `--yes` | Skip every prompt (non-interactive). |
+
+To run Subnetra as a managed service, add `--service`: it installs the hardened
+`systemd` (Linux) or `launchd` (macOS) unit **disabled** — it never starts it and
+never touches your network — then prints the steps to finish and enable it. See
+[Deployment](../operations/deployment.md) for the full service setup.
 
 Prefer to install by hand, or on a platform the script does not cover? Use the
 [release tarballs](#release-binaries) below, or browse every asset on the
