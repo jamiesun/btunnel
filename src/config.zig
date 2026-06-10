@@ -268,6 +268,16 @@ pub const Config = struct {
     /// to disable. Resolved in `fromJson` from the (optional) wire field.
     keepalive_secs: u32 = 0,
 
+    /// Header obfuscation (traffic-analysis countermeasure). When true, every
+    /// datagram's 20-byte cleartext header is XOR-masked on the wire with a
+    /// per-packet pad derived from the link key and the datagram's AEAD tag, so
+    /// the protocol exposes no fixed fingerprint (constant version, repeated
+    /// epoch, low monotonic seq) to a passive observer. It is NOT negotiated
+    /// (Subnetra performs no handshake): every node in a mesh MUST set the same
+    /// value, or all traffic fails to de-mask and then fails authentication
+    /// (fail-closed). Defaults off, leaving the wire byte-identical to v1.
+    obfuscate: bool = false,
+
     /// Compile-time hardcoded fallback config (used when config.json is
     /// missing). Note: it has zero peers, which `validate()` deliberately
     /// rejects — the default config is intentionally NON-RUNNABLE until real
@@ -373,6 +383,9 @@ pub const Config = struct {
         /// (`defaultKeepaliveSecs`); present means an explicit override, including
         /// `0` to disable keepalive on a spoke.
         keepalive_secs: ?u32 = null,
+        /// Optional header obfuscation toggle. Omitted defaults to `false`. MUST
+        /// be set identically on every node in a mesh (it is not negotiated).
+        obfuscate: bool = false,
     };
 
     /// On-wire schema for a single mesh peer. `psk` is this link's private
@@ -450,6 +463,7 @@ pub const Config = struct {
         // back to the role default (spoke → DEFAULT_SPOKE_KEEPALIVE_SECS, else 0),
         // so a plain `role=spoke` config gets NAT keepalive with no extra knob.
         cfg.keepalive_secs = w.keepalive_secs orelse defaultKeepaliveSecs(cfg.role);
+        cfg.obfuscate = w.obfuscate;
 
         if (w.local_routes.len > MAX_ROUTES) return error.TooManyRoutes;
         for (w.local_routes, 0..) |r, i| {
@@ -710,6 +724,18 @@ test "fromJson: keepalive_secs defaults per role and honors an explicit override
     try std.testing.expectEqual(@as(u32, 7), spoke_override.keepalive_secs);
     const spoke_off = try Config.fromJson(a, "{ \"role\": \"spoke\", \"local_id\": 2, \"keepalive_secs\": 0 }");
     try std.testing.expectEqual(@as(u32, 0), spoke_off.keepalive_secs);
+}
+
+test "fromJson: obfuscate defaults off and is honored when set" {
+    const a = std.testing.allocator;
+
+    // Omitted -> off, so the wire stays byte-identical to a v1 node.
+    const off = try Config.fromJson(a, "{ \"local_id\": 1 }");
+    try std.testing.expectEqual(false, off.obfuscate);
+
+    // Explicitly enabled.
+    const on = try Config.fromJson(a, "{ \"local_id\": 1, \"obfuscate\": true }");
+    try std.testing.expectEqual(true, on.obfuscate);
 }
 
 test "parseEndpoint: address and port land in network byte order" {

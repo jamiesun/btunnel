@@ -40,10 +40,14 @@ install, no kernel modules, no daemon zoo.
   Linux) with **zero external dependencies**. Drops onto cloud VMs, containers, BusyBox,
   Raspberry Pi, and **MikroTik RouterOS**. Builds for `amd64` / `arm64` / `armv7` / `armv5`,
   plus a native **macOS** spoke.
-- **Encrypted by default, invisible on the wire** — every packet is ChaCha20-Poly1305
+- **Encrypted by default, quiet on the wire** — every packet is ChaCha20-Poly1305
   encrypted with **per-link keys** and **replay protection**. There are no magic bytes, and
   unauthenticated packets are **dropped silently** — to a port scanner the tunnel looks like
-  nothing is listening.
+  nothing is listening. The 20-byte framing header is cleartext by default (so a *passive*
+  observer can still fingerprint the protocol); enable **optional header obfuscation**
+  (`"obfuscate": true`, mesh-wide) to mask it and make the whole datagram look random — it
+  hides the protocol fingerprint, not packet length or timing. See
+  [`docs/PROTOCOL.md` §3.4](docs/PROTOCOL.md).
 - **A flat private subnet with policy routing** — give every node an overlay IP, route whole
   subnets site-to-site, and let the hub relay **spoke-to-spoke** so nodes behind NAT still
   reach each other.

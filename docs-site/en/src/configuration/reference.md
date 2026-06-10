@@ -37,6 +37,7 @@ A minimal example (`config.example.json`):
 | `local_routes` | array of CIDR | `[]` | `role=spoke`: subnets this node delivers **locally** (to its own TUN/host). When empty, `local_tun_ip` (as a `/32`) is used. |
 | `remote_routes` | array of CIDR | `[]` | `role=spoke`: subnets reachable **through** the hub. When empty, the spoke routes `virtual_subnet` to the hub. |
 | `keepalive_secs` | integer | role default | Built-in spoke→hub NAT keepalive interval. `0` disables it (hub/manual default). A NATed `spoke` defaults to `20`. |
+| `obfuscate` | boolean | `false` | Enable [header obfuscation](https://github.com/jamiesun/subnetra/blob/main/docs/PROTOCOL.md) — XOR-mask the 20-byte cleartext header so the datagram is indistinguishable from random to a passive observer. **Must be set identically on every node in the mesh** (it is not negotiated; a mismatch fails closed). Hides the protocol fingerprint only, not packet length or timing. |
 
 ## Peer fields
 

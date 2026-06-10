@@ -164,6 +164,49 @@ pub fn parseKeyId(datagram: []const u8) ?u16 {
     return std.mem.readInt(u16, datagram[2..][0..2], .little);
 }
 
+/// XOR-mask the 20-byte cleartext header of a freshly-encoded datagram in place,
+/// hiding the protocol's only fixed / low-entropy bytes (constant `version`,
+/// `flags`, the small `key_id`, the repeated `epoch`, and the low monotonic
+/// `seq`) behind a per-packet pseudorandom pad (`crypto.headerMask`). The pad is
+/// keyed by the directional `link_key` (so the receiver, who shares it, can
+/// reverse this) and salted by the datagram's own 16-byte AEAD tag, which rides
+/// the wire in the clear after the header. The body (ciphertext + tag) is left
+/// untouched — it is already indistinguishable from random — so after masking the
+/// WHOLE datagram looks like uniform random bytes to an observer without the PSK.
+/// `wire` must be a complete datagram (header ‖ ciphertext ‖ tag), i.e. at least
+/// `HEADER_LEN + crypto.TAG_LEN` bytes.
+pub fn obfuscateHeader(link_key: crypto.Key, wire: []u8) void {
+    std.debug.assert(wire.len >= HEADER_LEN + crypto.TAG_LEN);
+    const tag = wire[wire.len - crypto.TAG_LEN ..];
+    var mask: [HEADER_LEN]u8 = undefined;
+    crypto.headerMask(link_key, tag, &mask);
+    for (wire[0..HEADER_LEN], 0..) |*b, i| b.* ^= mask[i];
+}
+
+/// Reverse `obfuscateHeader` for a candidate sender holding `link_key`. Computes
+/// the de-mask pad from the (cleartext) tag, recovers the would-be header, and
+/// only commits — de-masking `wire`'s header IN PLACE — when the recovered header
+/// is self-consistent for this peer: `version == WIRE_VERSION` AND the embedded
+/// `key_id == expect_id`. A wrong key yields effectively random header bytes that
+/// clear both checks with probability < 2^-24, so trialing each configured peer's
+/// receive link key reliably resolves the real sender. The subsequent AEAD
+/// authentication in `decodeIngress` is the actual security gate: a (vanishingly
+/// rare) false pre-filter match simply fails there and the datagram is dropped,
+/// exactly like any other unauthenticated packet. Returns true and mutates `wire`
+/// on a match; returns false and leaves `wire` untouched otherwise. The caller
+/// guarantees `wire.len >= HEADER_LEN + crypto.TAG_LEN`.
+pub fn tryDeobfuscate(link_key: crypto.Key, expect_id: u32, wire: []u8) bool {
+    std.debug.assert(wire.len >= HEADER_LEN + crypto.TAG_LEN);
+    const tag = wire[wire.len - crypto.TAG_LEN ..];
+    var mask: [HEADER_LEN]u8 = undefined;
+    crypto.headerMask(link_key, tag, &mask);
+    if ((wire[0] ^ mask[0]) != WIRE_VERSION) return false;
+    const kid = std.mem.readInt(u16, wire[2..][0..2], .little) ^ std.mem.readInt(u16, mask[2..][0..2], .little);
+    if (@as(u32, kid) != expect_id) return false;
+    for (wire[0..HEADER_LEN], 0..) |*b, i| b.* ^= mask[i];
+    return true;
+}
+
 /// Parse, authenticate, then anti-replay check an inbound datagram against the
 /// receive session. Writes the recovered IP packet into `out` and returns its
 /// length, or `null` if the datagram must be dropped (malformed header,
@@ -268,6 +311,17 @@ pub const Reactor = struct {
     keepalive_peer_id: u32 = 0,
     /// Monotonic-clock deadline (ns) of the next keepalive, armed in `run()`.
     keepalive_due_ns: u64 = 0,
+    /// Header obfuscation (traffic-analysis countermeasure). When true, every
+    /// datagram's 20-byte cleartext header is XOR-masked on egress with a
+    /// per-packet pad derived from the link key and the datagram's AEAD tag
+    /// (`obfuscateHeader`), and de-masked on ingress by trialing each peer's link
+    /// key (`tryDeobfuscate`), so the wire carries no fixed protocol fingerprint.
+    /// MUST be set identically on every mesh node (it is not negotiated — Subnetra
+    /// performs no handshake): a mismatch makes all traffic fail to de-mask and
+    /// then fail authentication, i.e. it fails closed and loudly. Wired by `main`
+    /// from `config.obfuscate`; defaults off so the wire format is byte-identical
+    /// to a node that never enables it.
+    obfuscate: bool = false,
     rx: [BUF_LEN]u8 = undefined,
     tx: [BUF_LEN]u8 = undefined,
     /// Batched UDP datagram I/O (issue #100). Inbound datagrams are drained in
@@ -361,6 +415,7 @@ pub const Reactor = struct {
     fn sendKeepalive(self: *Reactor) void {
         const hub = self.registry.findById(self.keepalive_peer_id) orelse return;
         const wire_len = encodeKeepalive(&hub.tx, self.localKeyId(), &self.tx);
+        if (self.obfuscate) obfuscateHeader(hub.tx.link_key, self.tx[0..wire_len]);
         if (self.sendTo(hub.endpoint, self.tx[0..wire_len])) self.cInc("keepalive_tx");
     }
 
@@ -445,6 +500,38 @@ pub const Reactor = struct {
         self.flushEgress();
     }
 
+    /// Resolve the sender peer for an inbound datagram. With obfuscation off this
+    /// is the cheap O(1) header read: the cleartext `key_id` selects the peer.
+    /// With obfuscation on the selector is masked, so this trials each configured
+    /// peer's receive link key via `tryDeobfuscate`; the real sender's key
+    /// reproduces the pad, recovering a self-consistent header, which is then
+    /// de-masked IN PLACE so the shared decode path downstream sees a cleartext
+    /// header. Returns null and bumps the matching drop counter when the datagram
+    /// is too short or no configured peer claims it.
+    fn selectIngressPeer(self: *Reactor, dgram: []u8) ?*peer.Peer {
+        if (self.obfuscate) {
+            if (dgram.len < HEADER_LEN + crypto.TAG_LEN) {
+                self.cInc("drop_udp_auth_or_invalid"); // too short to hold an obfuscated header + tag
+                return null;
+            }
+            var i: usize = 0;
+            while (i < self.registry.len) : (i += 1) {
+                const p = &self.registry.peers[i];
+                if (tryDeobfuscate(p.rx.link_key, p.id, dgram)) return p;
+            }
+            self.cInc("drop_udp_unknown_peer"); // no peer's link key recovers a valid header
+            return null;
+        }
+        const key_id = parseKeyId(dgram) orelse {
+            self.cInc("drop_udp_auth_or_invalid"); // too short to hold a header
+            return null;
+        };
+        return self.registry.findById(key_id) orelse {
+            self.cInc("drop_udp_unknown_peer"); // key_id matches no configured peer
+            return null;
+        };
+    }
+
     /// Authenticate, anti-replay, inner-source-bind, and route ONE inbound
     /// datagram (`dgram`, received from `src`): deliver to the local TUN, refresh
     /// a keepalive, or stage a relay to another peer. Factored out of the batch
@@ -455,15 +542,10 @@ pub const Reactor = struct {
         // header `key_id` (the sender's mesh id), NOT by source endpoint — a
         // NATed/roaming spoke may legitimately arrive from an unexpected
         // endpoint. This selection is only a HINT until the datagram
-        // authenticates below; a wrong/forged key_id fails authentication.
-        const key_id = parseKeyId(dgram) orelse {
-            self.cInc("drop_udp_auth_or_invalid"); // too short to hold a header
-            return;
-        };
-        const src_peer = self.registry.findById(key_id) orelse {
-            self.cInc("drop_udp_unknown_peer"); // key_id matches no configured peer
-            return;
-        };
+        // authenticates below; a wrong/forged key_id fails authentication. When
+        // header obfuscation is on, the selector is masked, so `selectIngressPeer`
+        // trial-de-masks the header in place first (see below).
+        const src_peer = self.selectIngressPeer(dgram) orelse return; // drop counter bumped inside
 
         const plen = decodeIngress(&src_peer.rx, dgram, &self.tx) orelse {
             self.cInc("drop_udp_auth_or_invalid");
@@ -552,7 +634,12 @@ pub const Reactor = struct {
     /// attribution happen in `flushEgress`.
     fn stageEgress(self: *Reactor, dst_peer: *peer.Peer, pkt: []const u8, tag: u8) void {
         if (self.udp.isFull()) self.flushEgress();
-        const wire_len = encodeEgress(&dst_peer.tx, self.localKeyId(), pkt, self.udp.nextOutBuf());
+        const buf = self.udp.nextOutBuf();
+        const wire_len = encodeEgress(&dst_peer.tx, self.localKeyId(), pkt, buf);
+        // Mask the cleartext header before it leaves the box so the wire shows no
+        // fixed protocol fingerprint; the de-mask key is this link's tx key, which
+        // the receiver mirrors as its rx key for us.
+        if (self.obfuscate) obfuscateHeader(dst_peer.tx.link_key, buf[0..wire_len]);
         self.udp.commitOut(wire_len, dst_peer.endpoint, tag);
     }
 
@@ -684,6 +771,71 @@ test "codec: encodeEgress -> decodeIngress roundtrips the IP packet" {
     try std.testing.expectEqualSlices(u8, &ip_pkt, out[0..plen]);
     // The receiver adopted the sender's epoch.
     try std.testing.expectEqual(@as(u64, 0x1700_0000_0000_0001), rx.epoch);
+}
+
+test "obfuscation: masks the header on the wire and de-masks back to a decodable datagram" {
+    const psk: crypto.Key = [_]u8{0x33} ** crypto.KEY_LEN;
+    const from_id: u16 = 2;
+    // Sender tx key for direction (2 -> 1) equals the receiver's rx key for the
+    // same ordered pair (see crypto.deriveLinkKey / peer.add), so both ends derive
+    // the same obfuscation pad.
+    const link = crypto.deriveLinkKey(psk, from_id, 1);
+    var tx = crypto.TxSession.init(link, 0x1700_0000_0000_0001);
+
+    const ip_pkt = [_]u8{ 0x45, 0, 0, 28 } ++ [_]u8{0} ** 12 ++ [_]u8{ 10, 0, 0, 2 } ++ [_]u8{0} ** 8;
+    var wire: [MAX_WIRE]u8 = undefined;
+    const wlen = encodeEgress(&tx, from_id, &ip_pkt, &wire);
+
+    // Snapshot the cleartext header and body, then obfuscate the header in place.
+    var clear_header: [HEADER_LEN]u8 = undefined;
+    @memcpy(&clear_header, wire[0..HEADER_LEN]);
+    var clear_body: [MAX_WIRE]u8 = undefined;
+    @memcpy(clear_body[0 .. wlen - HEADER_LEN], wire[HEADER_LEN..wlen]);
+    obfuscateHeader(link, wire[0..wlen]);
+
+    // The header no longer carries its fixed fingerprint (the constant version
+    // byte, repeated epoch, low seq) — it differs from the cleartext header.
+    try std.testing.expect(!std.mem.eql(u8, &clear_header, wire[0..HEADER_LEN]));
+    // The body (ciphertext + tag) is untouched: only the 20-byte header is masked,
+    // so the trailing tag stays clear for the receiver to derive the de-mask pad.
+    try std.testing.expectEqualSlices(u8, clear_body[0 .. wlen - HEADER_LEN], wire[HEADER_LEN..wlen]);
+
+    // The matching peer key recovers the header in place...
+    try std.testing.expect(tryDeobfuscate(link, from_id, wire[0..wlen]));
+    try std.testing.expectEqualSlices(u8, &clear_header, wire[0..HEADER_LEN]);
+
+    // ...and the recovered datagram decodes to the original inner packet.
+    var rx = crypto.RxSession.init(link);
+    var out: [MAX_PLAINTEXT]u8 = undefined;
+    const plen = decodeIngress(&rx, wire[0..wlen], &out) orelse return error.UnexpectedDrop;
+    try std.testing.expectEqualSlices(u8, &ip_pkt, out[0..plen]);
+}
+
+test "obfuscation: tryDeobfuscate rejects a wrong key or a mismatched id without mutating" {
+    const psk: crypto.Key = [_]u8{0x44} ** crypto.KEY_LEN;
+    const from_id: u16 = 7;
+    const link = crypto.deriveLinkKey(psk, from_id, 3);
+    var tx = crypto.TxSession.init(link, 0x1700_0000_0000_0009);
+
+    const ip_pkt = [_]u8{ 0x45, 0, 0, 20 } ++ [_]u8{0} ** 16;
+    var wire: [MAX_WIRE]u8 = undefined;
+    const wlen = encodeEgress(&tx, from_id, &ip_pkt, &wire);
+    obfuscateHeader(link, wire[0..wlen]);
+
+    var snapshot: [MAX_WIRE]u8 = undefined;
+    @memcpy(snapshot[0..wlen], wire[0..wlen]);
+
+    // Wrong link key: the recovered header is garbage, so no commit and no mutation.
+    const wrong_link = crypto.deriveLinkKey(psk, 8, 3);
+    try std.testing.expect(!tryDeobfuscate(wrong_link, from_id, wire[0..wlen]));
+    try std.testing.expectEqualSlices(u8, snapshot[0..wlen], wire[0..wlen]);
+
+    // Right key but the wrong expected id (header key_id won't match): reject, no mutation.
+    try std.testing.expect(!tryDeobfuscate(link, 999, wire[0..wlen]));
+    try std.testing.expectEqualSlices(u8, snapshot[0..wlen], wire[0..wlen]);
+
+    // Right key and id: accept and de-mask in place.
+    try std.testing.expect(tryDeobfuscate(link, from_id, wire[0..wlen]));
 }
 
 test "codec: decodeIngress drops tampered, replayed, and malformed datagrams" {
@@ -924,6 +1076,74 @@ test "pump: TUN->UDP seals to the policy-selected peer" {
     // The no-route packet was read but dropped: the drop counter records it.
     try std.testing.expectEqual(@as(u64, 2), ctr.tun_rx_packets);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_tun_no_route);
+}
+
+test "pump: obfuscated ingress trial-selects the sender, de-masks, and delivers (header obfuscation)" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
+    const psk: crypto.Key = [_]u8{0x33} ** crypto.KEY_LEN;
+
+    // The reactor delivers LOCAL packets to its TUN; here the TUN is a pipe whose
+    // read end the test inspects.
+    const pipe_fds = sys.pipeNonblock() catch return error.SkipZigTest;
+    defer _ = sys.close(pipe_fds[0]);
+    defer _ = sys.close(pipe_fds[1]);
+
+    const udp_hub = try makeUdpLoopback(); // reactor's udp_fd (local id 1)
+    defer _ = sys.close(udp_hub);
+    const udp_a = try makeUdpLoopback(); // spoke A (id 2)
+    defer _ = sys.close(udp_a);
+
+    const hub_addr = try addrOf(udp_hub);
+
+    var reg = peer.PeerRegistry.init(1);
+    _ = try reg.add(psk, 2, try addrOf(udp_a), try policy.parseCidr("10.0.0.2/32"), TEST_EPOCH);
+    // A second peer (id 3) so the trial has more than one candidate key to reject.
+    _ = try reg.add(psk, 3, fakeAddr(40003), try policy.parseCidr("10.0.0.3/32"), TEST_EPOCH);
+
+    // Inner dst 10.0.0.1 is the hub's own TUN address (LOCAL delivery).
+    const entries = [_]policy.PolicyEntry{.{
+        .src = try policy.parseCidr("0.0.0.0/0"),
+        .dst = try policy.parseCidr("10.0.0.1/32"),
+        .action = .forward,
+        .target = peer.LOCAL_TARGET,
+    }};
+    var tree = policy.PolicyTree{ .entries = &entries };
+    var active = policy.ActiveTree.init(&tree);
+
+    var r = Reactor.init(pipe_fds[1], udp_hub, null, &active, &reg);
+    var ctr = stats.Counters{};
+    r.counters = &ctr;
+    r.obfuscate = true; // the node under test runs with header obfuscation enabled
+
+    const a_tx_key = crypto.deriveLinkKey(psk, 2, 1); // spoke A -> hub direction
+    var a_tx = crypto.TxSession.init(a_tx_key, TEST_EPOCH);
+    const legit = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 1 });
+    var wire: [MAX_WIRE]u8 = undefined;
+    var buf: [MAX_PLAINTEXT]u8 = undefined;
+
+    // A obfuscates its datagram exactly as an obfuscation-enabled spoke would.
+    const wl = encodeEgress(&a_tx, 2, &legit, &wire);
+    obfuscateHeader(a_tx_key, wire[0..wl]);
+    _ = sys.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
+    r.pumpUdpIngress();
+
+    // The hub trial-de-masked the header (against peers 2 and 3), selected peer 2,
+    // authenticated, and delivered the inner packet to its TUN.
+    const rc = sys.read(pipe_fds[0], &buf, buf.len);
+    try std.testing.expect(sys.errno(rc) == .SUCCESS);
+    try std.testing.expectEqualSlices(u8, &legit, buf[0..@intCast(rc)]);
+
+    // A NON-obfuscated datagram is unintelligible to an obfuscation-enabled hub:
+    // its cleartext header, treated as masked, de-masks to garbage that matches no
+    // peer, so it is dropped and never reaches the TUN.
+    var a_tx2 = crypto.TxSession.init(a_tx_key, TEST_EPOCH);
+    a_tx2.counter.value = 9; // a fresh, unseen seq
+    const wl_plain = encodeEgress(&a_tx2, 2, &legit, &wire);
+    _ = sys.sendto(udp_a, &wire, wl_plain, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
+    r.pumpUdpIngress();
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_unknown_peer);
 }
 
 test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {

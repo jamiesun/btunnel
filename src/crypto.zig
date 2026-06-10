@@ -16,6 +16,7 @@ pub const Key = [KEY_LEN]u8;
 
 const LINK_LABEL = "subnetra-v1-link";
 const SESSION_LABEL = "subnetra-v1-session";
+const OBFS_LABEL = "subnetra-v1-obfs";
 
 /// Derive a directional per-link key from the shared PSK and the ordered pair
 /// of mesh node ids (`from_id` is the sender, `to_id` is the receiver).
@@ -46,6 +47,35 @@ pub fn nonceFromSeq(seq: u64) [NONCE_LEN]u8 {
     var n = [_]u8{0} ** NONCE_LEN;
     std.mem.writeInt(u64, n[0..8], seq, .little);
     return n;
+}
+
+/// Derive the per-packet XOR pad that hides a datagram's cleartext header on the
+/// wire (header obfuscation). Keyed by the directional `link_key` (so both ends
+/// of a link derive the SAME pad) and bound to the datagram's 16-byte AEAD `tag`
+/// as a unique per-packet salt, the pad is written to `out`, which MUST be no
+/// longer than the 32-byte digest. The label `OBFS_LABEL` domain-separates this
+/// keystream from the link/session KDFs, so the obfuscation pad is independent of
+/// every key the AEAD uses.
+///
+/// This is a pure traffic-analysis countermeasure, NOT a security primitive: it
+/// provides no authentication (the header is unauthenticated by design — see
+/// `reactor`), and the pad is reproducible by any mesh member that knows the
+/// link PSK. Its only job is to erase the protocol's fixed-byte fingerprint
+/// (constant version, repeated epoch, low monotonic seq) so a datagram is
+/// indistinguishable from uniform random bytes to an on-path observer WITHOUT the
+/// PSK. The `tag` rides the wire in the clear (the body is already
+/// pseudorandom), so a receiver that shares the link key recovers the pad — and
+/// thus the header — before authentication.
+pub fn headerMask(link_key: Key, tag: []const u8, out: []u8) void {
+    std.debug.assert(tag.len == TAG_LEN);
+    std.debug.assert(out.len <= KEY_LEN);
+    const Blake2b256 = std.crypto.hash.blake2.Blake2b256;
+    var msg: [OBFS_LABEL.len + TAG_LEN]u8 = undefined;
+    @memcpy(msg[0..OBFS_LABEL.len], OBFS_LABEL);
+    @memcpy(msg[OBFS_LABEL.len..][0..TAG_LEN], tag[0..TAG_LEN]);
+    var digest: Key = undefined;
+    Blake2b256.hash(&msg, &digest, .{ .key = &link_key });
+    @memcpy(out, digest[0..out.len]);
 }
 
 /// Derive a per-session key from a directional link key and a boot epoch
@@ -239,6 +269,38 @@ test "Crypto: auth failure is rejected (tampered tag / wrong key / wrong seq)" {
 
     // Truncated input (shorter than the tag) is rejected before AEAD.
     try std.testing.expectError(error.Truncated, open(key, 7, sealed[0 .. TAG_LEN - 1], &opened));
+}
+
+test "headerMask: deterministic, tag-bound, key-bound, and symmetric" {
+    const link_a: Key = [_]u8{0x11} ** KEY_LEN;
+    const link_b: Key = [_]u8{0x22} ** KEY_LEN;
+    const tag1: [TAG_LEN]u8 = [_]u8{0xAB} ** TAG_LEN;
+    var tag2: [TAG_LEN]u8 = [_]u8{0xAB} ** TAG_LEN;
+    tag2[0] ^= 0x01; // a single-bit different tag
+
+    var m1: [20]u8 = undefined;
+    var m1b: [20]u8 = undefined;
+    var m_diff_tag: [20]u8 = undefined;
+    var m_diff_key: [20]u8 = undefined;
+    headerMask(link_a, &tag1, &m1);
+    headerMask(link_a, &tag1, &m1b);
+    headerMask(link_a, &tag2, &m_diff_tag);
+    headerMask(link_b, &tag1, &m_diff_key);
+
+    // Deterministic for the same (key, tag).
+    try std.testing.expectEqualSlices(u8, &m1, &m1b);
+    // A different tag or a different link key yields a different pad.
+    try std.testing.expect(!std.mem.eql(u8, &m1, &m_diff_tag));
+    try std.testing.expect(!std.mem.eql(u8, &m1, &m_diff_key));
+
+    // XOR masking is symmetric: masking then masking again with the same pad
+    // recovers the original header bytes (this is what the receiver relies on).
+    var header = [_]u8{ 1, 0, 2, 0, 7, 7, 7, 7, 7, 7, 7, 7, 9, 9, 9, 9, 9, 9, 9, 9 };
+    const original = header;
+    for (&header, 0..) |*b, i| b.* ^= m1[i];
+    try std.testing.expect(!std.mem.eql(u8, &original, &header)); // actually masked
+    for (&header, 0..) |*b, i| b.* ^= m1[i];
+    try std.testing.expectEqualSlices(u8, &original, &header); // recovered
 }
 
 test "Anti-Replay: out-of-window/replays dropped, in-window reorder accepted" {

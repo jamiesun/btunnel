@@ -308,12 +308,15 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }, &registry, &counters);
 
     std.debug.print(
-        "subnetra v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) tun={s} sock={s} [ready]\n",
-        .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len, tun.ifname(), sock_path },
+        "subnetra v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}, obfuscate={}) tun={s} sock={s} [ready]\n",
+        .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len, cfg.obfuscate, tun.ifname(), sock_path },
     );
 
     var reactor = bt.reactor.Reactor.init(tun.fd, udp_fd, &control, &active, &registry);
     reactor.counters = &counters;
+    // Header obfuscation (config `obfuscate`): mask the cleartext wire header so
+    // the mesh exposes no fixed protocol fingerprint. Must match across all nodes.
+    reactor.obfuscate = cfg.obfuscate;
 
     // Arm the built-in spoke→hub keepalive (issue #96). Only a spoke with a
     // non-zero interval keepalives, and only at its single hub peer (peers[0],
