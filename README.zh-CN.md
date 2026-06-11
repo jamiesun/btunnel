@@ -89,6 +89,7 @@ docker exec subnetra subnetra status
   "role": "spoke",
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 2,
+  "obfuscate": true,
   "local_tun_ip": "10.0.0.2/24",
   "local_routes": ["10.0.0.2/32"],
   "peers": [
@@ -104,6 +105,7 @@ docker exec subnetra subnetra status
   "role": "hub",
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 1,
+  "obfuscate": true,
   "peers": [
     { "id": 2, "name": "bj-office-gw", "endpoint": "203.0.113.2:18020", "allowed_src": "10.0.0.2/32", "psk": "…64 位十六进制…" },
     { "id": 3, "name": "alice-laptop", "endpoint": "203.0.113.3:18020", "allowed_src": "10.0.0.3/32", "psk": "…64 位十六进制…" }
