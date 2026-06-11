@@ -129,6 +129,11 @@ pub inline fn recvfrom(fd: fd_t, buf: [*]u8, len: usize, flags: u32, src: ?*sock
     return system.recvfrom(fd, @ptrCast(buf), len, @intCast(flags), src, addrlen);
 }
 
+const SetsockoptRet = @TypeOf(system.setsockopt(@as(fd_t, undefined), @as(i32, undefined), @as(u32, undefined), @as([*]const u8, undefined), @as(socklen_t, undefined)));
+pub inline fn setsockopt(fd: fd_t, level: i32, optname: u32, optval: [*]const u8, optlen: socklen_t) SetsockoptRet {
+    return system.setsockopt(fd, level, optname, @ptrCast(optval), optlen);
+}
+
 /// `O_NONBLOCK` as the raw flag word fcntl(F_SETFL) expects.
 pub fn nonblockBit() usize {
     return @as(u32, @bitCast(O{ .NONBLOCK = true }));
@@ -209,4 +214,18 @@ test "sys: errno decodes a successful call" {
     const fd = try socket(AF.INET, SOCK.DGRAM, 0, true, true);
     defer _ = close(fd);
     try std.testing.expect(fd >= 0);
+}
+
+test "sys: setsockopt applies a socket option through the portable layer" {
+    const fd = try socket(AF.INET, SOCK.DGRAM, 0, true, true);
+    defer _ = close(fd);
+    var on: i32 = 1;
+    const rc = setsockopt(
+        fd,
+        @intCast(std.posix.SOL.SOCKET),
+        @intCast(std.posix.SO.REUSEADDR),
+        std.mem.asBytes(&on),
+        @sizeOf(i32),
+    );
+    try std.testing.expectEqual(E.SUCCESS, errno(rc));
 }

@@ -116,6 +116,19 @@ warns if `local_tun_mtu` is too large — fixing that prevents the classic
 "small packets work, large transfers stall" failure. To let LAN-to-LAN TCP
 survive a smaller path MTU, apply the printed MSS-clamp rule.
 
+`--print-network-plan` *assumes* a 1500-byte underlay. To measure the **real**
+path MTU between two nodes — including when ICMP is filtered, so kernel PMTU
+discovery silently fails — use the in-tree `mtu-probe` tool (run the responder on
+one node, the prober on the other); it probes actively over UDP with the
+Don't-Fragment bit and prints the `local_tun_mtu` to configure:
+
+```bash
+zig build tool:mtu-probe
+zig-out/tools/mtu-probe --listen 18020              # on the far node
+zig-out/tools/mtu-probe --probe 203.0.113.9:18020   # on the near node
+```
+
+
 For LAN-to-LAN reachability you typically also enable forwarding and route the
 remote LAN via the overlay on each spoke:
 

@@ -105,6 +105,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "crypto-bench", .src = "tools/crypto-bench.zig", .needs_core = true },
         .{ .name = "forward-bench", .src = "tools/forward-bench.zig", .needs_core = true },
         .{ .name = "udp-blast", .src = "tools/udp-blast.zig", .needs_core = true },
+        .{ .name = "mtu-probe", .src = "tools/mtu-probe.zig", .needs_core = true },
     };
     for (tool_specs) |spec| {
         const core_import = [_]std.Build.Module.Import{.{ .name = "subnetra", .module = core }};

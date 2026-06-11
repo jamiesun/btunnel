@@ -40,6 +40,7 @@ zig build run
 | `zig build tool:keygen` | 构建/运行每链路 PSK 生成器 |
 | `zig build tool:config-lint` | 构建/运行离线配置校验器 |
 | `zig build tool:wire-decode` | 构建/运行离线数据报解码器 |
+| `zig build tool:mtu-probe` | 构建/运行端到端路径 MTU 探测器 |
 
 ## 项目布局
 

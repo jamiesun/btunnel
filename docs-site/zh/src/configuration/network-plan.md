@@ -41,8 +41,36 @@ subnetrad --print-network-plan --path-mtu 1420 --config config.json
 ```
 
 如果配置的 `local_tun_mtu` 超过该值，规划会打印一条 **告警**——这正是「小包能通、大传输
-卡死」（PMTU 黑洞）的经典原因。在标准 1500 字节路径上，`1452` 是安全默认值；在 1420 字节
+卡死」（PMTU 黑洞）的经典原因。在标准 1500 字节路径上，`1436` 是安全默认值；在 1420 字节
 承载上，你应把 `local_tun_mtu` 调低到 `1356`。
+
+## 探测真实路径 MTU
+
+`--print-network-plan` 默认 **假设** 承载为 1500 字节（可用 `--path-mtu` 覆盖）。但真实路径
+往往更小——PPPoE 是 1492，CGNAT/移动/隧道上行各不相同——而常规的发现手段（内核 Path MTU
+Discovery）依赖路由器回送 ICMP「需要分片」。这类 ICMP 经常被过滤（即 *PMTU 黑洞*），而这恰恰
+就是混淆 overlay 所运行的网络环境。
+
+[`mtu-probe`](https://github.com/jamiesun/subnetra/tree/main/tools) 工具 **主动、端到端、走
+普通 UDP** 地测量路径，不依赖 ICMP，并直接打印应配置的 `local_tun_mtu`。在一端运行响应方，
+在另一端运行探测方：
+
+```bash
+zig build tool:mtu-probe
+
+# 在远端节点（例如 hub，使用其公网端点）：
+zig-out/tools/mtu-probe --listen 18020
+
+# 在近端节点——置 Don't-Fragment 位后二分搜索能往返的最大数据报，
+# 然后给出安全的 local_tun_mtu：
+zig-out/tools/mtu-probe --probe 203.0.113.9:18020
+#   underlay path MTU : 1492 bytes   (largest UDP payload that round-tripped: 1464 + 28 IPv4/UDP)
+#   subnetra overhead : 64 bytes
+#   recommended       : local_tun_mtu = 1428
+```
+
+把打印出的值设为 `local_tun_mtu`（再跑一次 `--print-network-plan` 确认告警消失）。巨型帧路径上
+加 `--ceil 9000`。详见 [`tools/README.md`](https://github.com/jamiesun/subnetra/tree/main/tools)。
 
 ## 应用它
 
