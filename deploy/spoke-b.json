@@ -5,6 +5,7 @@
   "listen_ports": [18020, 18023, 18026],
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 3,
+  "obfuscate": true,
   "local_tun_ip": "10.0.0.3/24",
   "local_routes": ["10.0.0.3/32"],
   "keepalive_secs": 20,
