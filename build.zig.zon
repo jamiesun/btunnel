@@ -1,6 +1,6 @@
 .{
     .name = .subnetra,
-    .version = "0.8.0",
+    .version = "0.8.1",
     .fingerprint = 0xe22f5cecfc381dc8,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
