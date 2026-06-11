@@ -79,7 +79,7 @@ Proposed config surface (additive, defaulting to today's behaviour):
   "peers": [
     {
       "id": 3,
-      "endpoint": "203.0.113.3:51820",
+      "endpoint": "203.0.113.3:18020",
       "allowed_src": "10.0.0.3/32",
       "psk": "…64 hex…",
       "transport": "raw_direct"   // NEW, optional; default "raw_direct"
