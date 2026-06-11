@@ -193,6 +193,39 @@ Rising `drop_udp_auth_or_invalid` ⇒ PSK/epoch/wire mismatch with the hub; risi
 `drop_udp_unknown_peer` ⇒ the header `key_id` matches no configured peer; rising
 `drop_udp_spoof` ⇒ inner source outside `allowed_src`.
 
+### Checkpoint E — restart re-establishment (issue #152)
+
+A macOS spoke must sample a **fresh wall-clock boot epoch** on every lifetime so a
+restart re-keys the session and the hub adopts the newer epoch (resetting its
+replay window). The pre-#152 build short-circuited macOS to a **constant** epoch,
+which (a) silently reused `(session_key, nonce)` pairs across restarts and (b)
+locked the restarted spoke out of the hub's replay window. This checkpoint proves
+the fix on real hardware (single-process unit tests cannot).
+
+With Checkpoint B currently passing (ping flowing) and the **hub left running
+untouched**:
+
+```bash
+# 1. Stop the spoke daemon (Ctrl-C in its terminal). On macOS this also tears
+#    down utun4 and its route (see §9), so re-create them on restart.
+# 2. Restart the spoke exactly as in §5, then re-apply the route as in §6.
+# 3. Re-run the ping from Checkpoint B.
+ping -c 5 10.0.0.3
+sudo subnetra status
+```
+
+**Expect:**
+
+- ping **resumes within a few seconds** of the restart (no manual hub action);
+- `drop_udp_auth_or_invalid` may tick **once** as the hub first sees the new
+  epoch, then stays **flat** — it must **not** climb packet-for-packet (a
+  persistent climb is the lockout symptom of a constant/replayed epoch);
+- `udp_rx_packets` on the spoke rises again, confirming the hub accepted the
+  re-keyed session.
+
+A spoke that **cannot** re-establish after restart (every packet dropped, ping
+never resumes) indicates the constant-epoch regression has returned.
+
 ## 9. Teardown
 
 Stopping the daemon (Ctrl-C in its terminal) closes the `utun` control socket, so
@@ -206,10 +239,11 @@ sudo route delete -net 10.0.0.0/24 -interface utun4
 
 ## 10. Pass / fail
 
-**PASS** when all four checkpoints hold: (A) `utun` came up, (B) ping succeeds,
-(C) the path-MTU large-packet behaviour is correct, and (D) `subnetra status`
+**PASS** when all five checkpoints hold: (A) `utun` came up, (B) ping succeeds,
+(C) the path-MTU large-packet behaviour is correct, (D) `subnetra status`
 shows the peer up with rising traffic counters and **no** growth in
-`drop_udp_auth_or_invalid` / `drop_udp_unknown_peer` on valid traffic.
+`drop_udp_auth_or_invalid` / `drop_udp_unknown_peer` on valid traffic, and
+(E) the spoke re-establishes with the hub after a restart (issue #152).
 
 Record the macOS version, arch, Zig version, `subnetrad --version`, and the hub
 type (Linux/RouterOS) alongside the result. A PASS certifies the macOS spoke
