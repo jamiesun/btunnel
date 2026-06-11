@@ -111,8 +111,10 @@ stable schema for monitoring. See
 
 ## 7. Firewall / NAT
 
-- The **hub** must accept inbound UDP on its `listen_port` (default `51820`) from
-  the internet.
+- The **hub** must accept inbound UDP on all configured `listen_ports` from the
+  internet. The default is the explicit set `18020, 18023, 18026` (not a range),
+  avoiding WireGuard's well-known port fingerprint and keeping the node reachable
+  if one port is blocked or throttled.
 - Each **spoke** needs only **outbound** UDP reachability to the hub — no inbound
   port-forwarding (the spoke initiates).
 - If a spoke's NAT mapping changes, the hub re-learns its new endpoint from the
@@ -139,20 +141,23 @@ daemon changes.
 ### Hub behind NAT (static port-forward)
 
 A hub does not need a public-IP box — it needs a **stable, inbound-reachable UDP
-endpoint**. A host behind NAT qualifies if the edge router has a **static 1:1
-port-forward (DNAT)** from a fixed public `IP:port` to the hub's internal
-`IP:listen_port`:
+endpoint**. A host behind NAT qualifies if the edge router has **static
+port-forwards (DNAT)** from fixed public UDP ports to the hub's internal
+`IP:listen_ports`:
 
-- **Spokes dial the _external_ address.** Each spoke's peer `endpoint` is the public
-  `IP:port` of the forward, not the hub's private address.
-- **`listen_port` is the _internal_ target.** Set it to the port the DNAT delivers to
-  (e.g. public `51820` → internal `51820` ⇒ `listen_port = 51820`).
+- **Spokes dial the _external_ address.** Each spoke's peer `endpoint` is one public
+  `IP:port` from the forward (typically the primary `:18020`), not the hub's private
+  address.
+- **`listen_ports` are the _internal_ targets.** Forward each configured UDP port
+  (for the default, public `18020/18023/18026` → internal `18020/18023/18026`). The
+  singular `listen_port` remains a back-compat alias for a one-port deployment and
+  is ignored when `listen_ports` is present.
 - **The mapping must be static.** A fixed port-forward, not dynamic PAT that rewrites
   the source port per flow. If the public IP itself also changes, combine this with the
   DDNS approach above.
 - **Same-LAN spokes need the internal endpoint (hairpin).** A spoke *inside the same
   NAT* often cannot reach the hub through the public IP unless the router does NAT
-  hairpin/loopback — give those spokes the hub's internal `IP:listen_port` instead.
+  hairpin/loopback — give those spokes the hub's internal primary `IP:port` instead.
 - **CGNAT cannot host a hub.** If the "public" address is itself carrier-grade NAT with
   no inbound port control, you cannot forward to it; that host can only be a spoke.
 
@@ -182,7 +187,7 @@ flowchart LR
         S2["Spoke · 10.0.0.2"]
         S3["Spoke · 10.0.0.3"]
     end
-    VIP(["Hub VIP · 203.0.113.10:51820"])
+    VIP(["Hub VIP · 203.0.113.10:18020"])
     subgraph HubPair["Hub pair · shared local_id + PSKs"]
         HA["hub-a · ACTIVE"]
         HB["hub-b · standby"]

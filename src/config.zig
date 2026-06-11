@@ -35,6 +35,28 @@ pub const MAX_PEER_NAME_LEN: usize = 32;
 /// exceeds MAX_PEERS + MAX_ROUTES*2 entries, well under MAX_POLICY_ENTRIES.
 pub const MAX_ROUTES: usize = 8;
 
+/// Maximum number of UDP ports a single node can listen on simultaneously
+/// (multi-port listening). Fixed so the reactor's per-port socket set stays
+/// resident and zero-allocation. The default is `DEFAULT_LISTEN_PORTS`; an
+/// operator lists ports EXPLICITLY (an array — never a computed range) so the
+/// set is auditable and reproducible across a mesh.
+pub const MAX_LISTEN_PORTS: usize = 8;
+
+/// Default UDP listen ports when the config omits `listen_ports`/`listen_port`.
+/// DELIBERATELY NOT 51820 (WireGuard's well-known port): binding the canonical
+/// VPN port is itself a protocol fingerprint that undermines header obfuscation.
+/// Three non-adjacent high ports reduce the blast radius of a single blocked
+/// port — a node stays reachable on the others — without resembling a scan-range.
+pub const DEFAULT_LISTEN_PORTS = [_]u16{ 18020, 18023, 18026 };
+
+/// `DEFAULT_LISTEN_PORTS` widened to the fixed `MAX_LISTEN_PORTS` array (trailing
+/// entries zero), so it can be the comptime default of `Config.listen_ports`.
+const default_listen_ports_padded: [MAX_LISTEN_PORTS]u16 = blk: {
+    var a = [_]u16{0} ** MAX_LISTEN_PORTS;
+    for (DEFAULT_LISTEN_PORTS, 0..) |p, i| a[i] = p;
+    break :blk a;
+};
+
 /// 32-byte pre-shared key (PSK).
 pub const Psk = [32]u8;
 
@@ -85,6 +107,16 @@ pub const SanityError = error{
     /// A mesh id (this node's `local_id` or a peer's `id`) exceeds 65535 and so
     /// cannot fit the 16-bit on-wire `key_id` selector (issue #34).
     PeerIdOutOfRange,
+    /// No UDP listen port configured (empty `listen_ports`). A node must bind at
+    /// least one port to be reachable.
+    NoListenPort,
+    /// More listen ports configured than `MAX_LISTEN_PORTS`.
+    TooManyListenPorts,
+    /// A listen port is 0 (the kernel would pick an ephemeral port, defeating a
+    /// fixed, peer-known endpoint).
+    InvalidListenPort,
+    /// The same listen port appears twice — the second bind to it always fails.
+    DuplicateListenPort,
 };
 
 /// CIDR string parse errors (canonical home; re-exported by `policy.zig`).
@@ -228,8 +260,14 @@ pub const Config = struct {
     negotiation_version: u8 = 1,
     /// Tunnel MTU.
     local_tun_mtu: u16 = DEFAULT_TUN_MTU,
-    /// Local UDP listen port.
-    listen_port: u16 = 51820,
+    /// Local UDP listen ports (multi-port listening). The node binds one UDP
+    /// socket per port and is reachable on ALL of them; inbound datagrams are
+    /// accepted from any, and replies/relays to a peer go back out the socket the
+    /// peer was last heard on (NAT-correct return path). Only the first
+    /// `listen_port_count` entries are valid. Defaults to `DEFAULT_LISTEN_PORTS`
+    /// (NOT 51820). Listed EXPLICITLY in config — never a computed range.
+    listen_ports: [MAX_LISTEN_PORTS]u16 = default_listen_ports_padded,
+    listen_port_count: usize = DEFAULT_LISTEN_PORTS.len,
     /// Virtual subnet (default 10.0.0.0/24).
     virtual_subnet: Cidr = .{ .network = 0x0A00_0000, .prefix = 24 },
     /// Optional local TUN interface address (host address + prefix), used only
@@ -293,6 +331,18 @@ pub const Config = struct {
         return .{};
     }
 
+    /// The valid listen ports as a slice (only the first `listen_port_count`).
+    pub fn listenPorts(self: *const Config) []const u16 {
+        return self.listen_ports[0..self.listen_port_count];
+    }
+
+    /// The primary listen port (the first configured), used for single-value
+    /// display surfaces (startup banner, `subnetra status`) where listing every
+    /// port would be noise. Returns 0 only on a (rejected) empty port set.
+    pub fn primaryPort(self: *const Config) u16 {
+        return if (self.listen_port_count == 0) 0 else self.listen_ports[0];
+    }
+
     /// Foolproof boundary checks: at least one authenticated peer link with a
     /// non-zero, per-link-unique PSK (issue #13) + MTU range + virtual/host
     /// subnet overlap. A config without a usable per-peer PSK is rejected so the
@@ -316,6 +366,20 @@ pub const Config = struct {
         }
         if (self.local_tun_mtu < MTU_MIN or self.local_tun_mtu > MTU_MAX) {
             return SanityError.MtuOutOfRange;
+        }
+        // A runnable node must listen on at least one UDP port, each non-zero and
+        // distinct (binding the same port twice always fails the second bind).
+        if (self.listen_port_count == 0) return SanityError.NoListenPort;
+        if (self.listen_port_count > MAX_LISTEN_PORTS) return SanityError.TooManyListenPorts;
+        {
+            var pi: usize = 0;
+            while (pi < self.listen_port_count) : (pi += 1) {
+                if (self.listen_ports[pi] == 0) return SanityError.InvalidListenPort;
+                var pj: usize = pi + 1;
+                while (pj < self.listen_port_count) : (pj += 1) {
+                    if (self.listen_ports[pi] == self.listen_ports[pj]) return SanityError.DuplicateListenPort;
+                }
+            }
         }
         // Mesh ids ride the 16-bit on-wire key_id selector (issue #34), so this
         // node's id and every peer id must fit u16.
@@ -378,7 +442,15 @@ pub const Config = struct {
         negotiation_version: u8 = 1,
         psk: []const u8 = "",
         local_tun_mtu: u16 = DEFAULT_TUN_MTU,
-        listen_port: u16 = 51820,
+        /// Multi-port listening (preferred): an EXPLICIT array of UDP ports to
+        /// bind, e.g. `[18020, 18023, 18026]`. Omitted (`null`) falls back to the
+        /// singular `listen_port`, then to `DEFAULT_LISTEN_PORTS`. Never a range —
+        /// list ports individually so the set is auditable.
+        listen_ports: ?[]const u16 = null,
+        /// Single-port back-compat / convenience. Omitted (`null`) and no
+        /// `listen_ports` means `DEFAULT_LISTEN_PORTS`. Ignored when
+        /// `listen_ports` is present.
+        listen_port: ?u16 = null,
         virtual_subnet: []const u8 = "10.0.0.0/24",
         local_tun_ip: []const u8 = "",
         local_id: u32 = 0,
@@ -427,7 +499,6 @@ pub const Config = struct {
         var cfg = Config{
             .negotiation_version = w.negotiation_version,
             .local_tun_mtu = w.local_tun_mtu,
-            .listen_port = w.listen_port,
             .virtual_subnet = parseCidr(w.virtual_subnet) catch return error.InvalidCidr,
             .local_tun_ip = if (w.local_tun_ip.len == 0)
                 null
@@ -435,6 +506,23 @@ pub const Config = struct {
                 parseCidr(w.local_tun_ip) catch return error.InvalidCidr,
             .local_id = w.local_id,
         };
+
+        // Resolve the listen-port set: an explicit `listen_ports` array wins;
+        // else the singular `listen_port`; else the (non-51820) defaults. Listed
+        // explicitly — never computed from a range (issue: multi-port listening).
+        if (w.listen_ports) |ports| {
+            if (ports.len == 0) return error.NoListenPort;
+            if (ports.len > MAX_LISTEN_PORTS) return error.TooManyListenPorts;
+            for (ports, 0..) |p, i| {
+                if (p == 0) return error.InvalidListenPort;
+                cfg.listen_ports[i] = p;
+            }
+            cfg.listen_port_count = ports.len;
+        } else if (w.listen_port) |p| {
+            if (p == 0) return error.InvalidListenPort;
+            cfg.listen_ports[0] = p;
+            cfg.listen_port_count = 1;
+        } // else: keep the comptime DEFAULT_LISTEN_PORTS already in `cfg`.
 
         if (w.peers.len > MAX_PEERS) return error.TooManyPeers;
         for (w.peers, 0..) |wp, i| {
@@ -577,17 +665,21 @@ test "JSON Parser & Sanity Check" {
     const cfg = try Config.fromJson(a, ok);
     try cfg.validate(&.{});
     try std.testing.expectEqual(@as(u16, 1400), cfg.local_tun_mtu);
-    try std.testing.expectEqual(@as(u16, 4000), cfg.listen_port);
+    // Singular `listen_port` resolves to a one-entry port set.
+    try std.testing.expectEqual(@as(usize, 1), cfg.listen_port_count);
+    try std.testing.expectEqual(@as(u16, 4000), cfg.primaryPort());
     try std.testing.expectEqual(@as(u32, 0x0A09_0000), cfg.virtual_subnet.network);
     try std.testing.expectEqual(@as(u6, 24), cfg.virtual_subnet.prefix);
     try std.testing.expectEqual(@as(u8, 0x01), cfg.peers[0].psk[0]);
     try std.testing.expectEqual(@as(u8, 0xef), cfg.peers[0].psk[7]);
 
-    // A partial document falls back to per-field defaults (and zero peers).
+    // A partial document falls back to per-field defaults (and zero peers): the
+    // listen-port set defaults to DEFAULT_LISTEN_PORTS (NOT 51820).
     const partial = "{ \"local_tun_mtu\": 1300 }";
     const cfg2 = try Config.fromJson(a, partial);
     try std.testing.expectEqual(@as(u16, 1300), cfg2.local_tun_mtu);
-    try std.testing.expectEqual(@as(u16, 51820), cfg2.listen_port);
+    try std.testing.expectEqual(@as(usize, DEFAULT_LISTEN_PORTS.len), cfg2.listen_port_count);
+    try std.testing.expectEqualSlices(u16, &DEFAULT_LISTEN_PORTS, cfg2.listenPorts());
     try std.testing.expectEqual(@as(usize, 0), cfg2.peer_count);
 
     // An out-of-range MTU parses but is rejected by the sanity check (fuse).
@@ -602,6 +694,43 @@ test "JSON Parser & Sanity Check" {
 
     // A malformed virtual subnet is rejected.
     try std.testing.expectError(error.InvalidCidr, Config.fromJson(a, "{ \"virtual_subnet\": \"10.0.0.0\" }"));
+}
+
+test "fromJson: explicit listen_ports array wins over the singular field and the default" {
+    const a = std.testing.allocator;
+
+    // An explicit array binds exactly those ports, in order.
+    const multi = "{ \"listen_ports\": [18020, 18023, 18026], \"listen_port\": 9999 }";
+    const cfg = try Config.fromJson(a, multi);
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 18020, 18023, 18026 }, cfg.listenPorts());
+    try std.testing.expectEqual(@as(u16, 18020), cfg.primaryPort());
+
+    // An empty array is rejected (a node must bind at least one port).
+    try std.testing.expectError(error.NoListenPort, Config.fromJson(a, "{ \"listen_ports\": [] }"));
+
+    // A zero port is rejected (would request an ephemeral kernel-chosen port).
+    try std.testing.expectError(error.InvalidListenPort, Config.fromJson(a, "{ \"listen_ports\": [0] }"));
+
+    // More than MAX_LISTEN_PORTS is rejected.
+    try std.testing.expectError(
+        error.TooManyListenPorts,
+        Config.fromJson(a, "{ \"listen_ports\": [1,2,3,4,5,6,7,8,9] }"),
+    );
+
+    // A duplicated port parses but is caught by the validate fuse. Give the
+    // config one valid peer so validate reaches the port check (the peer/PSK
+    // gates run first).
+    var dup = try Config.fromJson(a, "{ \"listen_ports\": [18020, 18020] }");
+    dup.peer_count = 1;
+    dup.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x01} ** 32 };
+    try std.testing.expectError(SanityError.DuplicateListenPort, dup.validate(&.{}));
+
+    // The default port set passes the fuse (one peer present).
+    var ok = Config.default();
+    ok.peer_count = 1;
+    ok.peers[0] = .{ .id = 2, .endpoint = undefined, .psk = [_]u8{0x01} ** 32 };
+    try ok.validate(&.{});
+    try std.testing.expectEqualSlices(u16, &DEFAULT_LISTEN_PORTS, ok.listenPorts());
 }
 
 test "fromJson: a top-level mesh-wide psk is loudly rejected (issue #13 tripwire)" {

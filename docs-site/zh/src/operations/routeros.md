@@ -22,7 +22,7 @@ RouterOS Container 不是普通的 Linux 主机：
 
 ```text
 公网 Linux Hub
-  承载: 203.0.113.10:51820
+  承载: 203.0.113.10:18020
   叠加: 10.66.0.1/24
 
 RouterOS 办公 Spoke

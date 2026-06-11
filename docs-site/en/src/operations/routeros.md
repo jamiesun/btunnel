@@ -24,7 +24,7 @@ RouterOS devices behind it as spokes.
 
 ```text
 Public Linux Hub
-  underlay: 203.0.113.10:51820
+  underlay: 203.0.113.10:18020
   overlay:  10.66.0.1/24
 
 RouterOS office Spoke

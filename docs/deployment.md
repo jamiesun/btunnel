@@ -28,7 +28,7 @@ hub and relay stay Linux/RouterOS; macOS is supported as a **spoke** only.
 
 | Node     | Mesh id | Overlay IP   | Underlay endpoint     | Private LAN        |
 |----------|---------|--------------|-----------------------|--------------------|
-| Hub      | 1       | (relay only) | `203.0.113.1:51820`   | —                  |
+| Hub      | 1       | (relay only) | `203.0.113.1:18020`   | —                  |
 | Spoke A  | 2       | `10.0.0.2/24`| behind NAT            | `192.168.10.0/24`  |
 | Spoke B  | 3       | `10.0.0.3/24`| behind NAT            | `192.168.31.0/24`  |
 
@@ -92,7 +92,7 @@ Validate before starting:
 
 ```bash
 sudo subnetrad --check --config /etc/subnetra/config.json
-# subnetra v… (mtu=1400, udp_port=51820, mode=raw_direct, local_id=2, peers=1) [config ok]
+# subnetra v… (mtu=1400, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 `--config` is optional; without it the daemon reads `./config.json` from its
@@ -275,7 +275,7 @@ subnetra status --json | jq .
   "version": "0.5.1",
   "mode": "raw_direct",
   "local_id": 1,
-  "listen_port": 51820,
+  "listen_port": 18020,
   "tun": "snr0",
   "peers": [
     {
@@ -529,8 +529,10 @@ spoke.
 
 ## 7. Firewall / NAT requirements
 
-- The **Hub** must accept inbound UDP on its `listen_port` (default `51820`) from
-  the internet.
+- The **Hub** must accept inbound UDP on all configured `listen_ports` from the
+  internet. The default is the explicit set `18020, 18023, 18026` (not a range),
+  avoiding WireGuard's well-known port fingerprint and keeping the node reachable
+  if one port is blocked or throttled.
 - Each **Spoke** only needs **outbound** UDP reachability to the Hub's
   `ip:port`; no inbound port-forwarding is required (the spoke initiates).
 - If a spoke's NAT mapping changes, the Hub re-learns the spoke's new endpoint
@@ -623,8 +625,8 @@ PSKs. Each spoke lists **both** hubs as peers:
 ```jsonc
 // spoke config — two hub peers; one active next-hop for the overlay, one standby
 "peers": [
-  { "id": 1,  "endpoint": "hub-a.example:51820", "allowed_src": "10.66.0.0/24", "psk": "…A…" },
-  { "id": 11, "endpoint": "hub-b.example:51820", "allowed_src": "10.66.0.0/24", "psk": "…B…" }
+  { "id": 1,  "endpoint": "hub-a.example:18020", "allowed_src": "10.66.0.0/24", "psk": "…A…" },
+  { "id": 11, "endpoint": "hub-b.example:18020", "allowed_src": "10.66.0.0/24", "psk": "…B…" }
 ]
 ```
 

@@ -5,7 +5,7 @@ spoke**, building a virtual `10.0.0.0/24` overlay. It assumes you have the
 `subnetrad` daemon and `subnetra` control tool installed (see
 [Installation](installation.md)).
 
-Throughout, the hub is reachable at the public address `203.0.113.1:51820` and
+Throughout, the hub is reachable at the public address `203.0.113.1:18020` and
 the spoke at `203.0.113.2`.
 
 ## 1. Generate a per-link key
@@ -30,9 +30,9 @@ daemon derive the forwarding policy at boot.
   "role": "hub",
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 1,
-  "listen_port": 51820,
+  "listen_ports": [18020, 18023, 18026],
   "peers": [
-    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" }
+    { "id": 2, "endpoint": "203.0.113.2:18020", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" }
   ]
 }
 ```
@@ -47,7 +47,7 @@ daemon derive the forwarding policy at boot.
   "local_tun_ip": "10.0.0.2/24",
   "local_routes": ["10.0.0.2/32"],
   "peers": [
-    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
+    { "id": 1, "endpoint": "203.0.113.1:18020", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
   ]
 }
 ```
@@ -62,7 +62,7 @@ the network:
 
 ```bash
 subnetrad --check --config config.json
-# subnetra v… (mtu=1452, udp_port=51820, mode=raw_direct, local_id=2, peers=1) [config ok]
+# subnetra v… (mtu=1452, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 ## 4. Print and apply the host network plan

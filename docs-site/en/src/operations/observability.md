@@ -9,10 +9,10 @@ weakening the stealth property.
 
 ```text
 subnetrad v0.6.0 [running]
-mode=raw_direct local_id=1 udp_port=51820 tun=snr0 peers=2
+mode=raw_direct local_id=1 udp_port=18020 tun=snr0 peers=2
 peers:
-  id=2 endpoint=203.0.113.2:51820 allowed_src=10.0.0.2/32
-  id=3 endpoint=203.0.113.3:51820 allowed_src=10.0.0.3/32
+  id=2 endpoint=203.0.113.2:18020 allowed_src=10.0.0.2/32
+  id=3 endpoint=203.0.113.3:18020 allowed_src=10.0.0.3/32
 traffic:
   tun_rx packets=... bytes=...
   udp_tx packets=... bytes=...
@@ -62,7 +62,7 @@ subnetra status --json | jq .
   "version": "0.5.1",
   "mode": "raw_direct",
   "local_id": 1,
-  "listen_port": 51820,
+  "listen_port": 18020,
   "tun": "snr0",
   "peers": [
     {

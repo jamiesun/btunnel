@@ -80,7 +80,7 @@ through the relay needs only:
   "local_tun_ip": "10.0.0.2/24",
   "local_routes": ["10.0.0.2/32"],
   "peers": [
-    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
+    { "id": 1, "endpoint": "203.0.113.1:18020", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
   ]
 }
 ```
@@ -121,8 +121,8 @@ rule to that peer:
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 1,
   "peers": [
-    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" },
-    { "id": 3, "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32", "psk": "…64 hex…" }
+    { "id": 2, "endpoint": "203.0.113.2:18020", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" },
+    { "id": 3, "endpoint": "203.0.113.3:18020", "allowed_src": "10.0.0.3/32", "psk": "…64 hex…" }
   ]
 }
 ```
