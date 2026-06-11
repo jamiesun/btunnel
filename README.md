@@ -122,6 +122,11 @@ The matching **hub** just lists its spokes — each peer becomes a route to that
 }
 ```
 
+> **Note:** the hub deliberately omits `local_tun_ip` — the derived table only
+> forwards to spokes, so the hub is a pure relay that is *not* reachable on the
+> overlay. Give it a `local_tun_ip` **and** a local-delivery rule only if you need
+> to reach the hub itself.
+
 Each peer link uses its **own** private pre-shared key (generate with `openssl rand -hex 32`);
 sharing one key across links is rejected. Spokes enable the NAT keepalive automatically.
 See [`config.example.json`](config.example.json) and the
