@@ -556,12 +556,14 @@ e2e_netns_role
 
 # --- scenario 3: active-probe / stealth (PRD §五.2 probe-resistance) ----------
 # The stealth contract: a hostile party that sprays the relay's UDP port with
-# garbage (and with a structurally-valid but unauthenticated forgery) must get
-# NOTHING back — no TCP reset, no ICMP, no UDP — and must not perturb the daemon.
-# A dedicated prober on its own underlay subnet (the Hub has NO peer for it) lets
-# us assert, unambiguously, that the Hub emits ZERO packets toward it. Honest
-# observability is asserted too: junk (a key_id that matches no peer) bumps
-# udp:unknown_peer, and the forgery (real key_id, bad AEAD tag) bumps
+# garbage (and with a structurally-valid-looking but unauthenticated forgery) must
+# get NOTHING back — no TCP reset, no ICMP, no UDP — and must not perturb the
+# daemon. A dedicated prober on its own underlay subnet (the Hub has NO peer for
+# it) lets us assert, unambiguously, that the Hub emits ZERO packets toward it.
+# Honest observability is asserted too: under the default header obfuscation the
+# per-peer selector is MASKED, so any outsider datagram that matches no peer's link
+# key — random junk OR a full-length frame naming a real id in the clear — bumps
+# udp:unknown_peer, while a runt too short to hold an obfuscated header + tag bumps
 # udp:auth_or_invalid. Bit-exact replay rejection is covered by the crypto
 # sliding-window unit tests; this layer proves the on-wire silence they cannot
 # observe. Reuses scenario 1's still-live star (cleanup happens at script EXIT).
@@ -596,14 +598,23 @@ e2e_active_probe() {
 
   # The dev image has no netcat, so send via bash's /dev/udp redirection.
   local n=20 i
-  # (a) pure garbage — its key_id bytes match no configured peer -> unknown_peer.
+  # (a) pure garbage (a full-length blob) — matches no peer's link key under the
+  #     masked selector -> unknown_peer.
   for ((i = 0; i < n; i++)); do
     ip netns exec bt_probe bash -c 'printf "%s" "NOT-A-SUBNETRA-DATAGRAM-PURE-GARBAGE-0123456789" > /dev/udp/10.100.3.1/51820' 2>/dev/null || true
   done
-  # (b) structured forgery: version=1, flags=0, key_id=2 (a real peer), then a
-  #     bogus epoch/seq + body whose AEAD tag cannot verify -> auth_or_invalid.
+  # (b) structured "forgery": a full frame that names a real id (key_id=2) in the
+  #     clear. With header obfuscation on (the default) the selector is masked, so
+  #     this is indistinguishable from junk — it also fails trial-deobfuscation
+  #     against every peer -> unknown_peer. Kept to prove the relay stays silent
+  #     even to a plausibly-shaped frame.
   for ((i = 0; i < n; i++)); do
     ip netns exec bt_probe bash -c 'printf "\x01\x00\x02\x00\x11\x22\x33\x44\x55\x66\x77\x88\x01\x02\x03\x04\x05\x06\x07\x08\xde\xad\xbe\xef\xca\xfe\xba\xbe\x0f\x1e\x2d\x3c\x4b\x5a\x69\x78" > /dev/udp/10.100.3.1/51820' 2>/dev/null || true
+  done
+  # (c) runt: too short to hold an obfuscated header + tag -> auth_or_invalid. This
+  #     is the only drop bucket an outsider can reach once the selector is masked.
+  for ((i = 0; i < n; i++)); do
+    ip netns exec bt_probe bash -c 'printf "\x01\x00\x02" > /dev/udp/10.100.3.1/51820' 2>/dev/null || true
   done
   sleep 0.5
   kill "$td_probe" >/dev/null 2>&1 || true; wait "$td_probe" 2>/dev/null || true

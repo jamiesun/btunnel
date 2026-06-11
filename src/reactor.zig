@@ -380,7 +380,10 @@ pub const Reactor = struct {
         // so mix the monotonic + wall clocks with a stack-address (ASLR) sample: the
         // result varies per process, avoiding lockstep across nodes.
         var seed_anchor: u8 = 0;
-        const seed: u64 = monoNs() ^ wallNs() ^ (@intFromPtr(&seed_anchor) *% 0x9E3779B97F4A7C15);
+        // Widen the pointer to u64 BEFORE the multiply: on 32-bit targets `usize`
+        // (the @intFromPtr result) is u32, which cannot represent the 64-bit
+        // golden-ratio constant — the mix must happen in u64 on every target.
+        const seed: u64 = monoNs() ^ wallNs() ^ (@as(u64, @intFromPtr(&seed_anchor)) *% 0x9E3779B97F4A7C15);
         self.keepalive_prng = std.Random.DefaultPrng.init(seed);
 
         // Arm the first keepalive (issue #96). When disabled (keepalive_ns == 0)
@@ -1201,6 +1204,16 @@ test "pump: obfuscated ingress trial-selects the sender, de-masks, and delivers 
     r.pumpUdpIngress();
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_unknown_peer);
+
+    // A runt (too short to hold an obfuscated header + tag) is the ONLY drop an
+    // outsider can push into auth_or_invalid once the selector is masked — every
+    // full-length unmatched datagram lands in unknown_peer (above). This mirrors
+    // the active-probe integration scenario so both layers assert the same taxonomy.
+    const runt = [_]u8{ 1, 0, 2 };
+    _ = sys.sendto(udp_a, &runt, runt.len, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
+    r.pumpUdpIngress();
+    try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
+    try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
 }
 
 test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
