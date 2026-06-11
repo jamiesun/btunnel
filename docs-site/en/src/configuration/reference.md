@@ -36,7 +36,8 @@ A minimal example (`config.example.json`):
 | `role` | string | `"manual"` | `manual`, `hub`, or `spoke`. Controls bootstrap-policy derivation — see [Roles](roles.md). |
 | `local_routes` | array of CIDR | `[]` | `role=spoke`: subnets this node delivers **locally** (to its own TUN/host). When empty, `local_tun_ip` (as a `/32`) is used. |
 | `remote_routes` | array of CIDR | `[]` | `role=spoke`: subnets reachable **through** the hub. When empty, the spoke routes `virtual_subnet` to the hub. |
-| `keepalive_secs` | integer | role default | Built-in spoke→hub NAT keepalive interval. `0` disables it (hub/manual default). A NATed `spoke` defaults to `20`. |
+| `keepalive_secs` | integer | role default | Built-in spoke→hub NAT keepalive interval. `0` disables it (hub/manual default). A NATed `spoke` defaults to `20`. With `obfuscate` on, each interval is randomized within `[secs/2, secs]` so the cadence is not a fingerprint. |
+| `obfuscate` | boolean | `true` | [Header obfuscation](https://github.com/jamiesun/subnetra/blob/main/docs/PROTOCOL.md), **on by default**: XOR-mask the 20-byte header per packet so the datagram is indistinguishable from random to a passive observer, and randomize the spoke keepalive cadence. Set `false` to opt out (readable cleartext header, e.g. for packet-capture debugging). **Must be set identically on every node in the mesh** (it is not negotiated; a mismatch fails closed). Hides the protocol fingerprint only, not packet length or timing. |
 
 ## Peer fields
 

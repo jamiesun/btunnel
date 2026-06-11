@@ -60,6 +60,13 @@ listener does not advertise itself to blind scanners. Subnetra does **not** clai
 to defeat a sophisticated DPI adversary, and it is honest about that — see
 [Design Principles → Stateless obfuscation](../concepts/design-principles.md).
 
+The mesh-wide `obfuscate` setting is **on by default**: it masks the 20-byte header so
+the datagram looks random to a *passive* observer and de-periodizes the keepalive cadence
+(it hides the fingerprint, not packet length or timing). Set `obfuscate: false` to send a
+readable cleartext header (e.g. for packet-capture debugging), which a passive observer
+can then fingerprint.
+See [Wire Protocol → Header obfuscation](../reference/wire-protocol.md#header-obfuscation-optional).
+
 ### What platforms are supported?
 
 - **Linux** is the production target: `x86_64`, `aarch64`, `armv7` (hard float),

@@ -14,6 +14,13 @@
 //!      a change to any header-validation, epoch-ordering, authentication, or
 //!      anti-replay rule moves these outputs.
 //!
+//! A third suite pins the OPTIONAL header-obfuscation layer (§3.4):
+//!   3. `obfuscated_vectors` — for each sender vector (referenced by `name`),
+//!      the on-wire bytes after `reactor.obfuscateHeader` XOR-masks the 20-byte
+//!      header. A conformant implementation that enables obfuscation must
+//!      reproduce these bytes (and recover the cleartext `vectors[name].output`
+//!      by re-applying the same pad). The link key / inputs live in `vectors`.
+//!
 //! The committed golden file `tests/protocol-vectors.json` is exactly the JSON
 //! this module emits (`zig build vectors`). The sentinel in
 //! `src/protocol_conformance.zig` pins the golden against the live code, so any
@@ -485,6 +492,35 @@ pub fn writeJson(out: []u8) ![]const u8 {
         try w.print("      ]\n    }}{s}\n", .{if (ci + 1 < RX_CASES.len) "," else ""});
     }
 
+    try w.writeAll("  ],\n  \"obfuscated_vectors\": [\n");
+
+    // Suite 3 (§3.4): the same sender vectors, but with the 20-byte header
+    // XOR-masked by `reactor.obfuscateHeader`. Inputs/link keys are NOT repeated
+    // here — they are pinned in `vectors` under the same `name`; only the masked
+    // on-wire bytes are pinned. Re-applying the pad recovers the cleartext
+    // datagram, so this suite also documents that masking is a pure envelope.
+    for (VECTORS, 0..) |v, i| {
+        var psk: crypto.Key = undefined;
+        _ = try hexDecode(&psk, v.psk_hex);
+        const link = crypto.deriveLinkKey(psk, v.from_id, v.to_id);
+
+        var plain_buf: [reactor.MAX_PLAINTEXT]u8 = undefined;
+        const plaintext = try hexDecode(&plain_buf, v.plaintext_hex);
+
+        var wire: [reactor.MAX_WIRE]u8 = undefined;
+        const n = buildDatagram(link, @intCast(v.from_id), v.epoch, v.seq, plaintext, &wire);
+        reactor.obfuscateHeader(link, wire[0..n]);
+
+        try w.print(
+            "    {{\n" ++
+                "      \"name\": \"{s}\",\n" ++
+                "      \"datagram\": \"",
+            .{v.name},
+        );
+        try w.writeHex(wire[0..n]);
+        try w.print("\"\n    }}{s}\n", .{if (i + 1 < VECTORS.len) "," else ""});
+    }
+
     try w.writeAll("  ]\n}\n");
     return a.buf[0..a.len];
 }
@@ -532,6 +568,45 @@ test "sender datagram decodes back to the input plaintext" {
         var recovered: [reactor.MAX_PLAINTEXT]u8 = undefined;
         const plen = try crypto.open(session, v.seq, wire[reactor.HEADER_LEN..], &recovered);
         try std.testing.expectEqualSlices(u8, expect, recovered[0..plen]);
+    }
+}
+
+test "obfuscated vector recovers the cleartext sender datagram and decodes" {
+    for (VECTORS) |v| {
+        const o = try compute(v); // the cleartext sender datagram
+
+        var psk: crypto.Key = undefined;
+        _ = try hexDecode(&psk, v.psk_hex);
+        const link = crypto.deriveLinkKey(psk, v.from_id, v.to_id);
+
+        // Rebuild the cleartext datagram, then obfuscate it (matching the emitter).
+        var plain_buf: [reactor.MAX_PLAINTEXT]u8 = undefined;
+        const plaintext = try hexDecode(&plain_buf, v.plaintext_hex);
+        var wire: [reactor.MAX_WIRE]u8 = undefined;
+        const n = buildDatagram(link, @intCast(v.from_id), v.epoch, v.seq, plaintext, &wire);
+
+        var cleartext: [reactor.MAX_WIRE]u8 = undefined;
+        @memcpy(cleartext[0..n], wire[0..n]);
+        reactor.obfuscateHeader(link, wire[0..n]);
+
+        // The 20-byte header is masked; the body (ciphertext + tag) is untouched.
+        try std.testing.expect(!std.mem.eql(u8, cleartext[0..reactor.HEADER_LEN], wire[0..reactor.HEADER_LEN]));
+        try std.testing.expectEqualSlices(u8, cleartext[reactor.HEADER_LEN..n], wire[reactor.HEADER_LEN..n]);
+
+        // Re-applying the pad (the receiver's de-mask) recovers the exact cleartext
+        // datagram pinned by the sender suite.
+        try std.testing.expect(reactor.tryDeobfuscate(link, v.from_id, wire[0..n]));
+        try std.testing.expectEqualSlices(u8, cleartext[0..n], wire[0..n]);
+
+        var dgram: [reactor.MAX_WIRE]u8 = undefined;
+        const expect_wire = try hexDecode(&dgram, o.datagram[0..o.datagram_len]);
+        try std.testing.expectEqualSlices(u8, expect_wire, wire[0..n]);
+
+        // And the recovered datagram authenticates + decodes to the input plaintext.
+        var rx = crypto.RxSession.init(link);
+        var out: [reactor.MAX_PLAINTEXT]u8 = undefined;
+        const plen = reactor.decodeIngress(&rx, wire[0..n], &out) orelse return error.UnexpectedDrop;
+        try std.testing.expectEqualSlices(u8, plaintext, out[0..plen]);
     }
 }
 

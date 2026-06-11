@@ -34,7 +34,8 @@
 | `role` | 字符串 | `"manual"` | `manual`、`hub` 或 `spoke`。控制启动策略推导——见 [角色](roles.md)。 |
 | `local_routes` | CIDR 数组 | `[]` | `role=spoke`：本节点 **本地** 投递（到自身 TUN/主机）的子网。为空时使用 `local_tun_ip`（作为 `/32`）。 |
 | `remote_routes` | CIDR 数组 | `[]` | `role=spoke`：**经由** Hub 可达的子网。为空时，Spoke 把 `virtual_subnet` 路由到 Hub。 |
-| `keepalive_secs` | 整数 | 角色默认 | 内置 spoke→hub NAT 保活间隔。`0` 关闭（hub/manual 默认）。NAT 后的 `spoke` 默认 `20`。 |
+| `keepalive_secs` | 整数 | 角色默认 | 内置 spoke→hub NAT 保活间隔。`0` 关闭（hub/manual 默认）。NAT 后的 `spoke` 默认 `20`。开启 `obfuscate` 时，每次间隔在 `[secs/2, secs]` 内随机化，使保活节奏不构成指纹。 |
+| `obfuscate` | 布尔 | `true` | [报头混淆](https://github.com/jamiesun/subnetra/blob/main/docs/PROTOCOL.md)，**默认开启**：按包对 20 字节报头做 XOR 掩码，使数据报对被动观察者不可与随机串区分，并随机化 spoke 保活节奏。设 `false` 可关闭（改发可读的明文报头，例如抓包调试）。**必须在网格内所有节点上设置一致**（不协商；不一致则全部认证失败、fail-closed）。仅隐藏协议指纹，不隐藏包长或时序。 |
 
 ## 对端字段
 

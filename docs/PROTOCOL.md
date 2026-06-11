@@ -9,11 +9,13 @@
 > source of truth. The machine-checkable companion to this document is the
 > known-answer-test (KAT) vector set in
 > [`tests/protocol-vectors.json`](../tests/protocol-vectors.json) — a **sender**
-> suite (`vectors`) that pins key derivation and emitted datagram bytes, and a
+> suite (`vectors`) that pins key derivation and emitted datagram bytes, a
 > **receiver** suite (`receiver_cases`) that pins the accept/drop decision,
 > recovered plaintext, and post-step session epoch for a sequence of crafted
-> datagrams. Both are pinned to the code by `src/protocol_conformance.zig` (runs
-> under `zig build test`) and regenerated with `zig build vectors`.
+> datagrams, and an **obfuscation** suite (`obfuscated_vectors`, §3.4) that pins
+> the masked on-wire bytes of each sender vector. All are pinned to the code by
+> `src/protocol_conformance.zig` (runs under `zig build test`) and regenerated
+> with `zig build vectors`.
 >
 > **Authority:** for the KDF, header serialization, AEAD, and emitted sender
 > datagram bytes, the KAT `vectors` are authoritative — if this prose disagrees
@@ -178,6 +180,72 @@ addition under `wire_version = 1`: a sender that never emits keepalives is
 unaffected, and a receiver that predates this bit simply drops keepalives (its
 strict `flags == 0` check) without any effect on data delivery.
 
+### 3.4 Header obfuscation (optional, on by default)
+
+The header in §3.1 is **cleartext and unauthenticated** (the AAD is empty). That
+is safe by construction (a tampered selector only fails authentication, §3.1,
+§7), but it is also a **fingerprint**: to a passive on-path observer the constant
+`version = 1`, the 8-byte `epoch` that repeats unchanged for a whole session, and
+the low, monotonically increasing `seq` are a recognisable signature even though
+there are no magic bytes. Active port-scan resistance (§7) does **not** imply
+resistance to passive traffic classification.
+
+Header obfuscation is a **deployment-wide** countermeasure that removes this
+fingerprint. It is **on by default** (`obfuscate`; set `false` to opt out, e.g. for
+packet-capture debugging). When enabled, a sender XOR-masks the **20-byte header** (and
+only the header) with a per-packet pseudorandom pad before transmission; the body
+(`ciphertext || tag`) is already indistinguishable from random and is left
+untouched. The pad is:
+
+```
+pad = Blake2b-256(key = link_key, msg = "subnetra-v1-obfs" || tag)[0 .. 20]
+masked_header[i] = header[i] XOR pad[i]   for i in 0..20
+```
+
+where `link_key` is the directional link key (§2.1) — shared by both ends of the
+link — and `tag` is the datagram's own 16-byte AEAD tag, which travels in the
+clear at the end of the datagram (the body is unmasked) and is unique per packet.
+Because XOR masking is symmetric, a receiver reverses it by recomputing the same
+`pad` from the (cleartext) `tag` and the link key.
+
+**Selection under obfuscation.** The `key_id` selector (§5 step 1) is itself
+masked, so a receiver cannot read it directly. Instead it **trials** each
+configured peer's receive link key: it recomputes `pad`, de-masks the header, and
+accepts the candidate when the recovered header is self-consistent
+(`version == 1` **and** the embedded `key_id` equals that peer's id). A wrong key
+yields effectively random bytes that clear both checks with probability `< 2⁻²⁴`,
+so the trial resolves the real sender; the AEAD authentication of §5 step 4
+remains the actual security gate, so a (vanishingly rare) false pre-filter match
+simply fails there and the datagram is dropped. A spoke trials one key (its hub);
+a hub trials up to its peer count.
+
+**Properties and limits.**
+
+- It is a **traffic-analysis** countermeasure, **not** a confidentiality or
+  authentication mechanism. The pad is reproducible by any mesh member holding
+  the link PSK; its sole purpose is to deny a non-member observer the fixed-byte
+  fingerprint. It does **not** hide datagram **length** (a 36-byte keepalive is still
+  36 bytes) or packet **timing** in general; as a partial timing measure, an
+  obfuscating spoke randomizes its keepalive interval (see below) so the keepalive
+  *cadence* is not a fixed-period signature.
+- It is **not negotiated.** Subnetra performs no handshake (iron law #8), so every
+  node in a mesh **MUST** be configured identically (`obfuscate`). A mismatch
+  fails closed and loudly: an unmasked datagram reaching an obfuscation-enabled
+  receiver de-masks to garbage that matches no peer and is dropped, and vice
+  versa, so no traffic flows until the configuration agrees.
+- The **inner** `wire_version` is unchanged (`1`): obfuscation is an outer
+  envelope over the §3 datagram, not a new wire version. A node with obfuscation
+  **off** emits and accepts byte-identical v1 datagrams (§3.1).
+
+**Keepalive de-periodization.** When obfuscation is enabled, a spoke emitting the
+built-in NAT keepalive (issue #96) randomizes each interval uniformly within
+`[keepalive_secs / 2, keepalive_secs]`, never exceeding the configured (NAT-safe)
+interval. This denies a passive observer the fixed period that an otherwise-idle
+spoke would expose. With obfuscation off, the keepalive fires at the exact interval.
+
+The `obfuscated_vectors` KAT suite pins the masked bytes of every sender vector;
+a conformant implementation that offers this feature **MUST** reproduce them.
+
 ---
 
 ## 4. Sender behaviour (egress)
@@ -206,6 +274,11 @@ datagram, so the uniqueness invariant above applies unchanged.
 ## 5. Receiver behaviour (ingress)
 
 On a received UDP datagram from source endpoint `S`:
+
+> **If header obfuscation (§3.4) is enabled**, the header is masked on the wire,
+> so step 1 cannot read `key_id` directly. The receiver instead trials each
+> peer's receive link key to de-mask the header (§3.4) and proceeds with the
+> recovered cleartext header from step 2 onward. Steps 2–9 are unchanged.
 
 1. **Identity selection (by `key_id`, not by endpoint).** Read `key_id` from the
    header and look up the peer `P` whose mesh id equals it. If no peer matches,

@@ -95,6 +95,31 @@ rides the same `seq` + epoch + anti-replay machinery, is **never acknowledged**,
 and is **not** a handshake. A receiver predating this bit simply drops keepalives
 (strict `flags == 0` check) with no effect on data delivery.
 
+## Header obfuscation (optional)
+
+The 20-byte header sits outside the AEAD, so if it travels in cleartext a *passive*
+observer can fingerprint the protocol by its constant `version`, repeated `epoch`, and
+low monotonic `seq` even with no magic bytes. The deployment-wide `obfuscate` setting
+(**on by default**) removes this fingerprint at **zero byte overhead**: the sender
+XOR-masks **only** the header with a per-packet pad
+
+```text
+pad = BLAKE2b-256(key = link_key, "subnetra-v1-obfs" || tag)[0..20]
+```
+
+derived from the directional `link_key` and the datagram's own cleartext 16-byte
+`tag`; the body is already pseudorandom and is left untouched. XOR is symmetric, so a
+receiver reverses it from the public tag. Because the masked `key_id` can no longer be
+read directly, ingress **trials** each peer's receive link key (recompute the pad,
+check `version` + `key_id`, then de-mask); AEAD authentication remains the real gate.
+It is **not negotiated** — every node MUST set `obfuscate` identically (a mismatch
+fails closed) — and it hides the protocol fingerprint only, **not** packet length or
+timing. An obfuscating spoke additionally randomizes its NAT-keepalive interval within
+`[keepalive_secs/2, keepalive_secs]` so the keepalive *cadence* is not a fixed-period
+signature. It is **on by default**; set `obfuscate: false` to opt out, leaving the wire
+byte-identical to v1 (and the header readable in a capture). Full normative detail and KAT
+vectors: [`docs/PROTOCOL.md` §3.4](https://github.com/jamiesun/subnetra/blob/main/docs/PROTOCOL.md).
+
 ## Sender (egress)
 
 To send inner IPv4 packet `P` to peer `D`:
@@ -114,6 +139,9 @@ also obtain a fresh epoch (and therefore a fresh session key).
 On a datagram from source endpoint `S`, in this **normative order**:
 
 1. **Identity selection** by `key_id` (not by endpoint). No matching peer ⇒ drop.
+   *(With [header obfuscation](#header-obfuscation-optional) on, the header is masked,
+   so this step instead trials each peer's receive link key to de-mask it; steps 2–9
+   are unchanged.)*
 2. **Header validation** — drop if `len < 20`, `version != 1`, a reserved `flags`
    bit is set, or `epoch == 0`.
 3. **Epoch ordering (forward-only).** `epoch < cur` ⇒ drop before any crypto;
