@@ -180,7 +180,7 @@ addition under `wire_version = 1`: a sender that never emits keepalives is
 unaffected, and a receiver that predates this bit simply drops keepalives (its
 strict `flags == 0` check) without any effect on data delivery.
 
-### 3.4 Header obfuscation (optional, off by default)
+### 3.4 Header obfuscation (optional, on by default)
 
 The header in §3.1 is **cleartext and unauthenticated** (the AAD is empty). That
 is safe by construction (a tampered selector only fails authentication, §3.1,
@@ -190,8 +190,9 @@ the low, monotonically increasing `seq` are a recognisable signature even though
 there are no magic bytes. Active port-scan resistance (§7) does **not** imply
 resistance to passive traffic classification.
 
-Header obfuscation is an **optional deployment-wide** countermeasure that removes
-this fingerprint. When enabled, a sender XOR-masks the **20-byte header** (and
+Header obfuscation is a **deployment-wide** countermeasure that removes this
+fingerprint. It is **on by default** (`obfuscate`; set `false` to opt out, e.g. for
+packet-capture debugging). When enabled, a sender XOR-masks the **20-byte header** (and
 only the header) with a per-packet pseudorandom pad before transmission; the body
 (`ciphertext || tag`) is already indistinguishable from random and is left
 untouched. The pad is:
@@ -223,8 +224,10 @@ a hub trials up to its peer count.
 - It is a **traffic-analysis** countermeasure, **not** a confidentiality or
   authentication mechanism. The pad is reproducible by any mesh member holding
   the link PSK; its sole purpose is to deny a non-member observer the fixed-byte
-  fingerprint. It does **not** hide datagram **length** or **timing** (a 36-byte
-  keepalive is still 36 bytes; a periodic keepalive is still periodic).
+  fingerprint. It does **not** hide datagram **length** (a 36-byte keepalive is still
+  36 bytes) or packet **timing** in general; as a partial timing measure, an
+  obfuscating spoke randomizes its keepalive interval (see below) so the keepalive
+  *cadence* is not a fixed-period signature.
 - It is **not negotiated.** Subnetra performs no handshake (iron law #8), so every
   node in a mesh **MUST** be configured identically (`obfuscate`). A mismatch
   fails closed and loudly: an unmasked datagram reaching an obfuscation-enabled
@@ -233,6 +236,12 @@ a hub trials up to its peer count.
 - The **inner** `wire_version` is unchanged (`1`): obfuscation is an outer
   envelope over the §3 datagram, not a new wire version. A node with obfuscation
   **off** emits and accepts byte-identical v1 datagrams (§3.1).
+
+**Keepalive de-periodization.** When obfuscation is enabled, a spoke emitting the
+built-in NAT keepalive (issue #96) randomizes each interval uniformly within
+`[keepalive_secs / 2, keepalive_secs]`, never exceeding the configured (NAT-safe)
+interval. This denies a passive observer the fixed period that an otherwise-idle
+spoke would expose. With obfuscation off, the keepalive fires at the exact interval.
 
 The `obfuscated_vectors` KAT suite pins the masked bytes of every sender vector;
 a conformant implementation that offers this feature **MUST** reproduce them.

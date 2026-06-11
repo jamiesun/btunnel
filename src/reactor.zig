@@ -311,16 +311,24 @@ pub const Reactor = struct {
     keepalive_peer_id: u32 = 0,
     /// Monotonic-clock deadline (ns) of the next keepalive, armed in `run()`.
     keepalive_due_ns: u64 = 0,
+    /// PRNG for keepalive interval jitter when `obfuscate` is on (issue #96 /
+    /// stealth). Seeded in `run()` from the system clocks plus an ASLR sample (this
+    /// std build has no OS CSPRNG); the comptime default keeps it valid for unit
+    /// tests that bypass `run()`. Not security-sensitive — it only de-periodizes
+    /// the NAT keepalive cadence.
+    keepalive_prng: std.Random.DefaultPrng = std.Random.DefaultPrng.init(0),
     /// Header obfuscation (traffic-analysis countermeasure). When true, every
     /// datagram's 20-byte cleartext header is XOR-masked on egress with a
     /// per-packet pad derived from the link key and the datagram's AEAD tag
     /// (`obfuscateHeader`), and de-masked on ingress by trialing each peer's link
-    /// key (`tryDeobfuscate`), so the wire carries no fixed protocol fingerprint.
-    /// MUST be set identically on every mesh node (it is not negotiated — Subnetra
-    /// performs no handshake): a mismatch makes all traffic fail to de-mask and
-    /// then fail authentication, i.e. it fails closed and loudly. Wired by `main`
-    /// from `config.obfuscate`; defaults off so the wire format is byte-identical
-    /// to a node that never enables it.
+    /// key (`tryDeobfuscate`), so the wire carries no fixed protocol fingerprint;
+    /// the spoke keepalive is also de-periodized (`nextKeepaliveDueNs`) so its
+    /// cadence is not a fingerprint either. MUST be set identically on every mesh
+    /// node (it is not negotiated — Subnetra performs no handshake): a mismatch
+    /// makes all traffic fail to de-mask and then fail authentication, i.e. it
+    /// fails closed and loudly. Wired by `main` from `config.obfuscate`, which
+    /// defaults ON (stealth by default). This mechanism field is inert until
+    /// wired, so a node with it off emits/accepts byte-identical v1 datagrams.
     obfuscate: bool = false,
     rx: [BUF_LEN]u8 = undefined,
     tx: [BUF_LEN]u8 = undefined,
@@ -367,9 +375,17 @@ pub const Reactor = struct {
         // of commands per tick, and the poller re-notifies while datagrams remain.
         if (self.control) |c| try poller.add(c.fd, .level);
 
+        // Seed the keepalive jitter PRNG. This std build exposes no OS CSPRNG, and
+        // the value is not security-sensitive (it only de-periodizes the keepalive),
+        // so mix the monotonic + wall clocks with a stack-address (ASLR) sample: the
+        // result varies per process, avoiding lockstep across nodes.
+        var seed_anchor: u8 = 0;
+        const seed: u64 = monoNs() ^ wallNs() ^ (@intFromPtr(&seed_anchor) *% 0x9E3779B97F4A7C15);
+        self.keepalive_prng = std.Random.DefaultPrng.init(seed);
+
         // Arm the first keepalive (issue #96). When disabled (keepalive_ns == 0)
         // the poll blocks forever as before — zero timer overhead on the hub.
-        if (self.keepalive_ns != 0) self.keepalive_due_ns = monoNs() + self.keepalive_ns;
+        if (self.keepalive_ns != 0) self.keepalive_due_ns = self.nextKeepaliveDueNs(monoNs());
 
         var ready: [16]sys.fd_t = undefined;
         while (true) {
@@ -379,7 +395,7 @@ pub const Reactor = struct {
             const now = monoNs();
             if (self.keepalive_ns != 0 and now >= self.keepalive_due_ns) {
                 self.sendKeepalive();
-                self.keepalive_due_ns = now + self.keepalive_ns;
+                self.keepalive_due_ns = self.nextKeepaliveDueNs(now);
             }
             const n = try poller.wait(&ready, self.keepaliveTimeoutMs(now));
             var i: usize = 0;
@@ -406,6 +422,20 @@ pub const Reactor = struct {
         if (now_ns >= self.keepalive_due_ns) return 0;
         const ms = (self.keepalive_due_ns - now_ns + std.time.ns_per_ms - 1) / std.time.ns_per_ms;
         return if (ms > std.math.maxInt(i32)) std.math.maxInt(i32) else @intCast(ms);
+    }
+
+    /// Monotonic-clock deadline for the NEXT keepalive given the current `now_ns`.
+    /// With obfuscation OFF this is the exact configured interval — deterministic
+    /// and easy to reason about on the wire / in a capture. With obfuscation ON the
+    /// interval is uniformly randomized within `[keepalive_ns/2, keepalive_ns]` so
+    /// an idle spoke's NAT-keepalive carries NO fixed period for a passive observer
+    /// to fingerprint, while NEVER exceeding the configured (NAT-safe) interval — it
+    /// only ever fires the same or sooner, so the pinhole guarantee is preserved.
+    /// The caller guarantees `keepalive_ns != 0` (keepalive enabled).
+    fn nextKeepaliveDueNs(self: *Reactor, now_ns: u64) u64 {
+        if (!self.obfuscate) return now_ns + self.keepalive_ns;
+        const half = self.keepalive_ns / 2;
+        return now_ns + half + self.keepalive_prng.random().uintLessThan(u64, half + 1);
     }
 
     /// Seal and send one keepalive to the configured hub peer (issue #96).
@@ -962,6 +992,33 @@ test "keepalive: keepaliveTimeoutMs reflects the schedule (issue #96)" {
     // A sub-millisecond remainder rounds UP so the loop never busy-spins on it.
     r.keepalive_due_ns = 1; // 1 ns from t=0
     try std.testing.expectEqual(@as(i32, 1), r.keepaliveTimeoutMs(0));
+}
+
+test "keepalive: obfuscation randomizes the interval within [half, full] (NAT-safe)" {
+    var reg = peer.PeerRegistry.init(1);
+    var tree = policy.PolicyTree{ .entries = &.{} };
+    var active = policy.ActiveTree.init(&tree);
+    var r = Reactor.init(-1, -1, null, &active, &reg);
+    r.keepalive_ns = 20 * std.time.ns_per_s;
+
+    // Obfuscation off: the schedule is exactly the configured interval.
+    r.obfuscate = false;
+    try std.testing.expectEqual(@as(u64, 1000 + 20 * std.time.ns_per_s), r.nextKeepaliveDueNs(1000));
+
+    // Obfuscation on: every draw lands in [now+half, now+full] and never overshoots
+    // the configured (NAT-safe) ceiling. Over many draws we must also see it fire
+    // before the full interval (i.e. jitter is actually applied).
+    r.obfuscate = true;
+    const half = r.keepalive_ns / 2;
+    var saw_below_full = false;
+    var k: usize = 0;
+    while (k < 2000) : (k += 1) {
+        const due = r.nextKeepaliveDueNs(1000);
+        try std.testing.expect(due >= 1000 + half);
+        try std.testing.expect(due <= 1000 + r.keepalive_ns);
+        if (due < 1000 + r.keepalive_ns) saw_below_full = true;
+    }
+    try std.testing.expect(saw_below_full);
 }
 
 // ---- Live-socket pump tests (Linux only; skip elsewhere / on permission gaps) ----

@@ -97,11 +97,11 @@ and is **not** a handshake. A receiver predating this bit simply drops keepalive
 
 ## Header obfuscation (optional)
 
-The 20-byte header is cleartext and outside the AEAD, so even with no magic bytes a
-*passive* observer can fingerprint the protocol by its constant `version`, repeated
-`epoch`, and low monotonic `seq`. The optional, deployment-wide `obfuscate` setting
-removes this fingerprint at **zero byte overhead**: the sender XOR-masks **only** the
-header with a per-packet pad
+The 20-byte header sits outside the AEAD, so if it travels in cleartext a *passive*
+observer can fingerprint the protocol by its constant `version`, repeated `epoch`, and
+low monotonic `seq` even with no magic bytes. The deployment-wide `obfuscate` setting
+(**on by default**) removes this fingerprint at **zero byte overhead**: the sender
+XOR-masks **only** the header with a per-packet pad
 
 ```text
 pad = BLAKE2b-256(key = link_key, "subnetra-v1-obfs" || tag)[0..20]
@@ -114,7 +114,10 @@ read directly, ingress **trials** each peer's receive link key (recompute the pa
 check `version` + `key_id`, then de-mask); AEAD authentication remains the real gate.
 It is **not negotiated** — every node MUST set `obfuscate` identically (a mismatch
 fails closed) — and it hides the protocol fingerprint only, **not** packet length or
-timing. Defaults off, leaving the wire byte-identical. Full normative detail and KAT
+timing. An obfuscating spoke additionally randomizes its NAT-keepalive interval within
+`[keepalive_secs/2, keepalive_secs]` so the keepalive *cadence* is not a fixed-period
+signature. It is **on by default**; set `obfuscate: false` to opt out, leaving the wire
+byte-identical to v1 (and the header readable in a capture). Full normative detail and KAT
 vectors: [`docs/PROTOCOL.md` §3.4](https://github.com/jamiesun/subnetra/blob/main/docs/PROTOCOL.md).
 
 ## Sender (egress)

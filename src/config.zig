@@ -265,18 +265,25 @@ pub const Config = struct {
     /// disables it (the hub/manual default). A NATed `role=spoke` defaults to
     /// `DEFAULT_SPOKE_KEEPALIVE_SECS` so its UDP pinhole and the hub's learned
     /// endpoint stay fresh with no external pinger; set explicitly to override or
-    /// to disable. Resolved in `fromJson` from the (optional) wire field.
+    /// to disable. Resolved in `fromJson` from the (optional) wire field. When
+    /// `obfuscate` is on, the reactor randomizes each interval within
+    /// `[secs/2, secs]` (never exceeding this NAT-safe ceiling) so the keepalive
+    /// cadence carries no fixed period to fingerprint.
     keepalive_secs: u32 = 0,
 
     /// Header obfuscation (traffic-analysis countermeasure). When true, every
     /// datagram's 20-byte cleartext header is XOR-masked on the wire with a
     /// per-packet pad derived from the link key and the datagram's AEAD tag, so
     /// the protocol exposes no fixed fingerprint (constant version, repeated
-    /// epoch, low monotonic seq) to a passive observer. It is NOT negotiated
-    /// (Subnetra performs no handshake): every node in a mesh MUST set the same
-    /// value, or all traffic fails to de-mask and then fails authentication
-    /// (fail-closed). Defaults off, leaving the wire byte-identical to v1.
-    obfuscate: bool = false,
+    /// epoch, low monotonic seq) to a passive observer; the spoke also randomizes
+    /// its keepalive cadence (see `Reactor.nextKeepaliveDueNs`) so the timing is
+    /// not itself a fingerprint. It is NOT negotiated (Subnetra performs no
+    /// handshake): every node in a mesh MUST set the same value, or all traffic
+    /// fails to de-mask and then fails authentication (fail-closed). Defaults ON
+    /// (stealth by default); set `false` to opt out, which leaves the wire
+    /// byte-identical to a node that never had the feature (and keeps the header
+    /// readable in a packet capture for debugging).
+    obfuscate: bool = true,
 
     /// Compile-time hardcoded fallback config (used when config.json is
     /// missing). Note: it has zero peers, which `validate()` deliberately
@@ -383,9 +390,10 @@ pub const Config = struct {
         /// (`defaultKeepaliveSecs`); present means an explicit override, including
         /// `0` to disable keepalive on a spoke.
         keepalive_secs: ?u32 = null,
-        /// Optional header obfuscation toggle. Omitted defaults to `false`. MUST
-        /// be set identically on every node in a mesh (it is not negotiated).
-        obfuscate: bool = false,
+        /// Optional header obfuscation toggle. Omitted defaults to `true`
+        /// (stealth by default); set `false` to opt out. MUST be set identically
+        /// on every node in a mesh (it is not negotiated).
+        obfuscate: bool = true,
     };
 
     /// On-wire schema for a single mesh peer. `psk` is this link's private
@@ -726,16 +734,16 @@ test "fromJson: keepalive_secs defaults per role and honors an explicit override
     try std.testing.expectEqual(@as(u32, 0), spoke_off.keepalive_secs);
 }
 
-test "fromJson: obfuscate defaults off and is honored when set" {
+test "fromJson: obfuscate defaults on (stealth by default) and an explicit false is honored" {
     const a = std.testing.allocator;
 
-    // Omitted -> off, so the wire stays byte-identical to a v1 node.
-    const off = try Config.fromJson(a, "{ \"local_id\": 1 }");
-    try std.testing.expectEqual(false, off.obfuscate);
-
-    // Explicitly enabled.
-    const on = try Config.fromJson(a, "{ \"local_id\": 1, \"obfuscate\": true }");
+    // Omitted -> on: stealth by default.
+    const on = try Config.fromJson(a, "{ \"local_id\": 1 }");
     try std.testing.expectEqual(true, on.obfuscate);
+
+    // Explicitly disabled -> off, leaving the wire byte-identical to a v1 node.
+    const off = try Config.fromJson(a, "{ \"local_id\": 1, \"obfuscate\": false }");
+    try std.testing.expectEqual(false, off.obfuscate);
 }
 
 test "parseEndpoint: address and port land in network byte order" {

@@ -37,10 +37,11 @@ install, no kernel modules, no daemon zoo.
 - **Encrypted by default, quiet on the wire** — every packet is ChaCha20-Poly1305
   encrypted with **per-link keys** and **replay protection**. There are no magic bytes, and
   unauthenticated packets are **dropped silently** — to a port scanner the tunnel looks like
-  nothing is listening. The 20-byte framing header is cleartext by default, so a *passive*
-  observer can still fingerprint the protocol; enable **optional header obfuscation**
-  (`"obfuscate": true`, mesh-wide) to mask it and make the whole datagram look random — it
-  hides the protocol fingerprint, not packet length or timing. See
+  nothing is listening. **Header obfuscation is on by default** (`obfuscate`, mesh-wide):
+  the 20-byte framing header is XOR-masked per packet so the whole datagram looks random and
+  the NAT keepalive cadence is de-periodized — no protocol fingerprint for a *passive*
+  observer. Set `"obfuscate": false` for a readable cleartext header (e.g. packet-capture
+  debugging). Obfuscation hides the protocol fingerprint, not packet length or timing. See
   [Wire Protocol → Header obfuscation](reference/wire-protocol.md#header-obfuscation-optional).
 - **A flat private subnet with policy routing** — give every node an overlay IP, route whole
   subnets site-to-site, and let the hub relay **spoke-to-spoke** so nodes behind NAT still

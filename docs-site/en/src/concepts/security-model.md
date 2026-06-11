@@ -91,14 +91,16 @@ observable. To an active prober sending garbage (or replayed ciphertext) at the
 UDP port, the endpoint is indistinguishable from a black hole, and its CPU shows no
 unusual spike.
 
-This defeats **active** probing. The 20-byte framing header is, however, cleartext
-and outside the AEAD, so a **passive** on-path observer can still fingerprint the
-protocol by its constant `version`, repeated `epoch`, and low monotonic `seq`. The
-optional, deployment-wide **`obfuscate`** setting
+This defeats **active** probing. The 20-byte framing header is outside the AEAD, so if
+it travels in cleartext a **passive** on-path observer can fingerprint the protocol by
+its constant `version`, repeated `epoch`, and low monotonic `seq`. The deployment-wide
+**`obfuscate`** setting (**on by default**)
 ([Wire Protocol → Header obfuscation](../reference/wire-protocol.md#header-obfuscation-optional))
 XOR-masks the header with a per-packet pad so the whole datagram looks random to such
-an observer — zero byte overhead, off by default, mesh-wide identical. It hides the
-protocol fingerprint only, **not** packet length or timing.
+an observer — zero byte overhead, mesh-wide identical — and also
+de-periodizes the spoke's NAT keepalive so its cadence is not a fingerprint. It hides the
+protocol fingerprint only, **not** packet length or general timing. Set `obfuscate: false`
+to opt out (readable cleartext header for packet-capture debugging).
 
 ## Inner-source binding (anti-spoofing)
 
