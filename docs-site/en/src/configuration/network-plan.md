@@ -45,8 +45,41 @@ max tunnel MTU = path_mtu − 64
 
 If the configured `local_tun_mtu` exceeds that, the plan prints a **warning** —
 this is the classic cause of "small packets work, large transfers stall" (PMTU
-blackholing). On a standard 1500-byte path, `1452` is the safe default; on a
+blackholing). On a standard 1500-byte path, `1436` is the safe default; on a
 1420-byte underlay you would lower `local_tun_mtu` to `1356`.
+
+## Measure the real path MTU
+
+`--print-network-plan` *assumes* a 1500-byte underlay (override with
+`--path-mtu`). But the real path is often smaller — PPPoE is 1492, and
+CGNAT/mobile/tunneled uplinks vary — and the usual way to discover it, kernel
+Path MTU Discovery, relies on routers returning ICMP "fragmentation needed".
+That ICMP is frequently filtered (a *PMTU black hole*), which is exactly the
+kind of network an obfuscated overlay runs across.
+
+The [`mtu-probe`](https://github.com/jamiesun/subnetra/tree/main/tools) tool
+measures the path **actively, end to end, over plain UDP** without trusting
+ICMP, then prints the `local_tun_mtu` to configure. Run the responder on one
+node and the prober on the other:
+
+```bash
+zig build tool:mtu-probe
+
+# on the far node (e.g. the hub, at its public endpoint):
+zig-out/tools/mtu-probe --listen 18020
+
+# on the near node — binary-searches the largest datagram that round-trips
+# with the Don't-Fragment bit set, then recommends a safe local_tun_mtu:
+zig-out/tools/mtu-probe --probe 203.0.113.9:18020
+#   underlay path MTU : 1492 bytes   (largest UDP payload that round-tripped: 1464 + 28 IPv4/UDP)
+#   subnetra overhead : 64 bytes
+#   recommended       : local_tun_mtu = 1428
+```
+
+Set the printed value as `local_tun_mtu` (and re-run `--print-network-plan` to
+confirm the warning is gone). On jumbo-frame paths pass `--ceil 9000`. See
+[`tools/README.md`](https://github.com/jamiesun/subnetra/tree/main/tools) for
+details.
 
 ## Apply it
 

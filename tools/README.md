@@ -33,6 +33,7 @@ zig build tool:config-gen    # -> zig-out/tools/config-gen
 zig build tool:crypto-bench  # -> zig-out/tools/crypto-bench
 zig build tool:forward-bench # -> zig-out/tools/forward-bench
 zig build tool:udp-blast     # -> zig-out/tools/udp-blast
+zig build tool:mtu-probe     # -> zig-out/tools/mtu-probe
 zig build tools-test         # run the tools' unit tests (separate from `zig build test`)
 ```
 
@@ -152,6 +153,26 @@ zig build tool:udp-blast -Doptimize=ReleaseFast
 # inside a spoke netns, blast the overlay for 5s (1400B inner = snr0 MTU):
 zig-out/tools/udp-blast --dst 10.0.0.3:9 --secs 5
 zig-out/tools/udp-blast --dst 10.0.0.1:9 --size 64 --secs 5   # small-packet (pps) view
+```
+
+### `mtu-probe` (issue #149)
+Measure the **real** underlay path MTU between two nodes, then print the safe
+`local_tun_mtu` for that path. Unlike kernel Path MTU Discovery it does **not**
+trust ICMP "fragmentation needed" (routinely filtered — a *PMTU black hole*):
+it probes actively end to end over plain UDP, binary-searching the largest
+datagram that round-trips with the IPv4 Don't-Fragment bit set (an oversized
+datagram is dropped, not fragmented, so the missing ACK is the signal). The
+recommended MTU is derived from the live `netplan.TUNNEL_OVERHEAD`, so it can
+never drift from the protocol. Two roles in one binary; opens its **own** plain
+UDP socket (never the tunnel socket) and changes no host state.
+
+```sh
+zig build tool:mtu-probe
+# on the far node (e.g. the hub, at its public endpoint):
+zig-out/tools/mtu-probe --listen 18020
+# on the near node — measure the path and read the recommended local_tun_mtu:
+zig-out/tools/mtu-probe --probe 203.0.113.9:18020
+zig-out/tools/mtu-probe --probe 203.0.113.9:18020 --ceil 9000 --verbose   # jumbo paths
 ```
 
 ### `doctor` (issue #61)

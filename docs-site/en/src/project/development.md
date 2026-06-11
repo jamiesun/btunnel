@@ -41,6 +41,7 @@ Artifacts land in `zig-out/bin/`: `subnetrad` and `subnetra`.
 | `zig build tool:keygen` | Build/run the per-link PSK generator |
 | `zig build tool:config-lint` | Build/run the offline config validator |
 | `zig build tool:wire-decode` | Build/run the offline datagram inspector |
+| `zig build tool:mtu-probe` | Build/run the end-to-end path-MTU prober |
 
 ## Project layout
 
