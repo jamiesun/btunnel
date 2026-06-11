@@ -1268,7 +1268,7 @@ test "pump: obfuscated ingress trial-selects the sender, de-masks, and delivers 
     // the active-probe integration scenario so both layers assert the same taxonomy.
     const runt = [_]u8{ 1, 0, 2 };
     _ = sys.sendto(udp_a, &runt, runt.len, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
 }
