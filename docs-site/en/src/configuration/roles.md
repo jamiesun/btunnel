@@ -131,6 +131,29 @@ This derives `10.0.0.2/32 → peer 2` and `10.0.0.3/32 → peer 3`. The hub rela
 between spokes by longest-prefix match, and never reflects a packet back to its
 source.
 
+### Reaching the hub itself
+
+The derived hub table forwards **only to spokes** — it never delivers to the hub's
+own TUN. So by default a hub has **no overlay address and is not reachable** on the
+overlay: it is a pure relay. This is usually exactly what you want — the relay
+exposes nothing addressable on the mesh.
+
+To make the hub itself reachable over the tunnel (to SSH into it, or to host a
+service on the overlay), do **two** things:
+
+1. give it an address with [`local_tun_ip`](reference.md) so the
+   [network plan](network-plan.md) configures its TUN, **and**
+2. add a local-delivery rule for that address — either run the node as `manual`
+   with an explicit table, or layer one rule on top of the derived hub table:
+
+   ```bash
+   # deliver the hub's own overlay address to its local TUN
+   sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.1/32 --action forward --target 0
+   ```
+
+Leave `local_tun_ip` unset (and add no such rule) to keep the hub relay-only, with
+nothing on the overlay able to address it.
+
 ### Validation rules for `hub`
 
 `subnetrad --check` rejects:

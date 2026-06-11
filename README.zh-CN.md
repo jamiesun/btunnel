@@ -113,6 +113,10 @@ docker exec subnetra subnetra status
 }
 ```
 
+> **注意：** Hub 刻意不设 `local_tun_ip`——推导出的表只转发给 Spoke，因此 Hub 是纯中继、
+> 在叠加网络上*不可达*。仅当你需要访问 Hub 自身时，才给它配置 `local_tun_ip` **并** 追加一条
+> 本地投递规则。
+
 每条对端链路都使用**各自**的私有预共享密钥（用 `openssl rand -hex 32` 生成）；
 多条链路共用一把密钥会被拒绝。Spoke 会自动开启 NAT 保活。
 所有字段详见 [`config.example.json`](config.example.json) 和
