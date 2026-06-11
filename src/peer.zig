@@ -88,8 +88,13 @@ const MIN_BOOT_EPOCH_NS: u64 = 1_704_067_200 * std.time.ns_per_s;
 ///     earlier one) so a one-sided restart re-establishes a fresh session.
 ///
 /// Clock failure or an implausibly early clock is FATAL (fail-closed): emitting
-/// a zero/low epoch would be catastrophic. On a non-Linux host (unit tests only;
-/// never a real deployment) a fixed in-range constant is returned.
+/// a zero/low epoch would be catastrophic. Linux and macOS — the shipped spoke
+/// platforms — both sample the real wall clock through the portable
+/// `clock_gettime` (issue #152: a `builtin.os.tag != .linux` short-circuit used
+/// to hand macOS a CONSTANT epoch, silently re-opening the #14 restart
+/// nonce-reuse break on Darwin). Only a genuinely unsupported OS — a
+/// non-Linux/non-Darwin target that never runs as a daemon and is compiled for
+/// unit tests alone — falls back to a fixed in-range constant.
 ///
 /// Residual limitation (accepted by design, not deferred): if a node's wall clock
 /// runs BACKWARD across a restart (e.g. no RTC and not yet NTP-synced), its new
@@ -100,7 +105,7 @@ const MIN_BOOT_EPOCH_NS: u64 = 1_704_067_200 * std.time.ns_per_s;
 /// iron law #8), so this is mitigated operationally (see docs/deployment.md),
 /// never by an epoch-exchange handshake.
 pub fn bootEpoch() RegistryError!u64 {
-    if (builtin.os.tag != .linux) return MIN_BOOT_EPOCH_NS;
+    if (builtin.os.tag != .linux and builtin.os.tag != .macos) return MIN_BOOT_EPOCH_NS;
     var ts: sys.timespec = undefined;
     if (sys.errno(sys.clock_gettime(sys.CLOCK.REALTIME, &ts)) != .SUCCESS) return error.ClockUnavailable;
     if (ts.sec < 0) return error.ClockUnavailable;
@@ -285,6 +290,14 @@ test "registry: bootEpoch is non-zero and time-ordered" {
     const e = try bootEpoch();
     try std.testing.expect(e >= MIN_BOOT_EPOCH_NS);
     try std.testing.expect(e != 0);
+    // On the shipped spoke platforms the epoch MUST be sampled from the live wall
+    // clock, never the fixed floor (issue #152): any real post-2024 clock is
+    // strictly past MIN_BOOT_EPOCH_NS. macOS used to short-circuit to the
+    // constant here (== MIN), silently re-opening the #14 restart nonce-reuse
+    // break; a regression to that would fail this assertion.
+    if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
+        try std.testing.expect(e > MIN_BOOT_EPOCH_NS);
+    }
 }
 
 test "registry: fromConfig carries the peer name as resident metadata only" {
