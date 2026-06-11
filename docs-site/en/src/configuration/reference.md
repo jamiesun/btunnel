@@ -12,12 +12,12 @@ A minimal example (`config.example.json`):
 {
   "negotiation_version": 1,
   "local_tun_mtu": 1452,
-  "listen_port": 51820,
+  "listen_ports": [18020, 18023, 18026],
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 1,
   "peers": [
-    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "name": "bj-office-gw", "psk": "…64 hex…" },
-    { "id": 3, "endpoint": "203.0.113.3:51820", "allowed_src": "10.0.0.3/32", "name": "colo-hub",     "psk": "…64 hex…" }
+    { "id": 2, "endpoint": "203.0.113.2:18020", "allowed_src": "10.0.0.2/32", "name": "bj-office-gw", "psk": "…64 hex…" },
+    { "id": 3, "endpoint": "203.0.113.3:18020", "allowed_src": "10.0.0.3/32", "name": "colo-hub",     "psk": "…64 hex…" }
   ]
 }
 ```
@@ -28,7 +28,8 @@ A minimal example (`config.example.json`):
 |---|---|---|---|
 | `negotiation_version` | integer | `1` | Wire/config version, fixed to `1` in v1. Reserved for future **static** per-link transport-mode selection — never an on-wire handshake. |
 | `local_tun_mtu` | integer | `1452` | Tunnel MTU. Must be in **68–1500**. The default leaves room for the 64-byte wire overhead on a 1500-byte underlay. |
-| `listen_port` | integer | `51820` | Local UDP port the daemon binds for the underlay. |
+| `listen_ports` | array of integer | `[18020, 18023, 18026]` | The UDP ports the daemon binds for the underlay — **listed explicitly** (never a range). The node accepts datagrams on **all** of them and returns each peer's traffic out the socket it was last heard on (NAT-correct), so a single blocked port does not take the node offline. 1–8 ports, each non-zero and distinct. The default is deliberately **not** `51820` (WireGuard's well-known port is itself a fingerprint). |
+| `listen_port` | integer | _(unset)_ | Single-port convenience / back-compat: a scalar equivalent to `"listen_ports": [<port>]`. Ignored when `listen_ports` is present. When both are omitted the default port set applies. |
 | `virtual_subnet` | CIDR | `10.0.0.0/24` | The overlay subnet this mesh builds. |
 | `local_tun_ip` | CIDR | _(unset)_ | This node's own TUN address (host + prefix), e.g. `10.0.0.2/24`. Used only to emit the [host network plan](network-plan.md); the daemon does **not** configure host addressing itself. |
 | `local_id` | integer | `0` | This node's mesh id. Must be **non-zero**, fit a `u16` (`1–65535`), and be distinct from every peer id when `peers` is non-empty. `0` means "single-node / no mesh". |
@@ -46,7 +47,7 @@ Each entry of `peers[]`:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `id` | integer | — | The peer's mesh id (non-zero, `u16`). Used to derive directional link keys and as the on-wire `key_id` selector. |
-| `endpoint` | string | — | The peer's underlay address as `host:port`, e.g. `203.0.113.2:51820`. For a hub on dynamic DNS, see the [deployment guide](../operations/deployment.md). |
+| `endpoint` | string | — | The peer's underlay address as `host:port`, e.g. `203.0.113.2:18020` (use one of the peer's `listen_ports`). For a hub on dynamic DNS, see the [deployment guide](../operations/deployment.md). |
 | `allowed_src` | CIDR | `0.0.0.0/0` | The inner-source range this peer is permitted to send. A decrypted packet whose inner IPv4 source falls outside is dropped (`spoof`). **Set this explicitly** — the permissive default disables anti-spoofing. |
 | `psk` | hex string | — | This link's **private** 32-byte pre-shared key (64 hex chars). Required, non-zero, and **unique per link**. Generate with `openssl rand -hex 32`. |
 | `name` | string | `""` | Optional human-readable label. Over-long or non-printable values are rejected. |

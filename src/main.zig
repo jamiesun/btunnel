@@ -212,8 +212,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (hasFlag(init.args, "--check")) {
         std.debug.print(
-            "subnetra v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}) [config ok]\n",
-            .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len },
+            "subnetra v{s} (mtu={d}, udp_ports={any}, mode={s}, local_id={d}, peers={d}) [config ok]\n",
+            .{ build_options.version, cfg.local_tun_mtu, cfg.listenPorts(), @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len },
         );
         return;
     }
@@ -270,11 +270,25 @@ pub fn main(init: std.process.Init.Minimal) !void {
     };
     defer tun.close();
 
-    const udp_fd = openUdp(cfg.listen_port) catch |err| {
-        std.debug.print("udp bind failed ({s}) on port {d}\n", .{ @errorName(err), cfg.listen_port });
-        return err;
-    };
-    defer _ = sys.close(udp_fd);
+    // Multi-port listening: open one non-blocking UDP socket per configured
+    // listen port (an explicit set — see `config.listen_ports`). The node accepts
+    // datagrams on all of them and returns each peer's traffic out the socket it
+    // was last heard on (NAT-correct). The `defer` closes every socket actually
+    // opened, including on a mid-loop bind failure.
+    const ports = cfg.listenPorts();
+    var udp_fds: [bt.config.MAX_LISTEN_PORTS]sys.fd_t = undefined;
+    var udp_fd_count: usize = 0;
+    defer {
+        var ci: usize = 0;
+        while (ci < udp_fd_count) : (ci += 1) _ = sys.close(udp_fds[ci]);
+    }
+    for (ports) |p| {
+        udp_fds[udp_fd_count] = openUdp(p) catch |err| {
+            std.debug.print("udp bind failed ({s}) on port {d}\n", .{ @errorName(err), p });
+            return err;
+        };
+        udp_fd_count += 1;
+    }
 
     // Data-plane counters (issue #24): shared by reference between the reactor
     // (writer) and the control plane (reader for `subnetra status`). Single-threaded
@@ -302,17 +316,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
     control.bindStatus(.{
         .version = build_options.version,
         .mode = @tagName(bt.reactor.EgressMode.raw_direct),
-        .listen_port = cfg.listen_port,
+        .listen_port = cfg.primaryPort(),
         .tun_name = tun.ifname(),
         .local_id = cfg.local_id,
     }, &registry, &counters);
 
     std.debug.print(
-        "subnetra v{s} (mtu={d}, udp_port={d}, mode={s}, local_id={d}, peers={d}, obfuscate={}) tun={s} sock={s} [ready]\n",
-        .{ build_options.version, cfg.local_tun_mtu, cfg.listen_port, @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len, cfg.obfuscate, tun.ifname(), sock_path },
+        "subnetra v{s} (mtu={d}, udp_ports={any}, mode={s}, local_id={d}, peers={d}, obfuscate={}) tun={s} sock={s} [ready]\n",
+        .{ build_options.version, cfg.local_tun_mtu, cfg.listenPorts(), @tagName(bt.reactor.EgressMode.raw_direct), cfg.local_id, registry.len, cfg.obfuscate, tun.ifname(), sock_path },
     );
 
-    var reactor = bt.reactor.Reactor.init(tun.fd, udp_fd, &control, &active, &registry);
+    var reactor = bt.reactor.Reactor.init(tun.fd, udp_fds[0], &control, &active, &registry);
+    {
+        var ri: usize = 1;
+        while (ri < udp_fd_count) : (ri += 1) reactor.addListenFd(udp_fds[ri]);
+    }
     reactor.counters = &counters;
     // Header obfuscation (config `obfuscate`): mask the cleartext wire header so
     // the mesh exposes no fixed protocol fingerprint. Must match across all nodes.

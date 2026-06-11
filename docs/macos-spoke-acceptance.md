@@ -30,7 +30,7 @@ route mutation are explicitly out of scope for the MVP (RFC §9).
   creation requires root.
 - **Zig 0.16.0+** to build, or a locally built `subnetrad`/`subnetra` pair.
 - A **reachable, already-working** Linux or RouterOS subnetra hub with a stable
-  underlay endpoint (e.g. `203.0.113.1:51820`) and a per-peer **PSK** issued for
+  underlay endpoint (e.g. `203.0.113.1:18020`) and a per-peer **PSK** issued for
   this Mac.
 - At least one **remote overlay target** to ping across the tunnel — another
   spoke's overlay IP (e.g. `10.0.0.3`) or a LAN host published behind the hub.
@@ -72,7 +72,7 @@ subnetrad --check --config /etc/subnetra/config.json
 **Expect** a single line, exit 0, e.g.:
 
 ```text
-subnetra vX.Y.Z (mtu=1400, udp_port=51820, mode=raw_direct, local_id=2, peers=1) [config ok]
+subnetra vX.Y.Z (mtu=1400, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 A non-zero exit (`InvalidPsk`, `InvalidConfig`, …) means the config is wrong —
@@ -111,7 +111,7 @@ sudo subnetrad --config /etc/subnetra/config.json
 **Expect** a `[ready]` banner naming the kernel-assigned interface:
 
 ```text
-subnetra vX.Y.Z (mtu=1400, udp_port=51820, mode=raw_direct, local_id=2, peers=1) tun=utun4 sock=/var/run/subnetra.sock [ready]
+subnetra vX.Y.Z (mtu=1400, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) tun=utun4 sock=/var/run/subnetra.sock [ready]
 ```
 
 Note the real name (here `utun4`). **Checkpoint A — `utun` came up:**

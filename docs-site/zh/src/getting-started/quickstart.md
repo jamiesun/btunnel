@@ -4,7 +4,7 @@
 `10.0.0.0/24` 叠加网。假设你已安装 `subnetrad` 守护进程与 `subnetra` 控制工具
 （见 [安装](installation.md)）。
 
-全文中，Hub 的公网地址为 `203.0.113.1:51820`，Spoke 为 `203.0.113.2`。
+全文中，Hub 的公网地址为 `203.0.113.1:18020`，Spoke 为 `203.0.113.2`。
 
 ## 1. 生成每链路密钥
 
@@ -28,9 +28,9 @@ openssl rand -hex 32
   "role": "hub",
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 1,
-  "listen_port": 51820,
+  "listen_ports": [18020, 18023, 18026],
   "peers": [
-    { "id": 2, "endpoint": "203.0.113.2:51820", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" }
+    { "id": 2, "endpoint": "203.0.113.2:18020", "allowed_src": "10.0.0.2/32", "psk": "…64 hex…" }
   ]
 }
 ```
@@ -45,7 +45,7 @@ openssl rand -hex 32
   "local_tun_ip": "10.0.0.2/24",
   "local_routes": ["10.0.0.2/32"],
   "peers": [
-    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
+    { "id": 1, "endpoint": "203.0.113.1:18020", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
   ]
 }
 ```
@@ -59,7 +59,7 @@ openssl rand -hex 32
 
 ```bash
 subnetrad --check --config config.json
-# subnetra v… (mtu=1452, udp_port=51820, mode=raw_direct, local_id=2, peers=1) [config ok]
+# subnetra v… (mtu=1452, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 ## 4. 打印并应用主机网络规划

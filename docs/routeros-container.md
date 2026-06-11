@@ -19,7 +19,7 @@ devices behind NAT as Spokes.
 
 ```text
 Public Linux Hub
-  underlay: 203.0.113.10:51820
+  underlay: 203.0.113.10:18020
   overlay: 10.66.0.1/24
 
 RouterOS office Spoke
@@ -135,7 +135,7 @@ RouterOS as a Spoke should point at the public Hub:
   "role": "spoke",
   "virtual_subnet": "10.66.0.0/24",
   "local_tun_mtu": 1400,
-  "listen_port": 51823,
+  "listen_ports": [18023],
   "local_id": 3,
   "local_tun_ip": "10.66.0.3/24",
   "local_routes": ["192.168.88.0/24"],
@@ -143,7 +143,7 @@ RouterOS as a Spoke should point at the public Hub:
   "peers": [
     {
       "id": 1,
-      "endpoint": "203.0.113.10:51820",
+      "endpoint": "203.0.113.10:18020",
       "allowed_src": "10.0.0.0/8",
       "psk": "REPLACE_WITH_64_HEX_CHARS"
     }

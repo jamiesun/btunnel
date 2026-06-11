@@ -40,6 +40,7 @@ const crypto = @import("crypto.zig");
 const peer = @import("peer.zig");
 const uds = @import("uds.zig");
 const stats = @import("stats.zig");
+const config = @import("config.zig");
 
 /// Private wire header (packed struct, physically aligned): 1B version + 1B
 /// flags + 2B key_id (issue #34, the sender's own mesh id, used by the receiver
@@ -286,7 +287,14 @@ pub fn ipv4Src(pkt: []const u8) ?u32 {
 
 pub const Reactor = struct {
     tun_fd: sys.fd_t,
-    udp_fd: sys.fd_t,
+    /// Local UDP sockets, one per configured listen port (multi-port listening).
+    /// The node accepts datagrams on ALL of them; a reply/relay to a peer leaves
+    /// by the socket that peer was last heard on (`Peer.rx_fd_index`) so the
+    /// source port matches its NAT pinhole. `init` seeds a single socket
+    /// (`udp_fds[0]`); `main` registers the rest with `addListenFd`. Only the
+    /// first `udp_fd_count` entries are valid.
+    udp_fds: [config.MAX_LISTEN_PORTS]sys.fd_t = undefined,
+    udp_fd_count: usize = 0,
     /// Optional AF_UNIX control listener (issue #6). When present its datagram
     /// socket is registered level-triggered in `run()` and drained via
     /// `Control.handle()`; the control plane owns the policy-tree storage and the
@@ -340,6 +348,11 @@ pub const Reactor = struct {
     /// batch's own output buffers before forwarding, so the two never alias.
     udp: os.UdpBatch = .{},
 
+    /// Construct a reactor with its FIRST (primary) UDP socket. Additional listen
+    /// sockets are appended by `addListenFd` before `run`. Keeping the single-fd
+    /// signature lets every existing unit test (and a single-port node) build a
+    /// reactor unchanged; `udp_fds[0]` is the primary used for keepalive/relay
+    /// cold-start before a peer's arrival socket is learned.
     pub fn init(
         tun_fd: sys.fd_t,
         udp_fd: sys.fd_t,
@@ -347,13 +360,36 @@ pub const Reactor = struct {
         active: *policy.ActiveTree,
         registry: *peer.PeerRegistry,
     ) Reactor {
-        return .{
+        var r = Reactor{
             .tun_fd = tun_fd,
-            .udp_fd = udp_fd,
             .control = control,
             .active = active,
             .registry = registry,
         };
+        r.udp_fds[0] = udp_fd;
+        r.udp_fd_count = 1;
+        return r;
+    }
+
+    /// Register an additional UDP listen socket (multi-port listening). Called by
+    /// `main` once per extra `config.listen_ports` entry after `init`. Silently
+    /// ignores a fd past `MAX_LISTEN_PORTS` — config validation already caps the
+    /// set, so this is only a defensive bound.
+    pub fn addListenFd(self: *Reactor, fd: sys.fd_t) void {
+        if (self.udp_fd_count >= config.MAX_LISTEN_PORTS) return;
+        self.udp_fds[self.udp_fd_count] = fd;
+        self.udp_fd_count += 1;
+    }
+
+    /// Index of `fd` within the active listen-socket set, or null if it is not a
+    /// UDP listen socket (so `run` can dispatch a ready fd to the right pump and
+    /// tag ingress with its arrival socket index).
+    fn udpIndexOf(self: *const Reactor, fd: sys.fd_t) ?usize {
+        var i: usize = 0;
+        while (i < self.udp_fd_count) : (i += 1) {
+            if (self.udp_fds[i] == fd) return i;
+        }
+        return null;
     }
 
     /// Single-threaded readiness loop. Forces TUN/UDP non-blocking, registers
@@ -364,13 +400,19 @@ pub const Reactor = struct {
     /// no runtime OS branch.
     pub fn run(self: *Reactor) !void {
         try sys.setNonblock(self.tun_fd);
-        try sys.setNonblock(self.udp_fd);
+        {
+            var fi: usize = 0;
+            while (fi < self.udp_fd_count) : (fi += 1) try sys.setNonblock(self.udp_fds[fi]);
+        }
 
         var poller = try os.Poller.init();
         defer poller.deinit();
 
         try poller.add(self.tun_fd, .edge);
-        try poller.add(self.udp_fd, .edge);
+        {
+            var fi: usize = 0;
+            while (fi < self.udp_fd_count) : (fi += 1) try poller.add(self.udp_fds[fi], .edge);
+        }
         // Control socket is level-triggered: handle() processes a bounded number
         // of commands per tick, and the poller re-notifies while datagrams remain.
         if (self.control) |c| try poller.add(c.fd, .level);
@@ -406,8 +448,8 @@ pub const Reactor = struct {
                 const fd = ready[i];
                 if (fd == self.tun_fd) {
                     self.pumpTunToUdp();
-                } else if (fd == self.udp_fd) {
-                    self.pumpUdpIngress();
+                } else if (self.udpIndexOf(fd)) |idx| {
+                    self.pumpUdpIngress(fd, idx);
                 } else if (self.control != null and fd == self.control.?.fd) {
                     self.control.?.handle();
                 }
@@ -449,7 +491,9 @@ pub const Reactor = struct {
         const hub = self.registry.findById(self.keepalive_peer_id) orelse return;
         const wire_len = encodeKeepalive(&hub.tx, self.localKeyId(), &self.tx);
         if (self.obfuscate) obfuscateHeader(hub.tx.link_key, self.tx[0..wire_len]);
-        if (self.sendTo(hub.endpoint, self.tx[0..wire_len])) self.cInc("keepalive_tx");
+        // Leave by the socket the hub was last heard on so the keepalive refreshes
+        // the SAME NAT pinhole the data path uses (cold-start uses the primary).
+        if (self.sendTo(self.udp_fds[hub.rx_fd_index], hub.endpoint, self.tx[0..wire_len])) self.cInc("keepalive_tx");
     }
 
     inline fn cInc(self: *Reactor, comptime field: []const u8) void {
@@ -518,16 +562,16 @@ pub const Reactor = struct {
     /// purely I/O amortization, never a semantics change (iron law #8). Relays /
     /// forwards produced during the drain are coalesced and flushed with one
     /// `sendmmsg`. Loops until the socket is drained (recvmmsg would block).
-    pub fn pumpUdpIngress(self: *Reactor) void {
+    pub fn pumpUdpIngress(self: *Reactor, fd: sys.fd_t, fd_index: usize) void {
         while (true) {
-            const got = self.udp.recv(self.udp_fd);
+            const got = self.udp.recv(fd);
             if (got == 0) break; // EAGAIN / drained -> done this tick
             var i: usize = 0;
             while (i < got) : (i += 1) {
                 const dgram = self.udp.datagram(i);
                 self.cInc("udp_rx_packets");
                 self.cAdd("udp_rx_bytes", @intCast(dgram.len));
-                self.processIngress(dgram, self.udp.source(i));
+                self.processIngress(dgram, self.udp.source(i), fd_index);
             }
         }
         self.flushEgress();
@@ -570,7 +614,7 @@ pub const Reactor = struct {
     /// a keepalive, or stage a relay to another peer. Factored out of the batch
     /// drain in `pumpUdpIngress` so the per-packet security path is identical
     /// whether a batch holds one datagram or `UdpBatch.N` of them.
-    fn processIngress(self: *Reactor, dgram: []u8, src: sys.sockaddr.in) void {
+    fn processIngress(self: *Reactor, dgram: []u8, src: sys.sockaddr.in, fd_index: usize) void {
         // Identity selector (issue #34): the candidate peer is chosen by the
         // header `key_id` (the sender's mesh id), NOT by source endpoint — a
         // NATed/roaming spoke may legitimately arrive from an unexpected
@@ -584,6 +628,15 @@ pub const Reactor = struct {
             self.cInc("drop_udp_auth_or_invalid");
             return;
         };
+
+        // Multi-port return path: the datagram has authenticated (and passed the
+        // anti-replay window) inside `decodeIngress`, so it is genuinely
+        // `src_peer`. Remember WHICH local socket it arrived on so every reply /
+        // relay to this peer egresses by the same socket — the source port then
+        // matches the NAT pinhole the peer punched, which restricted-cone and
+        // symmetric NATs require. Gated on authentication so a forged datagram
+        // cannot redirect a peer's return socket.
+        src_peer.rx_fd_index = fd_index;
 
         // Keepalive (issue #96): the datagram has authenticated AND passed the
         // anti-replay window inside `decodeIngress`, so it is genuinely
@@ -673,7 +726,9 @@ pub const Reactor = struct {
         // fixed protocol fingerprint; the de-mask key is this link's tx key, which
         // the receiver mirrors as its rx key for us.
         if (self.obfuscate) obfuscateHeader(dst_peer.tx.link_key, buf[0..wire_len]);
-        self.udp.commitOut(wire_len, dst_peer.endpoint, tag);
+        // Egress out the socket this peer was last heard on (NAT-correct return
+        // path); cold-start before any rx defaults to the primary socket (index 0).
+        self.udp.commitOut(wire_len, dst_peer.endpoint, self.udp_fds[dst_peer.rx_fd_index], tag);
     }
 
     /// Transmit all staged datagrams with one `sendmmsg` (macOS: a `sendto` loop)
@@ -683,7 +738,7 @@ pub const Reactor = struct {
     fn flushEgress(self: *Reactor) void {
         const n = self.udp.pending();
         if (n == 0) return;
-        const sent = self.udp.flush(self.udp_fd);
+        const sent = self.udp.flush();
         var i: usize = 0;
         while (i < n) : (i += 1) {
             const ok = i < sent;
@@ -701,15 +756,17 @@ pub const Reactor = struct {
         }
     }
 
-    /// Send `buf` to `endpoint`. Returns true if the datagram was handed to the
-    /// kernel without error, false otherwise (so the caller can count send
-    /// errors honestly rather than assuming success). Used for the single-shot
-    /// keepalive (issue #96); bulk data egress is coalesced via `flushEgress`.
-    fn sendTo(self: *Reactor, endpoint: sys.sockaddr.in, buf: []const u8) bool {
+    /// Send `buf` to `endpoint` out the given local socket `fd`. Returns true if
+    /// the datagram was handed to the kernel without error, false otherwise (so
+    /// the caller can count send errors honestly rather than assuming success).
+    /// Used for the single-shot keepalive (issue #96); bulk data egress is
+    /// coalesced via `flushEgress`.
+    fn sendTo(self: *Reactor, fd: sys.fd_t, endpoint: sys.sockaddr.in, buf: []const u8) bool {
+        _ = self;
         var ep = endpoint;
         while (true) {
             const rc = sys.sendto(
-                self.udp_fd,
+                fd,
                 buf.ptr,
                 buf.len,
                 0,
@@ -1186,7 +1243,7 @@ test "pump: obfuscated ingress trial-selects the sender, de-masks, and delivers 
     const wl = encodeEgress(&a_tx, 2, &legit, &wire);
     obfuscateHeader(a_tx_key, wire[0..wl]);
     _ = sys.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
 
     // The hub trial-de-masked the header (against peers 2 and 3), selected peer 2,
     // authenticated, and delivered the inner packet to its TUN.
@@ -1201,7 +1258,7 @@ test "pump: obfuscated ingress trial-selects the sender, de-masks, and delivers 
     a_tx2.counter.value = 9; // a fresh, unseen seq
     const wl_plain = encodeEgress(&a_tx2, 2, &legit, &wire);
     _ = sys.sendto(udp_a, &wire, wl_plain, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_unknown_peer);
 
@@ -1211,7 +1268,7 @@ test "pump: obfuscated ingress trial-selects the sender, de-masks, and delivers 
     // the active-probe integration scenario so both layers assert the same taxonomy.
     const runt = [_]u8{ 1, 0, 2 };
     _ = sys.sendto(udp_a, &runt, runt.len, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
 }
@@ -1257,7 +1314,7 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     const wlen = encodeEgress(&a_tx, 2, &to_b, &wire);
     _ = sys.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
 
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
 
     // B receives the relayed packet, decodes with derive(psk, 1, 3).
     var buf: [MAX_WIRE]u8 = undefined;
@@ -1274,7 +1331,7 @@ test "pump: relay A -> hub -> B routes by policy target, no-reflect holds" {
     const to_self = ipPkt(.{ 10, 0, 0, 2 }, .{ 10, 0, 0, 2 });
     const wlen2 = encodeEgress(&a_tx, 2, &to_self, &wire);
     _ = sys.sendto(udp_a, &wire, wlen2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     const rca = sys.recvfrom(udp_a, &buf, buf.len, 0, null, null);
     try std.testing.expect(sys.errno(rca) == .AGAIN);
 }
@@ -1329,7 +1386,7 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     // dropped before any crypto runs. Sealed with A's real key but mislabelled.
     const wl_unk = encodeEgress(&a_tx, 99, &legit, &wire);
     _ = sys.sendto(udp_a, &wire, wl_unk, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_unknown_peer);
 
@@ -1340,7 +1397,7 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     var bad_tx = crypto.TxSession.init(wrong_key, TEST_EPOCH);
     const wl_bad = encodeEgress(&bad_tx, 2, &legit, &wire);
     _ = sys.sendto(udp_c, &wire, wl_bad, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
@@ -1352,7 +1409,7 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     const spoof = ipPkt(.{ 10, 0, 0, 99 }, .{ 10, 0, 0, 1 });
     const wl1 = encodeEgress(&a_tx, 2, &spoof, &wire);
     _ = sys.sendto(udp_c, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_spoof);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
@@ -1362,7 +1419,7 @@ test "pump: ingress delivers LOCAL target, drops strangers and inner-source spoo
     // endpoint is unchanged, so no relearn is recorded.
     const wl2 = encodeEgress(&a_tx, 2, &legit, &wire);
     _ = sys.sendto(udp_a, &wire, wl2, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     const rc = sys.read(pipe_fds[0], &buf, buf.len);
     try std.testing.expect(sys.errno(rc) == .SUCCESS);
     try std.testing.expectEqualSlices(u8, &legit, buf[0..@intCast(rc)]);
@@ -1413,7 +1470,7 @@ test "pump: an authenticated packet from a new endpoint relearns the peer (issue
     // First authenticated datagram from the new endpoint: delivered AND learned.
     const wl0 = encodeEgress(&a_tx, 2, &legit, &wire);
     _ = sys.sendto(udp_a, &wire, wl0, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     const rc0 = sys.read(pipe_fds[0], &buf, buf.len);
     try std.testing.expect(sys.errno(rc0) == .SUCCESS);
     try std.testing.expectEqualSlices(u8, &legit, buf[0..@intCast(rc0)]);
@@ -1424,7 +1481,7 @@ test "pump: an authenticated packet from a new endpoint relearns the peer (issue
     // A second datagram from the SAME (now learned) endpoint does not relearn.
     const wl1 = encodeEgress(&a_tx, 2, &legit, &wire);
     _ = sys.sendto(udp_a, &wire, wl1, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     const rc1 = sys.read(pipe_fds[0], &buf, buf.len);
     try std.testing.expect(sys.errno(rc1) == .SUCCESS);
     try std.testing.expectEqual(@as(u64, 1), ctr.udp_endpoint_learned);
@@ -1474,14 +1531,14 @@ test "pump: a replayed datagram from a new endpoint cannot move the endpoint (is
     // A genuine datagram from A's real endpoint -> accepted, no endpoint change.
     const wl = encodeEgress(&a_tx, 2, &legit, &wire);
     _ = sys.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .SUCCESS);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
 
     // The attacker replays the identical bytes from udp_c. The replay window
     // rejects it (decode null) BEFORE any endpoint learning, so A stays put.
     _ = sys.sendto(udp_c, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
@@ -1518,7 +1575,7 @@ test "pump: a short datagram is counted and never crashes parseKeyId (issue #34)
     // 3 bytes: too short to even hold the key_id selector at [2..4].
     const runt = [_]u8{ 1, 0, 0 };
     _ = sys.sendto(udp_a, &runt, runt.len, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
     try std.testing.expectEqual(@as(u64, 0), ctr.udp_endpoint_learned);
 }
@@ -1563,7 +1620,7 @@ test "pump: relay learns the source's endpoint, leaves the destination's untouch
     var wire: [MAX_WIRE]u8 = undefined;
     const wlen = encodeEgress(&a_tx, 2, &to_b, &wire);
     _ = sys.sendto(udp_a, &wire, wlen, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
 
     // B still receives the relayed packet at its (unchanged) endpoint.
     var buf: [MAX_WIRE]u8 = undefined;
@@ -1622,7 +1679,7 @@ test "pump: an authenticated non-IPv4 inner packet is dropped before endpoint le
     var wire: [MAX_WIRE]u8 = undefined;
     const wl = encodeEgress(&a_tx, 2, &bad, &wire);
     _ = sys.sendto(udp_a, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
 
     var buf: [MAX_PLAINTEXT]u8 = undefined;
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
@@ -1709,7 +1766,7 @@ test "keepalive: hub authenticated keepalive refreshes the endpoint and is not i
     // The idle spoke sends one keepalive from its roamed endpoint.
     const wl = encodeKeepalive(&spoke_tx, 2, &wire);
     _ = sys.sendto(udp_spoke, &wire, wl, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
 
     // It is counted as a keepalive, relearns the endpoint + refreshes last_seen,
     // and writes NOTHING to the TUN (it carries no inner packet).
@@ -1726,7 +1783,7 @@ test "keepalive: hub authenticated keepalive refreshes the endpoint and is not i
     var bad_tx = crypto.TxSession.init(crypto.deriveLinkKey(bad_psk, 2, 1), TEST_EPOCH);
     const wlb = encodeKeepalive(&bad_tx, 2, &wire);
     _ = sys.sendto(udp_spoke, &wire, wlb, 0, @ptrCast(@constCast(&hub_addr)), @sizeOf(sys.sockaddr.in));
-    r.pumpUdpIngress();
+    r.pumpUdpIngress(r.udp_fds[0], 0);
     try std.testing.expect(sys.errno(sys.read(pipe_fds[0], &buf, buf.len)) == .AGAIN);
     try std.testing.expectEqual(@as(u64, 1), ctr.drop_udp_auth_or_invalid);
     try std.testing.expectEqual(@as(u64, 1), ctr.keepalive_rx);

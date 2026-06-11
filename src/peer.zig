@@ -45,6 +45,11 @@ pub const Peer = struct {
     /// on the numeric `id` (iron law #5).
     name: [config.MAX_PEER_NAME_LEN]u8 = undefined,
     name_len: usize = 0,
+    /// Index (into the reactor's `udp_fds`) of the local UDP socket this peer was
+    /// last heard on. Egress to this peer goes back out THAT socket so the source
+    /// port matches the NAT pinhole / cone the peer expects (multi-port listening).
+    /// Defaults to 0 (the primary socket) until the first authenticated datagram.
+    rx_fd_index: usize = 0,
 
     /// The peer's configured name as a slice (empty when unset).
     pub fn nameSlice(self: *const Peer) []const u8 {

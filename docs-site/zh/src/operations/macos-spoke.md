@@ -45,7 +45,7 @@ xattr -d com.apple.quarantine subnetrad subnetra 2>/dev/null || true
   "local_tun_ip": "10.0.0.4/24",
   "local_routes": ["10.0.0.4/32"],
   "peers": [
-    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
+    { "id": 1, "endpoint": "203.0.113.1:18020", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
   ]
 }
 ```

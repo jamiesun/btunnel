@@ -235,8 +235,13 @@ status_counter() { # status_counter <ns> <sock> <line-match> <key>
 }
 
 write_config() { # write_config <dir> <local_id> <peers-json>
+  # Pin the listen port: the default moved OFF 51820 to a multi-port set
+  # (18020/18023/18026), but this harness's endpoints, tcpdump filter, roaming
+  # source-port check and active-probe sends are all wired to 51820. An explicit
+  # single port keeps the relay/roaming/stealth mechanics on one deterministic
+  # socket (multi-port binding itself is covered by os/udp unit tests).
   cat > "$1/config.json" <<EOF
-{ "local_id": $2, "peers": $3 }
+{ "local_id": $2, "listen_ports": [51820], "peers": $3 }
 EOF
 }
 
@@ -506,18 +511,18 @@ e2e_netns_role() {
 
   # role=hub: per-spoke allowed_src becomes a forward rule to that peer id.
   cat > "$E2E_TMP2/hub/config.json" <<EOF
-{ "role": "hub", "virtual_subnet": "10.0.0.0/24", "local_id": 1, "peers":
+{ "role": "hub", "virtual_subnet": "10.0.0.0/24", "local_id": 1, "listen_ports": [51820], "peers":
   [ {"id":2,"endpoint":"10.100.1.2:51820","allowed_src":"10.0.0.2/32","psk":"$PSK_A"},
     {"id":3,"endpoint":"10.100.2.2:51820","allowed_src":"10.0.0.3/32","psk":"$PSK_B"} ] }
 EOF
   # role=spoke: local_routes -> LOCAL, remote (virtual_subnet) -> the one hub.
   cat > "$E2E_TMP2/a/config.json" <<EOF
-{ "role": "spoke", "virtual_subnet": "10.0.0.0/24", "local_id": 2,
+{ "role": "spoke", "virtual_subnet": "10.0.0.0/24", "local_id": 2, "listen_ports": [51820],
   "local_tun_ip": "10.0.0.2/24", "local_routes": ["10.0.0.2/32"], "peers":
   [ {"id":1,"endpoint":"10.100.1.1:51820","allowed_src":"10.0.0.0/24","psk":"$PSK_A"} ] }
 EOF
   cat > "$E2E_TMP2/b/config.json" <<EOF
-{ "role": "spoke", "virtual_subnet": "10.0.0.0/24", "local_id": 3,
+{ "role": "spoke", "virtual_subnet": "10.0.0.0/24", "local_id": 3, "listen_ports": [51820],
   "local_tun_ip": "10.0.0.3/24", "local_routes": ["10.0.0.3/32"], "peers":
   [ {"id":1,"endpoint":"10.100.2.1:51820","allowed_src":"10.0.0.0/24","psk":"$PSK_B"} ] }
 EOF

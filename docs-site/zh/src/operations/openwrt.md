@@ -68,7 +68,7 @@ subnetrad --version
   "local_tun_ip": "10.0.0.7/24",
   "local_routes": ["10.0.0.7/32", "192.168.1.0/24"],
   "peers": [
-    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
+    { "id": 1, "endpoint": "203.0.113.1:18020", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
   ]
 }
 ```
@@ -128,8 +128,8 @@ ping -c3 10.0.0.1               # 经叠加网 ping 到 hub
 
 - **NAT 之后 = 理想 spoke。** 内置 NAT 保活（`role=spoke` 默认，`keepalive_secs = 20`）
   保持孔打开、保持 hub 学到的端点新鲜，因此漫游/CGNAT 变动的映射无需手工纠正即可保持可达。
-- **有静态端口映射的路由器可做 hub。** 若这台 OpenWrt 有一个稳定公网 `IP:port` 经 DNAT 映射
-  到它的 `listen_port`，它可以改跑 `role=hub`——见
+- **有静态端口映射的路由器可做 hub。** 若这台 OpenWrt 有一组稳定公网 UDP 端口经 DNAT 映射
+  到它的 `listen_ports`，它可以改跑 `role=hub`——见
   [Hub behind NAT](deployment.md#hub-位于-nat-之后静态端口映射)。
 - **时间同步。** 会话密钥使用 `CLOCK_REALTIME` boot epoch 且 forward-only 排序，所以请运行
   `sysntpd` 并让时钟在启动前/时稳定（init 启动较晚，`START=95`）。见

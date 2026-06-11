@@ -41,7 +41,8 @@ const Summary = struct {
     local_id: u32,
     peer_count: usize,
     mtu: u16,
-    listen_port: u16,
+    listen_ports: [bt.config.MAX_LISTEN_PORTS]u16,
+    listen_port_count: usize,
 };
 
 fn writeOut(io: std.Io, bytes: []const u8) void {
@@ -79,7 +80,8 @@ fn lint(allocator: std.mem.Allocator, slice: []const u8) !Summary {
         .local_id = cfg.local_id,
         .peer_count = cfg.peer_count,
         .mtu = cfg.local_tun_mtu,
-        .listen_port = cfg.listen_port,
+        .listen_ports = cfg.listen_ports,
+        .listen_port_count = cfg.listen_port_count,
     };
 }
 
@@ -116,8 +118,8 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var obuf: [256]u8 = undefined;
-    const out = std.fmt.bufPrint(&obuf, "config-lint: {s}: OK (role={s}, local_id={d}, peers={d}, mtu={d}, listen_port={d})\n", .{
-        path, summary.role, summary.local_id, summary.peer_count, summary.mtu, summary.listen_port,
+    const out = std.fmt.bufPrint(&obuf, "config-lint: {s}: OK (role={s}, local_id={d}, peers={d}, mtu={d}, udp_ports={any})\n", .{
+        path, summary.role, summary.local_id, summary.peer_count, summary.mtu, summary.listen_ports[0..summary.listen_port_count],
     }) catch return;
     writeOut(io, out);
 }

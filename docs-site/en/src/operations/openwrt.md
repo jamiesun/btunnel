@@ -73,7 +73,7 @@ across the tunnel:
   "local_tun_ip": "10.0.0.7/24",
   "local_routes": ["10.0.0.7/32", "192.168.1.0/24"],
   "peers": [
-    { "id": 1, "endpoint": "203.0.113.1:51820", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
+    { "id": 1, "endpoint": "203.0.113.1:18020", "allowed_src": "10.0.0.0/24", "psk": "…64 hex…" }
   ]
 }
 ```
@@ -138,8 +138,8 @@ ping -c3 10.0.0.1               # across the overlay to the hub
   `keepalive_secs = 20`) holds the pinhole open and keeps the hub's learned
   endpoint fresh, so a roaming/CGNAT-changing mapping stays reachable with no
   manual endpoint correction.
-- **A router with a static port-forward can be a hub.** If this OpenWrt box has a
-  stable public `IP:port` DNAT'd to its `listen_port`, it can run `role=hub`
+- **A router with static port-forwards can be a hub.** If this OpenWrt box has
+  stable public UDP ports DNAT'd to its `listen_ports`, it can run `role=hub`
   instead — see
   [Hub behind NAT](deployment.md#hub-behind-nat-static-port-forward).
 - **Time sync.** The session key uses a `CLOCK_REALTIME` boot epoch ordered
