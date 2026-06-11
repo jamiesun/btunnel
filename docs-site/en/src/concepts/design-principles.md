@@ -41,6 +41,11 @@ ChaCha20-Poly1305 full encryption with **no magic numbers** in the ciphertext. O
 authentication failure, **drop silently** — never reply with a TCP Reset, ICMP, or
 anything observable. The endpoint is physically invisible to probing.
 
+That covers **active** probing; the cleartext framing header still lets a *passive*
+observer fingerprint the protocol, which the optional, mesh-wide `obfuscate` setting
+([Wire Protocol → Header obfuscation](../reference/wire-protocol.md#header-obfuscation-optional))
+masks at zero byte overhead (fingerprint only — not packet length or timing).
+
 ## 5. Mandatory transport security in v1
 
 A private per-link PSK, a per-endpoint 64-bit **monotonic nonce that is never
