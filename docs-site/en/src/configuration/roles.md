@@ -54,14 +54,14 @@ Rules are destination-matched longest-prefix; `src` is permissive (`0.0.0.0/0`).
 `--target 0` delivers to the local TUN, any other target relays to that peer id:
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
+# On Linux the CLI default already matches the daemon, so no SUBNETRA_SOCK needed.
 # Deliver this node's own overlay address locally.
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.9/32  --action forward --target 0
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.9/32  --action forward --target 0
 # Relay a downstream prefix to peer 5; send everything else up to the hub (peer 1).
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.32/27 --action forward --target 5
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/24  --action forward --target 1
-sudo -E subnetra policy show      # verify ordering
-sudo -E subnetra save             # persist across restarts
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.32/27 --action forward --target 5
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/24  --action forward --target 1
+sudo subnetra policy show      # verify ordering
+sudo subnetra save             # persist across restarts
 ```
 
 Each peer must still carry the right `allowed_src` for the inner sources it is allowed

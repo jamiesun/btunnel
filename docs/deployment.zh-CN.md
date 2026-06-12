@@ -198,22 +198,21 @@ sudo route add -net 10.0.0.0/24 -interface utun4
 > 下面的手动步骤适用于 `"role": "manual"` 配置，或当你想在推导出的表上叠加额外规则时。
 
 Hub 以空策略树启动；在运行时通过本地控制套接字安装中继/投递规则（热替换，无需重启）。
-设置 `SUBNETRA_SOCK` 以匹配 unit（`/run/subnetra/subnetra.sock`）：
+在 Linux 上 CLI 默认值已与守护进程一致（`/run/subnetra/subnetra.sock`），无需设置
+`SUBNETRA_SOCK`——仅自定义路径时才设置：
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 # 把 overlay 流量投递/中继到正确的 spoke：
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
-sudo -E subnetra policy show
-sudo -E subnetra save        # 持久化一个可重放的快照
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
+sudo subnetra policy show
+sudo subnetra save        # 持久化一个可重放的快照
 ```
 
 在每个 Spoke 上，把目的为本地 overlay 地址的隧道流量投递到本地 TUN（target `0` = 本地）：
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
 ```
 
 ## 6. 查看、排障、升级

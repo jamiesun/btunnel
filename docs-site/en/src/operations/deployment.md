@@ -89,10 +89,10 @@ the plan **after** the daemon is up. See the [macOS Spoke](macos-spoke.md) guide
 > [Roles](../configuration/roles.md).
 
 For `role=manual`, install the relay/delivery rules at runtime over the control
-socket (hot-swapped, no restart). Match `SUBNETRA_SOCK` to the unit:
+socket (hot-swapped, no restart). On Linux the CLI default already matches the
+daemon, so no `SUBNETRA_SOCK` is needed (set it only for a custom path):
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 # Hub: relay overlay traffic to the right spoke
 sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
 sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3

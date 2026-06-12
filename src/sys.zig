@@ -104,6 +104,20 @@ pub fn umask(mode: mode_t) mode_t {
     return system.umask(mode);
 }
 
+/// Best-effort directory creation for the control-socket runtime dir (e.g.
+/// `/run/subnetra`). A single level only — the parent (`/run`) is expected to
+/// exist. Linux goes through the raw `mkdirat` syscall (portable across arches
+/// that lack a bare `mkdir`, e.g. arm64); macOS uses libc. The result is meant
+/// to be ignored: an already-present dir (EEXIST, e.g. created by systemd's
+/// `RuntimeDirectory`) is the normal case.
+pub fn mkdir(path: [*:0]const u8, mode: mode_t) void {
+    if (builtin.os.tag == .linux) {
+        _ = std.os.linux.mkdirat(AT.FDCWD, path, @intCast(mode));
+    } else {
+        _ = system.mkdir(path, mode);
+    }
+}
+
 // The buffer-taking calls differ in pointer type between layers (`std.c` uses
 // `*anyopaque`; `std.os.linux` uses `[*]u8`). Thin inline wrappers keep the
 // existing `(fd, ptr, len, ...)` call shape and `@ptrCast` for the libc layer,

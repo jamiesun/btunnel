@@ -18,6 +18,10 @@ Type=simple
 # deployment guide). The control socket and policy snapshot live under /run.
 WorkingDirectory=/etc/subnetra
 RuntimeDirectory=subnetra
+# RuntimeDirectory= creates/owns /run/subnetra (0700, root). This is also the
+# compiled-in default socket path on Linux, so SUBNETRA_SOCK is redundant for a
+# current binary — kept explicit as self-documentation and to pin the path for
+# any older binary whose default differs.
 Environment=SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 
 # Fail fast on a bad config instead of crash-looping the data plane. The config

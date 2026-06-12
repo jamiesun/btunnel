@@ -101,9 +101,11 @@ COPY --from=build /src/config.example.json /etc/subnetra/config.example.json
 
 # The daemon reads ./config.json from its working directory; mount the real
 # config at /etc/subnetra/config.json. Neither busybox:musl nor scratch ships a
-# /var/run, so create it (via WORKDIR) for the default control socket
-# /var/run/subnetra.sock, then settle the working dir at /etc/subnetra.
-WORKDIR /var/run
+# /run, so create /run/subnetra (via WORKDIR's implicit mkdir -p) for the default
+# Linux control socket /run/subnetra/subnetra.sock, then settle the working dir
+# at /etc/subnetra. (The daemon also best-effort-creates this dir on bind, but
+# its parent /run must already exist.)
+WORKDIR /run/subnetra
 WORKDIR /etc/subnetra
 
 # Liveness for orchestrators (docker/compose/k8s): `subnetra status` exits non-zero

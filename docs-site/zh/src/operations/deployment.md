@@ -83,11 +83,10 @@ sudo tail -f /var/log/subnetrad.log
 > **捷径：** 如果你的配置设置了 `"role": "hub"` / `"spoke"`，守护进程会 **在启动时推导出
 > 整套策略**，本节可跳过。见 [角色](../configuration/roles.md)。
 
-对于 `role=manual`，在运行时通过控制套接字安装中继/投递规则（热更新、无需重启）。让
-`SUBNETRA_SOCK` 与单元一致：
+对于 `role=manual`，在运行时通过控制套接字安装中继/投递规则（热更新、无需重启）。在
+Linux 上 CLI 默认值已与守护进程一致，无需设置 `SUBNETRA_SOCK`（仅自定义路径时才设置）：
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 # Hub：把叠加网流量中继给正确的 Spoke
 sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
 sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
