@@ -12,6 +12,25 @@ pub fn build(b: *std.Build) void {
     // Expose the package version to the daemon as `@import("build_options")`.
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
+
+    // Compile-time peer-table capacity (`config.MAX_PEERS`). The peer registry
+    // and parsed config are fixed-capacity, zero-allocation arrays, so the cap is
+    // a build option rather than a runtime knob (matches the recompile-to-change
+    // ethos). Default 16; capped at 128 — beyond that the single-threaded
+    // reactor's O(N)-per-packet peer/policy scans dominate and splitting into
+    // multiple hubs is the right answer. `uds.MAX_POLICY_ENTRIES` is derived from
+    // this value (default 16 keeps the historical 256-entry table).
+    const max_peers = b.option(usize, "max-peers", "Max mesh peers per node (1..128, default 16)") orelse 16;
+    if (max_peers < 1 or max_peers > 128) {
+        std.log.err("-Dmax-peers must be in 1..128 (got {d})", .{max_peers});
+        std.process.exit(1);
+    }
+    build_options.addOption(usize, "max_peers", max_peers);
+    // Materialize the options as a single shared module. `addOptions` would
+    // re-root the generated file into a fresh module per call, which collides
+    // ("file belongs to two modules") once `core` and an executable that imports
+    // it both pull in build_options — so create it once and `addImport` it.
+    const build_options_mod = build_options.createModule();
     // Default to ReleaseSmall per the design doc (≤ 512KB static binary target).
     // Unlike `standardOptimizeOption`, this makes a bare `zig build` (no flags)
     // resolve to ReleaseSmall instead of Debug, while still honoring explicit
@@ -39,6 +58,8 @@ pub fn build(b: *std.Build) void {
     core.addAnonymousImport("protocol_golden", .{
         .root_source_file = b.path("tests/protocol-vectors.json"),
     });
+    // config.zig (in core) reads the compile-time peer cap from build_options.
+    core.addImport("build_options", build_options_mod);
 
     // subnetrad: the single-threaded epoll reactor daemon.
     const subnetrad = b.addExecutable(.{
@@ -53,7 +74,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(subnetrad);
-    subnetrad.root_module.addOptions("build_options", build_options);
+    subnetrad.root_module.addImport("build_options", build_options_mod);
 
     // subnetra: the lightweight UDS control client.
     const subnetra = b.addExecutable(.{
@@ -68,18 +89,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(subnetra);
-    subnetra.root_module.addOptions("build_options", build_options);
+    subnetra.root_module.addImport("build_options", build_options_mod);
 
     // gen-vectors: emits the canonical wire-protocol KAT set as JSON. Used to
     // (re)generate the committed golden `tests/protocol-vectors.json`, which the
     // conformance test pins against the live protocol code.
+    const gen_vectors_mod = b.createModule(.{
+        .root_source_file = b.path("src/gen_vectors.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // gen-vectors transitively imports config.zig (via reactor/peer), which now
+    // reads the peer cap from build_options.
+    gen_vectors_mod.addImport("build_options", build_options_mod);
     const gen_vectors = b.addExecutable(.{
         .name = "gen-vectors",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/gen_vectors.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = gen_vectors_mod,
     });
     const vectors_step = b.step("vectors", "Print the wire-protocol conformance vectors (JSON) to stdout");
     const vectors_run = b.addRunArtifact(gen_vectors);
@@ -115,7 +140,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = if (spec.needs_core) &core_import else &.{},
         });
-        tool_mod.addOptions("build_options", build_options);
+        tool_mod.addImport("build_options", build_options_mod);
 
         const tool_exe = b.addExecutable(.{ .name = spec.name, .root_module = tool_mod });
         // Install only under the explicit step, into zig-out/tools/ — not the

@@ -240,8 +240,10 @@ test "registry: rejects reserved id, self-reference, duplicates, and overflow" {
     try std.testing.expectError(RegistryError.DuplicateId, reg.add(psk, 2, testEndpoint("10.0.0.5:51820"), any, epoch));
     try std.testing.expectError(RegistryError.DuplicateEndpoint, reg.add(psk, 5, testEndpoint("10.0.0.2:51820"), any, epoch));
 
-    // Fill to capacity, then overflow.
-    var reg2 = PeerRegistry.init(100);
+    // Fill to capacity, then overflow. Use a local id outside the 1..MAX_PEERS
+    // fill range (MAX_MESH_ID is always > MAX_PEERS) so the fill never trips the
+    // self-reference guard, regardless of the configured peer cap.
+    var reg2 = PeerRegistry.init(MAX_MESH_ID);
     var port: u16 = 1;
     var id: u32 = 1;
     while (id <= MAX_PEERS) : (id += 1) {
