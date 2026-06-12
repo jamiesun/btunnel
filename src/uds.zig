@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const config = @import("config.zig");
 const sys = @import("sys.zig");
 const policy = @import("policy.zig");
 const peer = @import("peer.zig");
@@ -44,10 +45,25 @@ pub const SAVE_PATH = if (builtin.os.tag == .macos)
 else
     "/run/subnetra/subnetra.policy";
 
-/// Upper bound on installed policy rules. The control plane keeps two fixed
-/// buffers of this size (double-buffered RCU), so memory is allocation-free and
-/// bounded. Generous for a hub-and-spoke mesh (peers cap at config.MAX_PEERS).
-pub const MAX_POLICY_ENTRIES = 256;
+/// Headroom for operator-added policy rules layered on top of the role-derived
+/// table. Sized so the default `config.MAX_PEERS = 16` reproduces the historical
+/// 256-entry table (16 + MAX_ROUTES*2 + 224 = 256), keeping the default build's
+/// behavior unchanged.
+const POLICY_HEADROOM: usize = 224;
+
+/// Upper bound on installed policy rules. Derived from `config.MAX_PEERS` so a
+/// larger peer table can never overflow the hub's role-derived forwarding rules
+/// (one per spoke) plus route rules, with `POLICY_HEADROOM` left for manual
+/// rules. The control plane keeps two fixed buffers of this size (double-buffered
+/// RCU), so memory is allocation-free and bounded.
+pub const MAX_POLICY_ENTRIES = config.MAX_PEERS + config.MAX_ROUTES * 2 + POLICY_HEADROOM;
+
+comptime {
+    // A role=hub derives one forward rule per peer plus up to MAX_ROUTES*2 route
+    // rules; the table must always hold at least that many or daemon startup
+    // (policy bind) would fail.
+    std.debug.assert(MAX_POLICY_ENTRIES >= config.MAX_PEERS + config.MAX_ROUTES * 2);
+}
 
 /// Per-tick datagram budget: `handle()` processes at most this many commands per
 /// reactor wake-up so a local control flood cannot starve the data plane. The

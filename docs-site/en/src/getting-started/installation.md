@@ -178,6 +178,31 @@ zig build run
 Artifacts are placed in `zig-out/bin/`: `subnetrad` (daemon) and `subnetra`
 (control tool).
 
+### Tuning the peer cap
+
+The peer registry and parsed config are fixed-capacity, zero-allocation arrays,
+so the maximum number of mesh peers a node can hold is a **compile-time** build
+option (`-Dmax-peers`) — not a runtime config field. It defaults to **16** and
+is capped at **128**:
+
+```bash
+zig build -Dmax-peers=64                       # raise the local peer cap to 64
+zig build -Dmax-peers=128 -Dtarget=aarch64-linux-musl   # combine with a target
+```
+
+A `hub` manages at most this many spokes. This is a **per-node** sizing knob —
+it is never negotiated on the wire, so a spoke that only talks to one hub can
+keep the default 16 even when the hub is built with a larger cap. The
+control-plane policy-table size (`MAX_POLICY_ENTRIES`) is **derived** from this
+value, so raising the cap grows the policy capacity automatically; the default
+of 16 reproduces the historical 256-entry table exactly.
+
+Raising it much higher trades memory and latency for capacity: the reactor is a
+single-threaded, per-packet `O(N)` scan over peers (and, with `obfuscate` on, a
+trial de-obfuscation per inbound datagram), so very large meshes are better
+served by **splitting into several hubs** than by one hub with hundreds of
+spokes.
+
 > **ARMv5 note:** ARMv5 has no hardware atomics, so the standard library's
 > threaded I/O scaffolding references legacy `__sync_*` intrinsics that musl does
 > not provide. Because Subnetra is strictly single-threaded,
