@@ -82,9 +82,10 @@ subnetra save
 
 | 变量 | 说明 |
 |---|---|
-| `SUBNETRA_SOCK` | 控制 Unix 域套接字路径。把它设为与服务单元一致（例如 `/run/subnetra/subnetra.sock`），使 `subnetra` 与 `subnetrad` 一致。 |
+| `SUBNETRA_SOCK` | 控制 Unix 域套接字路径。**默认 `/run/subnetra/subnetra.sock`（Linux）/ `/var/run/subnetra.sock`（macOS）**——与守护进程绑定及 systemd 单元使用的路径一致，因此 `subnetra` 与 `subnetrad` 开箱即一致。仅当需要使用非默认路径时才设置（两个进程必须保持一致）。 |
 
 ```bash
+# 通常无需设置——默认值已与守护进程一致。仅当守护进程使用自定义套接字路径时才设置：
 export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 sudo -E subnetra status
 ```

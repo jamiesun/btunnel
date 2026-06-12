@@ -224,24 +224,23 @@ sudo route add -net 10.0.0.0/24 -interface utun4
 > layer extra rules on top of a derived table.
 
 The Hub starts with an empty policy tree; install the relay/delivery rules at
-runtime over the local control socket (hot-swapped, no restart). Set
-`SUBNETRA_SOCK` to match the unit (`/run/subnetra/subnetra.sock`):
+runtime over the local control socket (hot-swapped, no restart). On Linux the
+CLI default already matches the daemon (`/run/subnetra/subnetra.sock`), so no
+`SUBNETRA_SOCK` is needed — set it only for a custom path:
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 # Deliver/relay overlay traffic to the right spoke:
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
-sudo -E subnetra policy show
-sudo -E subnetra save        # persist a replayable snapshot
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 2
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.3/32 --action forward --target 3
+sudo subnetra policy show
+sudo subnetra save        # persist a replayable snapshot
 ```
 
 On each Spoke, deliver tunnelled traffic destined for the local overlay address
 to the local TUN (target `0` = local):
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward --target 0
 ```
 
 ## 6. Inspect, troubleshoot, upgrade

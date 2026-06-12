@@ -12,7 +12,7 @@ Environment=OUTPUT=/var/lib/node_exporter/textfile_collector/subnetra.prom
 ExecStart=/usr/local/bin/subnetra-textfile-exporter.sh
 # The script only reads the daemon's control socket and writes one .prom file.
 # Run it as a user that can read the subnetra control socket (often root, or a
-# group granted access to /var/run/subnetra.sock).
+# group granted access to /run/subnetra/subnetra.sock).
 NoNewPrivileges=true
 ProtectSystem=full
 PrivateTmp=true

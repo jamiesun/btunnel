@@ -59,7 +59,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     \\  subnetra --version | --help
                     \\
                     \\Environment:
-                    \\  SUBNETRA_SOCK  Control socket path (default /var/run/subnetra.sock).
+                    \\  SUBNETRA_SOCK  Control socket path (default /run/subnetra/subnetra.sock; /var/run/subnetra.sock on macOS).
                     \\
                 , .{});
                 return;

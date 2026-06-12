@@ -66,7 +66,7 @@ Subnetra 是一个用**纯 Zig（锁定 2026 最新标准库 `std.posix`）**编
 ### 模块 2：多网段命令行策略引擎（Policy Engine & CLI）
 
 - [ ] **CIDR 动态解析：** 支持将 `"192.168.1.0/24"` 字符串高效解析为 u32 网络号与掩码。
-- [ ] **Unix Domain Socket（UDS）通信：** 守护进程监听 `/var/run/subnetra.sock`。
+- [ ] **Unix Domain Socket（UDS）通信：** 守护进程监听 `/run/subnetra/subnetra.sock`（macOS 为 `/var/run/subnetra.sock`）。
 - [ ] **独立控制工具 subnetra：** 20KB 的轻量客户端，通过 UDS 向主进程动态发送明文指令：
   - `subnetra policy add --src X --dst Y --action forward --target Z`
   - `subnetra policy show`

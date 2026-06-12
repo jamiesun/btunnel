@@ -1,6 +1,8 @@
 //! Task 7: Control-plane Unix domain socket.
 //!
-//! The daemon binds /var/run/subnetra.sock (AF_UNIX, SOCK_DGRAM), receives
+//! The daemon binds the control socket (AF_UNIX, SOCK_DGRAM; default
+//! `/run/subnetra/subnetra.sock` on Linux, `/var/run/subnetra.sock` on macOS —
+//! see `SOCKET_PATH`), receives
 //! plaintext command datagrams from subnetra, tokenizes them, rebuilds the policy
 //! tree, and injects it into the data plane via policy's atomic swap interface
 //! (lock-free RCU).
@@ -18,14 +20,29 @@ const policy = @import("policy.zig");
 const peer = @import("peer.zig");
 const stats = @import("stats.zig");
 
-pub const SOCKET_PATH = "/var/run/subnetra.sock";
+/// Default control-socket path. Platform-aware so the compiled default matches
+/// the shipped deployment on each OS without an env override:
+///   - Linux: `/run/subnetra/subnetra.sock` — a per-service runtime subdir, the
+///     systemd `RuntimeDirectory=subnetra` convention (see `deploy/subnetrad.service`).
+///   - macOS: `/var/run/subnetra.sock` — `/run` does not exist on macOS, but
+///     `/var/run` always does.
+/// Both the daemon and the `subnetra` CLI read this same constant, so a manual
+/// `subnetra ...` invocation (no `SUBNETRA_SOCK` set) targets the socket the
+/// daemon actually bound. The daemon best-effort-creates the parent dir on bind.
+pub const SOCKET_PATH = if (builtin.os.tag == .macos)
+    "/var/run/subnetra.sock"
+else
+    "/run/subnetra/subnetra.sock";
 
 /// Default snapshot file `save` serializes the live policy tree to (as replayable
 /// `policy add` command lines). Deliberately NOT config.json: the config schema
 /// carries no policy section in v1, so the operator-driven policy state is
 /// persisted as a separate, replayable command snapshot instead of being merged
-/// back into the daemon's startup config.
-pub const SAVE_PATH = "/var/run/subnetra.policy";
+/// back into the daemon's startup config. Lives alongside the socket.
+pub const SAVE_PATH = if (builtin.os.tag == .macos)
+    "/var/run/subnetra.policy"
+else
+    "/run/subnetra/subnetra.policy";
 
 /// Upper bound on installed policy rules. The control plane keeps two fixed
 /// buffers of this size (double-buffered RCU), so memory is allocation-free and
@@ -186,6 +203,23 @@ fn openDgramSocket(path: []const u8) ControlError!sys.fd_t {
 
     const fd = sys.socket(sys.AF.UNIX, sys.SOCK.DGRAM, 0, true, true) catch return error.SocketFailed;
     errdefer _ = sys.close(fd);
+
+    // Best-effort: create the parent runtime dir (e.g. /run/subnetra) so the
+    // compiled default path works even when no init system pre-created it (a
+    // manual `sudo subnetrad` run, or OpenWrt). One level only — /run already
+    // exists on Linux. Under systemd the dir is already present via
+    // `RuntimeDirectory=subnetra` (EEXIST is fine). macOS uses a flat
+    // /var/run/subnetra.sock, whose parent always exists, so skip it there.
+    if (builtin.os.tag == .linux) {
+        if (std.mem.lastIndexOfScalar(u8, path, '/')) |slash| {
+            var dir_buf: [108]u8 = undefined;
+            if (slash > 0 and slash < dir_buf.len) {
+                @memcpy(dir_buf[0..slash], path[0..slash]);
+                dir_buf[slash] = 0;
+                sys.mkdir(@ptrCast(&dir_buf), 0o755);
+            }
+        }
+    }
 
     // Best-effort removal of a stale socket from a previous run.
     _ = sys.unlink(@ptrCast(&a.addr.path));

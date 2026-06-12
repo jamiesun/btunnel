@@ -45,14 +45,14 @@
 其它任何 target 则中继给该对端 id：
 
 ```bash
-export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
+# 在 Linux 上 CLI 默认值已与守护进程一致，无需设置 SUBNETRA_SOCK。
 # 把本节点自身的叠加地址本地投递。
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.9/32  --action forward --target 0
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.9/32  --action forward --target 0
 # 把一个下游前缀中继给 peer 5；其余一切上送 Hub（peer 1）。
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.32/27 --action forward --target 5
-sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/24  --action forward --target 1
-sudo -E subnetra policy show      # 核对顺序
-sudo -E subnetra save             # 跨重启持久化
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.32/27 --action forward --target 5
+sudo subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.0/24  --action forward --target 1
+sudo subnetra policy show      # 核对顺序
+sudo subnetra save             # 跨重启持久化
 ```
 
 每个对端仍必须带上正确的 `allowed_src`，以匹配它被允许声称的内层源——该绑定无论这些规则

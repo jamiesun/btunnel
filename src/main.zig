@@ -51,7 +51,7 @@ const USAGE =
     \\
     \\Environment:
     \\  SUBNETRA_CONFIG  Config path (overridden by --config).
-    \\  SUBNETRA_SOCK    Control socket path (default /var/run/subnetra.sock).
+    \\  SUBNETRA_SOCK    Control socket path (default /run/subnetra/subnetra.sock; /var/run/subnetra.sock on macOS).
     \\  SUBNETRA_TUN     TUN interface name (default snr0).
     \\
     \\The daemon never mutates host networking; use --print-network-plan to emit

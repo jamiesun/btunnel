@@ -85,9 +85,11 @@ subnetra save
 
 | Variable | Description |
 |---|---|
-| `SUBNETRA_SOCK` | Path to the control Unix domain socket. Set it to match the service unit (e.g. `/run/subnetra/subnetra.sock`) so `subnetra` and `subnetrad` agree. |
+| `SUBNETRA_SOCK` | Path to the control Unix domain socket. **Defaults to `/run/subnetra/subnetra.sock` (Linux) / `/var/run/subnetra.sock` (macOS)** — the same path the daemon binds and the systemd unit uses, so `subnetra` and `subnetrad` agree out of the box. Set this only to use a non-default path (both processes must match). |
 
 ```bash
+# Usually unnecessary — the default already matches the daemon. Set it only
+# when you run the daemon on a custom socket path:
 export SUBNETRA_SOCK=/run/subnetra/subnetra.sock
 sudo -E subnetra status
 ```
