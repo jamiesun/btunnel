@@ -23,9 +23,8 @@ pub const DEFAULT_TUN_MTU: u16 = netplan.maxTunMtu(netplan.DEFAULT_PATH_MTU);
 /// Maximum number of mesh peers a single node can be configured with. Fixed at
 /// compile time so the registry and parsed config stay zero-allocation,
 /// fixed-capacity arrays (issue #5). Set via the `-Dmax-peers` build option
-/// (default 16, capped at 128); a hub manages at most this many spokes.
-/// `uds.MAX_POLICY_ENTRIES` is derived from this value, so the default 16 keeps
-/// the historical 256-entry policy table.
+/// (default 32, capped at 128); a hub manages at most this many spokes.
+/// `uds.MAX_POLICY_ENTRIES` is derived from this value (default 32 → 272).
 pub const MAX_PEERS: usize = build_options.max_peers;
 
 /// Maximum length of an optional, human-readable peer name (e.g. `bj-office-gw`).

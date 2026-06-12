@@ -58,7 +58,7 @@ Each entry of `peers[]`:
 > peers is rejected with `DuplicatePsk`.
 
 > **Peer cap.** `peers[]` has a fixed, zero-allocation capacity chosen at build
-> time by `-Dmax-peers` (default **16**, max **128**); a hub manages at most this
+> time by `-Dmax-peers` (default **32**, max **128**); a hub manages at most this
 > many spokes, and the policy-table size scales with it. See
 > [Tuning the peer cap](../getting-started/installation.md#tuning-the-peer-cap).
 

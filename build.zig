@@ -16,11 +16,11 @@ pub fn build(b: *std.Build) void {
     // Compile-time peer-table capacity (`config.MAX_PEERS`). The peer registry
     // and parsed config are fixed-capacity, zero-allocation arrays, so the cap is
     // a build option rather than a runtime knob (matches the recompile-to-change
-    // ethos). Default 16; capped at 128 — beyond that the single-threaded
+    // ethos). Default 32; capped at 128 — beyond that the single-threaded
     // reactor's O(N)-per-packet peer/policy scans dominate and splitting into
     // multiple hubs is the right answer. `uds.MAX_POLICY_ENTRIES` is derived from
-    // this value (default 16 keeps the historical 256-entry table).
-    const max_peers = b.option(usize, "max-peers", "Max mesh peers per node (1..128, default 16)") orelse 16;
+    // this value (default 32 → a 272-entry policy table).
+    const max_peers = b.option(usize, "max-peers", "Max mesh peers per node (1..128, default 32)") orelse 32;
     if (max_peers < 1 or max_peers > 128) {
         std.log.err("-Dmax-peers must be in 1..128 (got {d})", .{max_peers});
         std.process.exit(1);
