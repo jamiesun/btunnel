@@ -108,6 +108,8 @@ sudo -E subnetra policy add --src 0.0.0.0/0 --dst 10.0.0.2/32 --action forward -
   `18020, 18023, 18026`（不是范围），避开 WireGuard 知名端口指纹；单个端口被封锁或限速也
   不会让节点离线。
 - 每个 **Spoke** 只需要对 Hub 的 **出站** UDP 可达性——无需入站端口转发（由 Spoke 发起）。
+  因此 Spoke 只需 **一个** 监听端口（按角色而定的默认值只绑定 `[18020]`）；多个
+  `listen_ports` 是 Hub 一侧的特性，因为 Hub 才是被 Spoke 主动连接的可达端点。
 - 若某 Spoke 的 NAT 映射变化，Hub 会从下一个已认证数据报重新学习它的新 endpoint。保持
   **Hub** 端点稳定；Spoke 始终发起。
 

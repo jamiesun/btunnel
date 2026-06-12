@@ -116,7 +116,10 @@ stable schema for monitoring. See
   avoiding WireGuard's well-known port fingerprint and keeping the node reachable
   if one port is blocked or throttled.
 - Each **spoke** needs only **outbound** UDP reachability to the hub — no inbound
-  port-forwarding (the spoke initiates).
+  port-forwarding (the spoke initiates). A spoke therefore only needs **one**
+  listen port (the role-aware default binds just `[18020]`); multiple
+  `listen_ports` are a hub-side feature, because the hub is the reachable endpoint
+  that spokes target.
 - If a spoke's NAT mapping changes, the hub re-learns its new endpoint from the
   next authenticated datagram. Keep the **hub** endpoint stable; spokes always
   initiate.

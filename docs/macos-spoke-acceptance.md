@@ -72,7 +72,7 @@ subnetrad --check --config /etc/subnetra/config.json
 **Expect** a single line, exit 0, e.g.:
 
 ```text
-subnetra vX.Y.Z (mtu=1400, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
+subnetra vX.Y.Z (mtu=1400, udp_ports={ 18020 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 A non-zero exit (`InvalidPsk`, `InvalidConfig`, …) means the config is wrong —
@@ -111,7 +111,7 @@ sudo subnetrad --config /etc/subnetra/config.json
 **Expect** a `[ready]` banner naming the kernel-assigned interface:
 
 ```text
-subnetra vX.Y.Z (mtu=1400, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) tun=utun4 sock=/var/run/subnetra.sock [ready]
+subnetra vX.Y.Z (mtu=1400, udp_ports={ 18020 }, mode=raw_direct, local_id=2, peers=1) tun=utun4 sock=/var/run/subnetra.sock [ready]
 ```
 
 Note the real name (here `utun4`). **Checkpoint A — `utun` came up:**
