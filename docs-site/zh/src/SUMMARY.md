@@ -26,6 +26,7 @@
 - [RouterOS Spoke](operations/routeros.md)
 - [OpenWrt Spoke](operations/openwrt.md)
 - [macOS Spoke](operations/macos-spoke.md)
+- [出口节点与 outbound](operations/exit-node.md)
 - [可观测性与排障](operations/observability.md)
 - [升级与发布](operations/upgrade.md)
 

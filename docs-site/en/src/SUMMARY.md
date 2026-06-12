@@ -26,6 +26,7 @@
 - [RouterOS Spoke](operations/routeros.md)
 - [OpenWrt Spoke](operations/openwrt.md)
 - [macOS Spoke](operations/macos-spoke.md)
+- [Exit Node & Outbound](operations/exit-node.md)
 - [Observability & Troubleshooting](operations/observability.md)
 - [Upgrade & Release](operations/upgrade.md)
 
