@@ -46,9 +46,9 @@ else
     "/run/subnetra/subnetra.policy";
 
 /// Headroom for operator-added policy rules layered on top of the role-derived
-/// table. Sized so the default `config.MAX_PEERS = 16` reproduces the historical
-/// 256-entry table (16 + MAX_ROUTES*2 + 224 = 256), keeping the default build's
-/// behavior unchanged.
+/// table (one forward rule per spoke + route rules). 224 leaves ample room for
+/// manual `policy add` rules; with the default `config.MAX_PEERS = 32` the table
+/// is 32 + MAX_ROUTES*2 + 224 = 272 entries.
 const POLICY_HEADROOM: usize = 224;
 
 /// Upper bound on installed policy rules. Derived from `config.MAX_PEERS` so a
