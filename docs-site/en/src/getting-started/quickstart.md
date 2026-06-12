@@ -62,7 +62,7 @@ the network:
 
 ```bash
 subnetrad --check --config config.json
-# subnetra v… (mtu=1452, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
+# subnetra v… (mtu=1452, udp_ports={ 18020 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 ## 4. Print and apply the host network plan

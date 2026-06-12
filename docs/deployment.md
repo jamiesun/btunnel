@@ -92,7 +92,7 @@ Validate before starting:
 
 ```bash
 sudo subnetrad --check --config /etc/subnetra/config.json
-# subnetra v… (mtu=1400, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
+# subnetra v… (mtu=1400, udp_ports={ 18020 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 `--config` is optional; without it the daemon reads `./config.json` from its
@@ -533,7 +533,9 @@ spoke.
   avoiding WireGuard's well-known port fingerprint and keeping the node reachable
   if one port is blocked or throttled.
 - Each **Spoke** only needs **outbound** UDP reachability to the Hub's
-  `ip:port`; no inbound port-forwarding is required (the spoke initiates).
+  `ip:port`; no inbound port-forwarding is required (the spoke initiates). A spoke
+  therefore only needs **one** listen port (the role-aware default binds just
+  `[18020]`); multiple `listen_ports` are a hub-side feature.
 - If a spoke's NAT mapping changes, the Hub re-learns the spoke's new endpoint
   from its next authenticated datagram (issue #34), so replies follow it
   automatically. Keep the **Hub** endpoint stable; spokes always initiate.

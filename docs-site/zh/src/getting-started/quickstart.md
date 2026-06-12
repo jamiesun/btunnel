@@ -59,7 +59,7 @@ openssl rand -hex 32
 
 ```bash
 subnetrad --check --config config.json
-# subnetra v… (mtu=1452, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
+# subnetra v… (mtu=1452, udp_ports={ 18020 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 ## 4. 打印并应用主机网络规划

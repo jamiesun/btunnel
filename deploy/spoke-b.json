@@ -2,7 +2,7 @@
   "negotiation_version": 1,
   "role": "spoke",
   "local_tun_mtu": 1400,
-  "listen_ports": [18020, 18023, 18026],
+  "listen_ports": [18020],
   "virtual_subnet": "10.0.0.0/24",
   "local_id": 3,
   "obfuscate": true,

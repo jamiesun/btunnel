@@ -82,7 +82,7 @@ sudo install -m 0600 -o root -g root deploy/spoke-a.json /etc/subnetra/config.js
 
 ```bash
 sudo subnetrad --check --config /etc/subnetra/config.json
-# subnetra v… (mtu=1400, udp_ports={ 18020, 18023, 18026 }, mode=raw_direct, local_id=2, peers=1) [config ok]
+# subnetra v… (mtu=1400, udp_ports={ 18020 }, mode=raw_direct, local_id=2, peers=1) [config ok]
 ```
 
 `--config` 是可选的；不指定时守护进程会从其工作目录读取 `./config.json`（或 `$SUBNETRA_CONFIG`）。
@@ -456,6 +456,7 @@ sudo systemctl restart subnetrad
   `18020, 18023, 18026`（不是范围），避开 WireGuard 知名端口指纹；单个端口被封锁或限速也
   不会让节点离线。
 - 每个 **Spoke** 只需要对 Hub 的 `ip:port` 有**出站** UDP 可达性；无需任何入站端口转发（由 spoke 发起）。
+  因此 Spoke 只需 **一个** 监听端口（按角色而定的默认值只绑定 `[18020]`）；多个 `listen_ports` 是 Hub 一侧的特性。
 - 如果某个 spoke 的 NAT 映射发生变化，Hub 会从它下一个已认证数据报中重新学习该 spoke 的新端点
   （issue #34），因此回包会自动跟随。保持 **Hub** 端点稳定；始终由 spoke 发起。
 

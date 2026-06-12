@@ -83,6 +83,21 @@ fn defaultKeepaliveSecs(role: Role) u32 {
     };
 }
 
+/// The listen-port set for a role when the config omits BOTH `listen_ports` and
+/// `listen_port`. A spoke sits behind NAT and is never the targeted endpoint —
+/// the hub always replies to the spoke's source port — so it only needs ONE
+/// listen port; extra ports on a spoke would just sit idle (multi-port listening
+/// is a fault-tolerance feature for the reachable side). A hub (and `manual`) IS
+/// the reachable endpoint, so it binds the full default set so a single blocked
+/// port does not take it offline. The spoke takes the primary (first) default
+/// port; an explicit `listen_ports` always overrides this.
+fn defaultListenPorts(role: Role) []const u16 {
+    return switch (role) {
+        .spoke => DEFAULT_LISTEN_PORTS[0..1],
+        .manual, .hub => DEFAULT_LISTEN_PORTS[0..],
+    };
+}
+
 pub const SanityError = error{
     MtuOutOfRange,
     SubnetOverlap,
@@ -496,6 +511,17 @@ pub const Config = struct {
         // `peers[].psk` instead of believing a shared key is still in force.
         if (w.psk.len != 0) return error.InvalidPsk;
 
+        // Parse the role up front: it is a primary attribute that selects the
+        // per-role defaults below (listen ports, keepalive).
+        const role: Role = if (std.mem.eql(u8, w.role, "manual"))
+            .manual
+        else if (std.mem.eql(u8, w.role, "hub"))
+            .hub
+        else if (std.mem.eql(u8, w.role, "spoke"))
+            .spoke
+        else
+            return error.InvalidRole;
+
         var cfg = Config{
             .negotiation_version = w.negotiation_version,
             .local_tun_mtu = w.local_tun_mtu,
@@ -505,11 +531,13 @@ pub const Config = struct {
             else
                 parseCidr(w.local_tun_ip) catch return error.InvalidCidr,
             .local_id = w.local_id,
+            .role = role,
         };
 
         // Resolve the listen-port set: an explicit `listen_ports` array wins;
-        // else the singular `listen_port`; else the (non-51820) defaults. Listed
-        // explicitly — never computed from a range (issue: multi-port listening).
+        // else the singular `listen_port`; else the role-aware default (a spoke
+        // needs only one port — see `defaultListenPorts`). Listed explicitly —
+        // never computed from a range (issue: multi-port listening).
         if (w.listen_ports) |ports| {
             if (ports.len == 0) return error.NoListenPort;
             if (ports.len > MAX_LISTEN_PORTS) return error.TooManyListenPorts;
@@ -522,7 +550,12 @@ pub const Config = struct {
             if (p == 0) return error.InvalidListenPort;
             cfg.listen_ports[0] = p;
             cfg.listen_port_count = 1;
-        } // else: keep the comptime DEFAULT_LISTEN_PORTS already in `cfg`.
+        } else {
+            // Neither field present: fall back to the role-aware default set.
+            const dflt = defaultListenPorts(role);
+            for (dflt, 0..) |p, i| cfg.listen_ports[i] = p;
+            cfg.listen_port_count = dflt.len;
+        }
 
         if (w.peers.len > MAX_PEERS) return error.TooManyPeers;
         for (w.peers, 0..) |wp, i| {
@@ -544,23 +577,14 @@ pub const Config = struct {
         }
         cfg.peer_count = w.peers.len;
 
-        // Simplified-config fields (issue #21). Parse-copy every route out by
-        // value so nothing borrows the parse arena.
-        cfg.role = if (std.mem.eql(u8, w.role, "manual"))
-            .manual
-        else if (std.mem.eql(u8, w.role, "hub"))
-            .hub
-        else if (std.mem.eql(u8, w.role, "spoke"))
-            .spoke
-        else
-            return error.InvalidRole;
-
         // Keepalive interval (issue #96): an explicit value wins; otherwise fall
         // back to the role default (spoke → DEFAULT_SPOKE_KEEPALIVE_SECS, else 0),
         // so a plain `role=spoke` config gets NAT keepalive with no extra knob.
-        cfg.keepalive_secs = w.keepalive_secs orelse defaultKeepaliveSecs(cfg.role);
+        cfg.keepalive_secs = w.keepalive_secs orelse defaultKeepaliveSecs(role);
         cfg.obfuscate = w.obfuscate;
 
+        // Simplified-config fields (issue #21). Parse-copy every route out by
+        // value so nothing borrows the parse arena.
         if (w.local_routes.len > MAX_ROUTES) return error.TooManyRoutes;
         for (w.local_routes, 0..) |r, i| {
             cfg.local_routes[i] = parseCidr(r) catch return error.InvalidCidr;
@@ -861,6 +885,29 @@ test "fromJson: keepalive_secs defaults per role and honors an explicit override
     try std.testing.expectEqual(@as(u32, 7), spoke_override.keepalive_secs);
     const spoke_off = try Config.fromJson(a, "{ \"role\": \"spoke\", \"local_id\": 2, \"keepalive_secs\": 0 }");
     try std.testing.expectEqual(@as(u32, 0), spoke_off.keepalive_secs);
+}
+
+test "fromJson: listen-port default is role-aware — a spoke binds one port, a hub the full set" {
+    const a = std.testing.allocator;
+
+    // A spoke that omits listen_ports binds exactly ONE port (the primary
+    // default): it sits behind NAT and is never the targeted endpoint, so extra
+    // listen ports would just sit idle.
+    const spoke = try Config.fromJson(a, "{ \"role\": \"spoke\", \"local_id\": 2 }");
+    try std.testing.expectEqual(@as(usize, 1), spoke.listen_port_count);
+    try std.testing.expectEqualSlices(u16, &[_]u16{DEFAULT_LISTEN_PORTS[0]}, spoke.listenPorts());
+
+    // A hub (and a default/manual node) binds the full multi-port default set
+    // so a single blocked port does not take the reachable endpoint offline.
+    const hub = try Config.fromJson(a, "{ \"role\": \"hub\", \"local_id\": 1 }");
+    try std.testing.expectEqualSlices(u16, &DEFAULT_LISTEN_PORTS, hub.listenPorts());
+    const manual = try Config.fromJson(a, "{ \"local_id\": 1 }");
+    try std.testing.expectEqualSlices(u16, &DEFAULT_LISTEN_PORTS, manual.listenPorts());
+
+    // An explicit listen_ports always wins, even on a spoke (config format is
+    // unchanged: the same array key, here with two entries).
+    const spoke_multi = try Config.fromJson(a, "{ \"role\": \"spoke\", \"local_id\": 2, \"listen_ports\": [18020, 18023] }");
+    try std.testing.expectEqualSlices(u16, &[_]u16{ 18020, 18023 }, spoke_multi.listenPorts());
 }
 
 test "fromJson: obfuscate defaults on (stealth by default) and an explicit false is honored" {
